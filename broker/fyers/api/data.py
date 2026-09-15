@@ -391,6 +391,11 @@ class BrokerData:
         try:
             # Convert symbol to broker format
             br_symbol = get_br_symbol(symbol, exchange)
+            if not br_symbol:
+                raise Exception(
+                    f"Symbol '{symbol}' not found in {exchange} master contracts. "
+                    "Refresh master contracts (Settings -> Contract Downloads) or search the exact tradable symbol."
+                )
             logger.debug(f"Using broker symbol: {br_symbol}")
 
             # Check for unsupported timeframes first

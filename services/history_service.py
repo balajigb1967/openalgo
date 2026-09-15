@@ -135,6 +135,41 @@ def get_history_with_auth(
         if "oi" not in df.columns:
             df["oi"] = 0
 
+        if df.empty:
+            # Distinguish "contract exists but never trades intraday" from
+            # "no data at all" so charts show an actionable error instead of
+            # a silently blank canvas. Illiquid / far-month MCX contracts
+            # (e.g. COTTON, KAPAS, index dexes) carry daily marks at zero
+            # volume, and brokers serve no intraday candles for them.
+            try:
+                probe = data_handler.get_history(symbol, exchange, "D", start_date, end_date)
+            except Exception:
+                probe = pd.DataFrame()
+            if not probe.empty:
+                return (
+                    False,
+                    {
+                        "status": "error",
+                        "message": (
+                            f"No intraday candles for {exchange}:{symbol} between {start_date} and {end_date}. "
+                            "The contract has zero trading volume (illiquid or far-month), so the broker serves no intraday data. "
+                            "Daily ('D') candles are available - switch the interval to 'D' or chart a liquid near-month contract."
+                        ),
+                    },
+                    404,
+                )
+            return (
+                False,
+                {
+                    "status": "error",
+                    "message": (
+                        f"No historical data for {exchange}:{symbol} between {start_date} and {end_date}. "
+                        "Verify the symbol via symbol search, or select a traded contract within this date range."
+                    ),
+                },
+                404,
+            )
+
         return True, {"status": "success", "data": df.to_dict(orient="records")}, 200
     except Exception as e:
         logger.exception(f"Error in broker_module.get_history: {e}")
