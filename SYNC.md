@@ -14,19 +14,18 @@ belongs in an upstream PR, not a direct commit.
 ## One-click sync (recommended)
 
 Desktop → **FNO-Server-Manager** → **[19] Sync OpenAlgo Fork**.
-It runs `sync-openalgo-fork` in `C:\Terminal\openalgo` and shows the output.
+It calls `C:\Terminal\openalgo-sync.bat` and shows the output.
+
+Note: the *runtime* copy of the script lives outside the repo on purpose —
+the sync switches branches, and a script inside the repo would delete
+itself mid-run when leaving `fno-custom` (where it is committed) for
+`main`. If `C:\Terminal\openalgo-sync.bat` is ever lost, restore it from
+`sync-openalgo-fork.bat` on the `fno-custom` branch.
 
 ## Manual sync
 
 ```bat
-cd C:\Terminal\openalgo
-git switch main
-git fetch upstream
-git merge --ff-only upstream/main
-git push origin main
-git switch fno-custom
-git rebase main
-git push --force-with-lease origin fno-custom
+call C:\Terminal\openalgo-sync.bat
 ```
 
 ## Conflict policy
