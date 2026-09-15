@@ -22,6 +22,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type TVSyncResult, tvWatchlistApi } from '@/api/tv-watchlist'
 import { type Watchlist, type WatchlistItem, watchlistApi, watchlistError } from '@/api/watchlist'
 import { Button } from '@/components/ui/button'
 import {
@@ -42,6 +43,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { type PriceableItem, useLivePrice } from '@/hooks/useLivePrice'
 import { useMarketStatus } from '@/hooks/useMarketStatus'
 import { needsPreviousClose, previousClose } from '@/lib/trading/previousClose'
@@ -236,6 +238,12 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
     value: string
   } | null>(null)
   const [confirm, setConfirm] = useState<{ kind: 'delete' | 'clear'; name: string } | null>(null)
+
+  /** Paste-import (TradingView-style symbols) targeting the active list. */
+  const [pasteOpen, setPasteOpen] = useState(false)
+  const [pasteText, setPasteText] = useState('')
+  const [pasting, setPasting] = useState(false)
+  const [pasteResult, setPasteResult] = useState<TVSyncResult | null>(null)
 
   const fileRef = useRef<HTMLInputElement>(null)
   const { isMarketOpen } = useMarketStatus()
@@ -646,6 +654,27 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
     }
   }
 
+  const runPasteImport = async () => {
+    if (!active || !pasteText.trim()) return
+    setPasting(true)
+    setPasteResult(null)
+    try {
+      // Historify is deliberately not touched from here: this panel adds to
+      // the list the user is looking at. Cross-watchlist sync targets are
+      // configured on the TradingView page.
+      const result = await tvWatchlistApi.import(pasteText, active.id, false)
+      setPasteResult(result)
+      if (result.status === 'success' && result.added > 0) {
+        await refresh(active.id)
+        setPasteText('')
+      }
+    } catch {
+      showToast.error('Could not import those symbols')
+    } finally {
+      setPasting(false)
+    }
+  }
+
   /* ── render ───────────────────────────────────────────────────────────── */
   const nameDialogTitle =
     nameDialog?.mode === 'rename'
@@ -694,6 +723,15 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
               Rename...
             </DropdownMenuItem>
             <DropdownMenuSeparator />
+            <DropdownMenuItem
+              disabled={!active}
+              onSelect={() => {
+                setPasteResult(null)
+                setPasteOpen(true)
+              }}
+            >
+              Paste symbols...
+            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => fileRef.current?.click()}>
               Import list...
             </DropdownMenuItem>
@@ -1035,6 +1073,48 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
         search={search}
         onPick={(row) => void addSymbol(row)}
       />
+
+      {/* Paste-import: TradingView-style symbols into the active list. The
+          result block reports per-symbol outcomes, so a mixed paste shows
+          what landed and what did not rather than one blunt toast. */}
+      <Dialog open={pasteOpen} onOpenChange={setPasteOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Paste symbols into {active?.name}</DialogTitle>
+            <DialogDescription>
+              TradingView format works: <code className="font-mono text-xs">NSE:RELIANCE</code>,{' '}
+              <code className="font-mono text-xs">BSE:SENSEX</code>, a bare{' '}
+              <code className="font-mono text-xs">TCS</code> — one per line or comma-separated.
+            </DialogDescription>
+          </DialogHeader>
+          <Textarea
+            autoFocus
+            value={pasteText}
+            onChange={(e) => setPasteText(e.target.value)}
+            placeholder={'NSE:RELIANCE\nBSE:SENSEX\nMCX:CRUDEOIL'}
+            rows={5}
+            className="font-mono text-sm"
+          />
+          {pasteResult && (
+            <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border p-2 text-[12px]">
+              <p className="font-medium">{pasteResult.message}</p>
+              {pasteResult.unresolved.length > 0 && (
+                <p className="text-muted-foreground">
+                  Not found: {pasteResult.unresolved.map((u) => u.tv_symbol).join(', ')}
+                </p>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPasteOpen(false)}>
+              Close
+            </Button>
+            <Button disabled={pasting || !pasteText.trim()} onClick={() => void runPasteImport()}>
+              {pasting ? 'Importing…' : 'Add to list'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Create / rename / copy */}
       <Dialog open={nameDialog !== null} onOpenChange={(open) => !open && setNameDialog(null)}>

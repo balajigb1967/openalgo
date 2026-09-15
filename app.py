@@ -107,6 +107,9 @@ from blueprints.system_permissions import (
 from blueprints.telegram import telegram_bp  # Import the telegram blueprint
 from blueprints.traffic import traffic_bp  # Import the traffic blueprint
 from blueprints.tv_json import tv_json_bp
+from blueprints.tv_watchlist import (
+    tv_watchlist_bp,  # Import the TradingView watchlist plugin blueprint
+)
 from blueprints.vol_surface import vol_surface_bp  # Import the vol surface blueprint
 from blueprints.watchlist import watchlist_bp  # Import the charting watchlist blueprint
 from blueprints.websocket_example import websocket_bp  # Import the websocket example blueprint
@@ -131,6 +134,7 @@ from database.strategy_module_db import init_db as ensure_strategy_module_tables
 from database.symbol import init_db as ensure_master_contract_tables_exists
 from database.telegram_db import get_bot_config
 from database.traffic_db import init_logs_db as ensure_traffic_logs_exists
+from database.tv_watchlist_db import init_db as ensure_tv_watchlist_tables_exists
 from database.user_db import init_db as ensure_user_tables_exists
 from database.watchlist_db import init_db as ensure_watchlist_tables_exists
 from database.whatsapp_db import (
@@ -328,6 +332,7 @@ def create_app():
     app.register_blueprint(ivchart_bp)  # Register IV chart blueprint
     app.register_blueprint(scalping_bp)  # Register Scalping terminal blueprint
     app.register_blueprint(watchlist_bp)  # Register charting watchlist blueprint
+    app.register_blueprint(tv_watchlist_bp)  # Register TradingView watchlist plugin blueprint
     app.register_blueprint(oitracker_bp)  # Register OI tracker blueprint
     app.register_blueprint(gamma_density_bp)  # Register Gamma Density blueprint
     app.register_blueprint(straddle_bp)  # Register straddle chart blueprint
@@ -432,6 +437,10 @@ def create_app():
     with app.app_context():
         # Exempt webhook endpoints from CSRF protection
         csrf.exempt(app.view_functions["chartink_bp.webhook"])
+        # The TradingView watchlist webhook. Unauthenticated by design: the
+        # URL token is the credential, and TradingView cannot carry a CSRF
+        # token or an HTTP header.
+        csrf.exempt(app.view_functions["tv_watchlist_bp.webhook"])
         # The strategy module's inbound alert path. Unauthenticated by
         # design: the URL token is the credential, and TradingView cannot
         # carry a CSRF token.
@@ -758,6 +767,7 @@ def setup_environment(app):
                 ("Flow DB", ensure_flow_tables_exists),
                 ("Scalping DB", ensure_scalping_tables_exists),
                 ("Watchlist DB", ensure_watchlist_tables_exists),
+                ("TradingView Watchlist DB", ensure_tv_watchlist_tables_exists),
                 ("Leverage DB", ensure_leverage_tables_exists),
                 ("Strategy Portfolio DB", ensure_strategy_portfolio_tables_exists),
                 ("Agent DB", ensure_agent_tables_exists),
