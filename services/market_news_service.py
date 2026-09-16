@@ -55,8 +55,15 @@ def _parse_feed(name: str, url: str) -> list:
     nodes = root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry")
     for e in nodes[:30]:
         def _t(tag):
-            el = e.find(tag) or e.find(f"{{http://www.w3.org/2005/Atom}}{tag}")
-            return (el.text or "").strip() if el is not None and el.text else ""
+            # NB: ElementTree elements are FALSY when they have no children, so
+            # `e.find(a) or e.find(b)` would drop a perfectly good <title>.
+            # Explicit None checks are mandatory here.
+            el = e.find(tag)
+            if el is None:
+                el = e.find(f"{{http://www.w3.org/2005/Atom}}{tag}")
+            if el is None or el.text is None:
+                return ""
+            return el.text.strip()
         title = unescape(_t("title")).strip()
         if not title:
             continue
