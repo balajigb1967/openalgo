@@ -400,7 +400,7 @@ def orderflow_live_quote(symbol: str) -> dict:
     Reuses the service's own resolution so 'NSE:NIFTY 50' resolves to the
     near-month future exactly like the orderflow bars do."""
     try:
-        target_info = _resolve_futures_cached(symbol)
+        target_info = resolve_orderflow_target(symbol)
         if not target_info:
             return {"status": "error", "message": "unresolved symbol"}
         active_sym = target_info["target_symbol"]
