@@ -1,4 +1,4 @@
-import { LayoutGrid, Link2 as LinkIcon } from 'lucide-react'
+import { Crosshair, LayoutGrid, Link2 as LinkIcon } from 'lucide-react'
 import { type ChartObjects, createLinkGroup, type LinkGroup } from 'openalgo-charts'
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { Navbar } from '@/components/layout/Navbar'
@@ -30,6 +30,10 @@ const NewsPanel = lazy(() =>
 const CalendarPanel = lazy(() =>
   import('@/components/trading/CalendarPanel').then((m) => ({ default: m.CalendarPanel }))
 )
+// Embedded scalper terminal — overlays the chart grid like a third pane.
+const ScalperTerminal = lazy(() =>
+  import('@/components/scalping/ScalperTerminal').then((m) => ({ default: m.ScalperTerminal }))
+)
 
 import { ChartPane } from '@/components/trading/ChartPane'
 import { DrawingRail } from '@/components/trading/DrawingRail'
@@ -57,6 +61,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import type { AgentChartCommand } from '@/lib/agent/stream'
 import { LAYOUTS, LayoutIcon } from '@/lib/chart/layouts'
+import { setSyncSymbol } from '@/lib/scalperSync'
 import type { DrawStats, SearchRow, TradingTerminal } from '@/lib/trading/terminal'
 import { cn } from '@/lib/utils'
 
@@ -80,10 +85,20 @@ const PANEL_KEY = 'oa-trading-panel'
  * Buy button live because storage was cleared or blocked.
  */
 const ARMED_KEY = 'oa-trading-armed'
+/** Whether the embedded scalper terminal overlays the chart grid ('1'/'0'). */
+const SCALPER_KEY = 'oa-trading-scalper-terminal'
 
 function readArmed(): boolean {
   try {
     return localStorage.getItem(ARMED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function readScalperOpen(): boolean {
+  try {
+    return localStorage.getItem(SCALPER_KEY) === '1'
   } catch {
     return false
   }
@@ -147,6 +162,17 @@ export default function Trading() {
   const [apiKey, setApiKey] = useState<string | null>(null)
   const [wsUrl, setWsUrl] = useState<string | null>(null)
   const [noApiKey, setNoApiKey] = useState(false)
+
+  /* ── embedded scalper terminal (overlays the chart grid) ─────────────── */
+  const [scalperOpen, setScalperOpen] = useState<boolean>(readScalperOpen)
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SCALPER_KEY, scalperOpen ? '1' : '0')
+    } catch {
+      // Storage refused: the toggle still works for this visit.
+    }
+  }, [scalperOpen])
 
   /* ── one drawing rail for every pane ─────────────────────────────────── */
   const [tool, setTool] = useState<string | null>(null)
@@ -226,6 +252,17 @@ export default function Trading() {
   const noteSymbol = useCallback((paneId: string, key: string | null) => {
     setPaneSymbols((prev) => (prev[paneId] === key ? prev : { ...prev, [paneId]: key }))
   }, [])
+
+  /**
+   * Publish the focused pane's symbol to the scalper sync bus. The embedded
+   * terminal follows it (when its SYNC toggle is on), exactly like the
+   * watchlist and option chain follow the focused pane — one publisher, one
+   * consumer, no panel knows the other exists.
+   */
+  const focusedSymbol = paneSymbols[focusedPane] ?? null
+  useEffect(() => {
+    setSyncSymbol(focusedSymbol ?? '')
+  }, [focusedSymbol])
 
   /**
    * Load an instrument chosen in a side panel.
@@ -581,6 +618,25 @@ export default function Trading() {
     </label>
   )
 
+  /**
+   * Scalper, beside the pickers for the same reason: a workspace control. The
+   * button lights while the terminal is open — Escape or its ✕ closes it —
+   * and the label mirrors One-Click's dropped-below-lg convention.
+   */
+  const scalperControl = (
+    <Button
+      variant="outline"
+      size="icon"
+      className={cn('h-8 w-8 shrink-0', scalperOpen && 'border-primary/50 text-primary')}
+      title={scalperOpen ? 'Close the scalper terminal' : 'Open the scalper terminal'}
+      aria-label="Scalper terminal"
+      aria-pressed={scalperOpen}
+      onClick={() => setScalperOpen((v) => !v)}
+    >
+      <Crosshair className="h-4 w-4" />
+    </Button>
+  )
+
   return (
     <>
       {/* Full-bleed page: the nav must match the chart width, not
@@ -601,7 +657,14 @@ export default function Trading() {
               onShortcut={onDrawKey}
             />
           )}
-          <div className="min-h-0 min-w-0 flex-1">
+          <div className="relative min-h-0 min-w-0 flex-1">
+            {/* Embedded scalper terminal — floats over the grid like a study
+                pane; the charts keep streaming underneath. */}
+            {scalperOpen && apiKey && wsUrl && (
+              <Suspense fallback={null}>
+                <ScalperTerminal apiKey={apiKey} armed={armed} onClose={() => setScalperOpen(false)} />
+              </Suspense>
+            )}
             {noApiKey ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
                 <p className="text-sm text-muted-foreground">No API key found for charting.</p>
@@ -643,6 +706,7 @@ export default function Trading() {
                           {layoutPicker}
                           {syncPicker}
                           {armedControl}
+                          {scalperControl}
                         </>
                       ) : undefined
                     }
