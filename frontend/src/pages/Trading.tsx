@@ -15,6 +15,12 @@ const AgentPanel = lazy(() =>
 const MarketDepthPanelContainer = lazy(() =>
   import('@/components/trading/MarketDepthPanelContainer').then((m) => ({ default: m.MarketDepthPanelContainer }))
 )
+const ScalperAdvisorPanel = lazy(() =>
+  import('@/components/trading/ScalperAdvisorPanel').then((m) => ({ default: m.ScalperAdvisorPanel }))
+)
+const OrderflowPanel = lazy(() =>
+  import('@/components/trading/OrderflowPanel').then((m) => ({ default: m.OrderflowPanel }))
+)
 
 import { ChartPane } from '@/components/trading/ChartPane'
 import { DrawingRail } from '@/components/trading/DrawingRail'
@@ -667,6 +673,16 @@ export default function Trading() {
                 exchange={(paneSymbols[focusedPane] ?? '').split(':')[0] ?? ''}
                 symbol={(paneSymbols[focusedPane] ?? '').split(':')[1] ?? ''}
               />
+            </Suspense>
+          )}
+          {apiKey && wsUrl && panel === 'scalper' && (
+            <Suspense fallback={null}>
+              <ScalperAdvisorPanel apiKey={apiKey} />
+            </Suspense>
+          )}
+          {apiKey && wsUrl && panel === 'orderflow' && (
+            <Suspense fallback={null}>
+              <OrderflowPanel apiKey={apiKey} activeSymbol={paneSymbols[focusedPane] ?? null} />
             </Suspense>
           )}
           {apiKey && wsUrl && panel === 'agent' && (
