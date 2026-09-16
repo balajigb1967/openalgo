@@ -652,24 +652,24 @@ export default function Trading() {
               activeSymbol={paneSymbols[focusedPane] ?? null}
             />
           )}
-{apiKey && wsUrl && panel === 'options' && (
-             <OptionChainPanel
-               apiKey={apiKey}
-               onPick={sendToFocusedPane}
-               activeSymbol={paneSymbols[focusedPane] ?? null}
-             />
-           )}
-{apiKey && wsUrl && panel === 'depth' && (
-  <Suspense fallback={null}>
-    <MarketDepthPanelContainer
-      apiKey={apiKey}
-      wsUrl={wsUrl}
-      symbol={paneSymbols[focusedPane]?.split(':')[0] ?? ''}
-      exchange={paneSymbols[focusedPane]?.split(':')[1] ?? ''}
-    />
-  </Suspense>
-)}
-           {apiKey && wsUrl && panel === 'agent' && (
+          {apiKey && wsUrl && panel === 'options' && (
+            <OptionChainPanel
+              apiKey={apiKey}
+              onPick={sendToFocusedPane}
+              activeSymbol={paneSymbols[focusedPane] ?? null}
+            />
+          )}
+          {apiKey && wsUrl && panel === 'depth' && (
+            <Suspense fallback={null}>
+              <MarketDepthPanelContainer
+                apiKey={apiKey}
+                wsUrl={wsUrl}
+                exchange={(paneSymbols[focusedPane] ?? '').split(':')[0] ?? ''}
+                symbol={(paneSymbols[focusedPane] ?? '').split(':')[1] ?? ''}
+              />
+            </Suspense>
+          )}
+          {apiKey && wsUrl && panel === 'agent' && (
              <Suspense fallback={null}>
                <AgentPanel
                  getChartContext={readChartContext}
@@ -678,6 +678,9 @@ export default function Trading() {
                />
              </Suspense>
            )}
+          {apiKey && wsUrl && panel === 'objects' && (
+            <ObjectsPanel model={paneObjects[objectsPaneId] ?? null} paneLabel={objectsPaneLabel} />
+          )}
 
           {apiKey && wsUrl && <RightRail active={panel} onSelect={setPanel} />}
         </main>

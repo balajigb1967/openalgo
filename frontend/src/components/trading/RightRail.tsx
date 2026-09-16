@@ -9,7 +9,6 @@
  */
 
 import { Bot, List, Shapes, Table2, Database } from 'lucide-react'
-import { MarketDepthPanelContainer } from './MarketDepthPanelContainer'
 import { useEffect, useRef } from 'react'
 import { cn } from '@/lib/utils'
 import { RAIL_BTN, RAIL_BTN_ON, RAIL_ICON_STROKE, RailTip } from './railStyles'
