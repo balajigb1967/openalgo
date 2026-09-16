@@ -1272,6 +1272,7 @@ def arm(key: str, advice: dict, alert_id: str = None) -> dict:
     pos = {
         "key": key,
         "alert_id": alert_id,
+        "name": advice.get("name"),
         "side": advice.get("side"),
         "strike": advice.get("strike"),
         "option_symbol": advice.get("option_symbol"),

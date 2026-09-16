@@ -100,18 +100,26 @@ export interface ScalperArmedPos {
   key: string
   name?: string
   side?: 'CE' | 'PE' | null
+  strike?: number | null
   option_symbol?: string
   entry_premium?: number
   current_premium?: number
   pnl_pct?: number
   target_premium?: number | null
   sl_premium?: number | null
+  target_pct?: number | null
+  sl_pct?: number | null
   armed_at?: string
-  trail?: string
+  fut?: string
+  market?: string
   revision_log?: Array<{ ts: string; msg: string }>
   premium_series?: Array<{ t: number; p: number }>
+  spot_series?: Array<{ t: number; s: number }>
   hi_premium?: number
   lo_premium?: number
+  /** Monitor stage flags (derived into a trail label in the UI). */
+  be_done?: boolean
+  trail_done?: boolean
   reversal_risk?: ScalperReversalRisk | null
   alert_id?: string | null
 }
@@ -121,11 +129,13 @@ export interface ScalperAdvisorResponse {
   instruments: ScalperAdvice[]
   active_signals: number
   monitor: {
-    armed: Record<string, unknown>
+    /** Full armed-position records — the Live Monitor tab renders these. */
+    armed: Record<string, ScalperArmedPos>
     events: ScalperMonitorEvent[]
     since: string | null
     alerts?: ScalperAlert[]
-    armed_map?: Record<string, ScalperArmedPos>
+    /** Thin {alert_id, armed_at} map kept for backwards compatibility. */
+    armed_map?: Record<string, { alert_id?: string | null; armed_at?: string }>
   }
   new_events: ScalperMonitorEvent[]
   error?: string

@@ -270,7 +270,7 @@ function MonitorTab({ armedMap, alerts, onDisarm, onCloseAlert, busy }: {
       )}
       {entries.map(([key, p]) => {
         const pnl = p.pnl_pct ?? 0
-        const trail = String(p.trail ?? 'FIXED')
+        const trail = p.trail_done ? 'TRAILING' : p.be_done ? 'BREAKEVEN' : 'INITIAL'
         return (
           <div key={key} className="rounded-md border border-primary/40 bg-card/50 px-2 py-1.5">
             <div className="flex items-center justify-between gap-2">
@@ -401,7 +401,7 @@ export function ScalperAdvisorPanel(_props: { apiKey: string }) {
 
   const alerts: ScalperAlert[] = data?.monitor?.alerts ?? []
   const events = data?.monitor?.events ?? []
-  const armedList: number = Object.keys(data?.monitor?.armed_map ?? {}).length
+  const armedList: number = Object.keys(data?.monitor?.armed ?? {}).length
 
   return (
     <PanelShell id="oa-panel-scalper" label="Scalper Advisor" storageKey="oa-trading-scalper-width" defaultWidth={340}>
@@ -463,7 +463,7 @@ export function ScalperAdvisorPanel(_props: { apiKey: string }) {
 
         {tab === 'monitor' && (
           <MonitorTab
-            armedMap={data?.monitor?.armed_map ?? {}}
+            armedMap={data?.monitor?.armed ?? {}}
             alerts={alerts}
             onDisarm={handleDisarm}
             onCloseAlert={closeAlert}
