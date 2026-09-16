@@ -17,7 +17,8 @@ EXCHANGE_NSE_INDEX = "NSE_INDEX"  # NSE Index
 EXCHANGE_BSE_INDEX = "BSE_INDEX"  # BSE Index
 EXCHANGE_MCX_INDEX = "MCX_INDEX"  # MCX Index (declared by Angel + Zerodha plugins)
 EXCHANGE_GLOBAL_INDEX = "GLOBAL_INDEX"  # Global indices (US30, JAPAN225, HANGSENG, GIFTNIFTY, etc.)
-EXCHANGE_CRYPTO = "CRYPTO"  # Crypto Exchanges (broker-agnostic; brexchange carries broker name)
+EXCHANGE_FOREX = "FOREX"  # Forex Market
+EXCHANGE_CRYPTO = "CRYPTO"  # Crypto Market
 
 # Set of all crypto-family exchanges.
 # Use `exchange in CRYPTO_EXCHANGES` instead of `exchange == "CRYPTO"` so that
@@ -64,6 +65,7 @@ VALID_EXCHANGES = [
     EXCHANGE_MCX_INDEX,
     EXCHANGE_GLOBAL_INDEX,
     EXCHANGE_CRYPTO,
+    EXCHANGE_FOREX,
 ]
 
 # Product Types
