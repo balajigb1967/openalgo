@@ -104,7 +104,7 @@ export function MarketDepthPanelContainer({
           }
           if (converted.buy.length || converted.sell.length) {
             setDepth(converted)
-            setFeed((f) => (Date.now() - lastWsRef.current < 10_000 ? 'live' : 'poll'))
+            setFeed(() => (Date.now() - lastWsRef.current < 10_000 ? "live" : "poll"))
             setError(null)
             setLoading(false)
           }
@@ -134,7 +134,7 @@ export function MarketDepthPanelContainer({
           buy: toLevels(depthData.bids),
           sell: toLevels(depthData.asks),
         })
-        setFeed((f) => (Date.now() - lastWsRef.current < 10_000 ? 'live' : 'poll'))
+        setFeed(() => (Date.now() - lastWsRef.current < 10_000 ? "live" : "poll"))
       } else {
         setError(`Failed to load depth: ${response.message}`)
       }
