@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/select'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useSupportedExchanges } from '@/hooks/useSupportedExchanges'
+import { WatchlistSyncCard } from '@/components/tradingview/WatchlistSyncCard'
 import { showToast } from '@/utils/toast'
 
 interface SearchResult {
@@ -240,6 +241,9 @@ export default function TradingView() {
           </AlertDescription>
         </Alert>
       )}
+
+      {/* Watchlist Sync - add symbols from alerts straight into watchlists */}
+      <WatchlistSyncCard />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         {/* Left Column - Configuration */}

@@ -139,6 +139,39 @@ class BrokerData:
         """
         try:
             br_symbol = get_br_symbol(symbol, exchange)
+            if not br_symbol and exchange in FNO_EXCHANGES:
+                # For FNO exchanges, try to resolve underlying symbol to active contract
+                from database.token_db import search_symbols
+                try:
+                    # Search for symbols matching the underlying (e.g., "CRUDEOIL" for MCX)
+                    search_results = search_symbols(symbol, exchange=exchange, limit=50)
+                    if search_results:
+                        # Filter to FNO symbols and sort by expiry (nearest first)
+                        fno_symbols = [
+                            s for s in search_results 
+                            if s.get('instrumenttype') in ['FUT', 'CE', 'PE']
+                        ]
+                        if fno_symbols:
+                            # Sort by expiry (assuming format DD-MMM-YY)
+                            from datetime import datetime
+                            def get_expiry_date(sym):
+                                expiry_str = sym.get('expiry', '')
+                                try:
+                                    return datetime.strptime(expiry_str, '%d-%b-%y')
+                                except ValueError:
+                                    return datetime.max  # Put invalid expiries at end
+                            
+                            fno_symbols.sort(key=get_expiry_date)
+                            br_symbol = get_br_symbol(fno_symbols[0]['symbol'], exchange)
+                            logger.info(f"Resolved underlying symbol '{symbol}' to '{fno_symbols[0]['symbol']}' for {exchange}")
+                except Exception as e:
+                    logger.debug(f"FNO symbol resolution failed for {symbol}: {e}")
+            
+            if not br_symbol:
+                raise Exception(
+                    f"Symbol '{symbol}' not found in {exchange} master contracts. "
+                    "Refresh master contracts (Settings -> Contract Downloads) or search the exact tradable symbol."
+                )
             encoded_symbol = urllib.parse.quote(br_symbol)
 
             # Use depth endpoint to get quotes with OI data
@@ -175,7 +208,6 @@ class BrokerData:
                 "volume": depth_data.get("v", 0),
                 "oi": int(depth_data.get("oi", 0)),
             }
-
         except Exception as e:
             logger.exception(f"Error fetching quotes for {exchange}:{symbol}")
             raise Exception(f"Error fetching quotes: {e}")
@@ -291,7 +323,34 @@ class BrokerData:
             symbol = item["symbol"]
             exchange = item["exchange"]
             br_symbol = get_br_symbol(symbol, exchange)
-
+            if not br_symbol and exchange in FNO_EXCHANGES:
+                # For FNO exchanges, try to resolve underlying symbol to active contract
+                from database.token_db import search_symbols
+                try:
+                    # Search for symbols matching the underlying (e.g., "CRUDEOIL" for MCX)
+                    search_results = search_symbols(symbol, exchange=exchange, limit=50)
+                    if search_results:
+                        # Filter to FNO symbols and sort by expiry (nearest first)
+                        fno_symbols = [
+                            s for s in search_results 
+                            if s.get('instrumenttype') in ['FUT', 'CE', 'PE']
+                        ]
+                        if fno_symbols:
+                            # Sort by expiry (assuming format DD-MMM-YY)
+                            from datetime import datetime
+                            def get_expiry_date(sym):
+                                expiry_str = sym.get('expiry', '')
+                                try:
+                                    return datetime.strptime(expiry_str, '%d-%b-%y')
+                                except ValueError:
+                                    return datetime.max  # Put invalid expiries at end
+                            
+                            fno_symbols.sort(key=get_expiry_date)
+                            br_symbol = get_br_symbol(fno_symbols[0]['symbol'], exchange)
+                            logger.info(f"Resolved underlying symbol '{symbol}' to '{fno_symbols[0]['symbol']}' for {exchange}")
+                except Exception as e:
+                    logger.debug(f"FNO symbol resolution failed for {symbol}: {e}")
+            
             # Track symbols that couldn't be resolved
             if not br_symbol:
                 logger.warning(
@@ -391,6 +450,39 @@ class BrokerData:
         try:
             # Convert symbol to broker format
             br_symbol = get_br_symbol(symbol, exchange)
+            if not br_symbol and exchange in FNO_EXCHANGES:
+                # For FNO exchanges, try to resolve underlying symbol to active contract
+                from database.token_db import search_symbols
+                try:
+                    # Search for symbols matching the underlying (e.g., "CRUDEOIL" for MCX)
+                    search_results = search_symbols(symbol, exchange=exchange, limit=50)
+                    if search_results:
+                        # Filter to FNO symbols and sort by expiry (nearest first)
+                        fno_symbols = [
+                            s for s in search_results 
+                            if s.get('instrumenttype') in ['FUT', 'CE', 'PE']
+                        ]
+                        if fno_symbols:
+                            # Sort by expiry (assuming format DD-MMM-YY)
+                            from datetime import datetime
+                            def get_expiry_date(sym):
+                                expiry_str = sym.get('expiry', '')
+                                try:
+                                    return datetime.strptime(expiry_str, '%d-%b-%y')
+                                except ValueError:
+                                    return datetime.max  # Put invalid expiries at end
+                            
+                            fno_symbols.sort(key=get_expiry_date)
+                            br_symbol = get_br_symbol(fno_symbols[0]['symbol'], exchange)
+                            logger.info(f"Resolved underlying symbol '{symbol}' to '{fno_symbols[0]['symbol']}' for {exchange}")
+                except Exception as e:
+                    logger.debug(f"FNO symbol resolution failed for {symbol}: {e}")
+            
+            if not br_symbol:
+                raise Exception(
+                    f"Symbol '{symbol}' not found in {exchange} master contracts. "
+                    "Refresh master contracts (Settings -> Contract Downloads) or search the exact tradable symbol."
+                )
             logger.debug(f"Using broker symbol: {br_symbol}")
 
             # Check for unsupported timeframes first

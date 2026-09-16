@@ -52,7 +52,7 @@ describe('RightRail', () => {
     expect(isPanelId('agent')).toBe(true)
     expect(isPanelId('watchlist')).toBe(true)
     expect(isPanelId('objects')).toBe(true)
-    expect(isPanelId('depth')).toBe(false)
+    expect(isPanelId('depth')).toBe(true)
     expect(isPanelId(null)).toBe(false)
   })
 })

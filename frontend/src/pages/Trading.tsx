@@ -11,6 +11,11 @@ const AgentPanel = lazy(() =>
   import('@/components/trading/AgentPanel').then((m) => ({ default: m.AgentPanel }))
 )
 
+// Market depth panel - shows real-time liquidity data
+const MarketDepthPanelContainer = lazy(() =>
+  import('@/components/trading/MarketDepthPanelContainer').then((m) => ({ default: m.MarketDepthPanelContainer }))
+)
+
 import { ChartPane } from '@/components/trading/ChartPane'
 import { DrawingRail } from '@/components/trading/DrawingRail'
 import { DOCK_ID } from '@/components/trading/dock/DockShell'
@@ -647,25 +652,32 @@ export default function Trading() {
               activeSymbol={paneSymbols[focusedPane] ?? null}
             />
           )}
-          {apiKey && wsUrl && panel === 'options' && (
-            <OptionChainPanel
-              apiKey={apiKey}
-              onPick={sendToFocusedPane}
-              activeSymbol={paneSymbols[focusedPane] ?? null}
-            />
-          )}
-          {apiKey && wsUrl && panel === 'agent' && (
-            <Suspense fallback={null}>
-              <AgentPanel
-                getChartContext={readChartContext}
-                onChartCommand={applyChartCommands}
-                onCaptureChart={captureChart}
-              />
-            </Suspense>
-          )}
-          {apiKey && wsUrl && panel === 'objects' && (
-            <ObjectsPanel model={paneObjects[objectsPaneId] ?? null} paneLabel={objectsPaneLabel} />
-          )}
+{apiKey && wsUrl && panel === 'options' && (
+             <OptionChainPanel
+               apiKey={apiKey}
+               onPick={sendToFocusedPane}
+               activeSymbol={paneSymbols[focusedPane] ?? null}
+             />
+           )}
+{apiKey && wsUrl && panel === 'depth' && (
+  <Suspense fallback={null}>
+    <MarketDepthPanelContainer
+      apiKey={apiKey}
+      wsUrl={wsUrl}
+      symbol={paneSymbols[focusedPane]?.split(':')[0] ?? ''}
+      exchange={paneSymbols[focusedPane]?.split(':')[1] ?? ''}
+    />
+  </Suspense>
+)}
+           {apiKey && wsUrl && panel === 'agent' && (
+             <Suspense fallback={null}>
+               <AgentPanel
+                 getChartContext={readChartContext}
+                 onChartCommand={applyChartCommands}
+                 onCaptureChart={captureChart}
+               />
+             </Suspense>
+           )}
 
           {apiKey && wsUrl && <RightRail active={panel} onSelect={setPanel} />}
         </main>

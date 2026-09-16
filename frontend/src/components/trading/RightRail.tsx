@@ -8,7 +8,8 @@
  * closes it.
  */
 
-import { Bot, List, Shapes, Table2 } from 'lucide-react'
+import { Bot, List, Shapes, Table2, Database } from 'lucide-react'
+import { MarketDepthPanelContainer } from './MarketDepthPanelContainer'
 import { useEffect, useRef } from 'react'
 import { cn } from '@/lib/utils'
 import { RAIL_BTN, RAIL_BTN_ON, RAIL_ICON_STROKE, RailTip } from './railStyles'
@@ -16,9 +17,9 @@ import { RAIL_BTN, RAIL_BTN_ON, RAIL_ICON_STROKE, RailTip } from './railStyles'
 const PANELS = [
   // Nothing here is a metaphor: the watchlist is a list of instruments, the
   // option chain is a table of strikes, and the objects panel is the shapes
-  // drawn on the chart. The assistant is the one thing on the rail that is
-  // not a view of the market, so it is last rather than wedged between two
-  // that are.
+  // drawn on the chart. The market depth shows real-time liquidity, and the
+  // assistant is the one thing on the rail that is not a view of the market,
+  // so it is last rather than wedged between two that are.
   //
   // Every panel carries a glyph. Objects spelled its label down the rail
   // instead, which made one button twice the height of the three beside it
@@ -26,6 +27,7 @@ const PANELS = [
   { id: 'watchlist', label: 'Watchlist', icon: List },
   { id: 'options', label: 'Option chain', icon: Table2 },
   { id: 'objects', label: 'Objects', icon: Shapes },
+  { id: 'depth', label: 'Depth', icon: Database },
   { id: 'agent', label: 'Assistant', icon: Bot },
 ] as const
 
