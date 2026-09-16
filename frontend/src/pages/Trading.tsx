@@ -27,6 +27,9 @@ const MarketBriefPanel = lazy(() =>
 const NewsPanel = lazy(() =>
   import('@/components/trading/NewsPanel').then((m) => ({ default: m.NewsPanel }))
 )
+const CalendarPanel = lazy(() =>
+  import('@/components/trading/CalendarPanel').then((m) => ({ default: m.CalendarPanel }))
+)
 
 import { ChartPane } from '@/components/trading/ChartPane'
 import { DrawingRail } from '@/components/trading/DrawingRail'
@@ -699,6 +702,11 @@ export default function Trading() {
           {apiKey && wsUrl && panel === 'news' && (
             <Suspense fallback={null}>
               <NewsPanel apiKey={apiKey} activeSymbol={paneSymbols[focusedPane] ?? null} />
+            </Suspense>
+          )}
+          {apiKey && wsUrl && panel === 'calendar' && (
+            <Suspense fallback={null}>
+              <CalendarPanel apiKey={apiKey} />
             </Suspense>
           )}
           {apiKey && wsUrl && panel === 'agent' && (

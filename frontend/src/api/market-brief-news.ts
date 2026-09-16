@@ -168,6 +168,11 @@ export const orderflowApi = {
     })
     return response.data
   },
+
+  getLive: async (symbol: string): Promise<{ status: string; symbol?: string; ltp?: number | null; chp?: number | null; volume?: number | null; ts?: number; message?: string }> => {
+    const response = await webClient.get('/plugins/orderflow/live', { params: { symbol } })
+    return response.data
+  },
 }
 
 export const briefApi = {
@@ -189,6 +194,66 @@ export const newsApi = {
 
   getSymbolNews: async (symbol: string, limit = 40): Promise<NewsResponse> => {
     const response = await webClient.get('/plugins/news/symbol', { params: { symbol, limit } })
+    return response.data
+  },
+}
+
+export interface EconomicEvent {
+  title: string
+  date: string
+  impact: string
+  impact_rank: number
+  actual: string
+  forecast: string
+  previous: string
+  currency: string
+}
+
+export interface EconomicCalendarResponse {
+  status: string
+  upcoming: EconomicEvent[]
+  recent: EconomicEvent[]
+  total: number
+  ts: number
+  error?: string
+}
+
+export interface Holiday {
+  date: string
+  date_display: string
+  day: string
+  name: string
+}
+
+export interface HolidayCalendarResponse {
+  status: string
+  year: number
+  nse: Holiday[]
+  bse: Holiday[]
+  mcx: Holiday[]
+  next_nse_holiday: Holiday | null
+  today_status: {
+    today: string
+    nse_trading_day: boolean
+    mcx_trading_day: boolean
+  }
+  source: string
+  ts: number
+  error?: string
+}
+
+export const calendarApi = {
+  getEconomic: async (refresh = false): Promise<EconomicCalendarResponse> => {
+    const response = await webClient.get('/plugins/calendar/economic', {
+      params: refresh ? { refresh: '1' } : undefined,
+    })
+    return response.data
+  },
+
+  getHolidays: async (refresh = false): Promise<HolidayCalendarResponse> => {
+    const response = await webClient.get('/plugins/calendar/holidays', {
+      params: refresh ? { refresh: '1' } : undefined,
+    })
     return response.data
   },
 }

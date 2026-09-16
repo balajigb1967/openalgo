@@ -202,6 +202,7 @@ def orderflow_detail_route():
             cached = _DETAIL_CACHE.get(ck) if not refresh else None
             if cached and now - cached["ts"] < _DETAIL_TTL:
                 return jsonify(cached["data"])
+        from services.orderflow_service import get_orderflow
         data = get_orderflow(symbol, tf, bars_n)
         with _DETAIL_LOCK:
             if len(_DETAIL_CACHE) > 64:
@@ -211,6 +212,20 @@ def orderflow_detail_route():
     except Exception as e:
         logger.exception(f"orderflow detail failed: {e}")
         return jsonify({"status": "error", "message": f"Orderflow failed: {e}"}), 500
+
+
+@scalper_orderflow_bp.route("/orderflow/live", methods=["GET"])
+@check_session_validity
+def orderflow_live_route():
+    """Live LTP for one orderflow symbol (websocket-companion freshness).
+    Query: symbol (EXCH:SYM). Lightweight: quotes only, no candles."""
+    try:
+        symbol = request.args.get("symbol") or "NSE:NIFTY 50"
+        from services.orderflow_service import orderflow_live_quote
+        return jsonify(orderflow_live_quote(symbol))
+    except Exception as e:
+        logger.exception(f"orderflow live failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @scalper_orderflow_bp.route("/orderflow/health", methods=["GET"])
@@ -276,3 +291,32 @@ def news_symbol_route():
     except Exception as e:
         logger.exception(f"symbol news failed: {e}")
         return jsonify({"status": "error", "message": f"Symbol news failed: {e}"}), 500
+
+
+# ---------------------------------------------------------------------------
+# Market calendar (economic events + exchange holidays)
+# ---------------------------------------------------------------------------
+@scalper_orderflow_bp.route("/calendar/economic", methods=["GET"])
+@check_session_validity
+def calendar_economic_route():
+    """This week's macro events, next-up first. Query: refresh=1."""
+    try:
+        refresh = (request.args.get("refresh") in ("1", "true", "yes"))
+        from services.market_calendar_service import economic_calendar
+        return jsonify(economic_calendar(refresh=refresh))
+    except Exception as e:
+        logger.exception(f"economic calendar failed: {e}")
+        return jsonify({"status": "error", "message": f"Calendar failed: {e}"}), 500
+
+
+@scalper_orderflow_bp.route("/calendar/holidays", methods=["GET"])
+@check_session_validity
+def calendar_holidays_route():
+    """NSE/BSE/MCX holiday lists + today's trading-day status. Query: refresh=1."""
+    try:
+        refresh = (request.args.get("refresh") in ("1", "true", "yes"))
+        from services.market_calendar_service import holiday_calendar
+        return jsonify(holiday_calendar(refresh=refresh))
+    except Exception as e:
+        logger.exception(f"holiday calendar failed: {e}")
+        return jsonify({"status": "error", "message": f"Calendar failed: {e}"}), 500

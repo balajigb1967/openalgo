@@ -393,3 +393,37 @@ def _quote_live(symbol: str, exchange: str, api_key: str) -> dict:
     except Exception:
         pass
     return {}
+
+
+def orderflow_live_quote(symbol: str) -> dict:
+    """Live LTP/change for one orderflow symbol (chart-overlay freshness).
+    Reuses the service's own resolution so 'NSE:NIFTY 50' resolves to the
+    near-month future exactly like the orderflow bars do."""
+    try:
+        target_info = _resolve_futures_cached(symbol)
+        if not target_info:
+            return {"status": "error", "message": "unresolved symbol"}
+        active_sym = target_info["target_symbol"]
+        fut_exch = target_info.get("fut_exchange") or "NSE"
+        api_key = _api_key()
+        q = _quote_live(active_sym, fut_exch, api_key)
+        ltp = q.get("ltp")
+        if ltp is None:
+            return {"status": "error", "message": "no quote"}
+        prev_close = q.get("prev_close") or q.get("close")
+        chp = None
+        try:
+            if prev_close:
+                chp = round((float(ltp) - float(prev_close)) / float(prev_close) * 100.0, 2)
+        except (TypeError, ValueError, ZeroDivisionError):
+            chp = None
+        return {
+            "status": "success",
+            "symbol": active_sym,
+            "ltp": ltp,
+            "chp": chp,
+            "volume": q.get("volume"),
+            "ts": time.time(),
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}

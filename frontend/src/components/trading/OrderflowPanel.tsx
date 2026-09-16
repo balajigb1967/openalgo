@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Loader2, RefreshCw } from 'lucide-react'
 import { orderflowApi, type OrderflowBar, type OrderflowDetail, type OrderflowRow } from '@/api/market-brief-news'
 import { PanelShell } from './panelShell'
@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils'
  */
 
 const REFRESH_MS = 45_000
+const LIVE_MS = 5_000 // live-quote overlay cadence (quotes endpoint, no candles)
 const TFS = ['1m', '3m', '5m', '15m', '30m', '1h']
 
 function deltaColor(v: number): string {
@@ -66,6 +67,20 @@ function BarsTable({ bars }: { bars: OrderflowBar[] }) {
   )
 }
 
+/** Live price chip: overlays the websocket/quote LTP with a pulse dot. */
+function LiveLtp({ ltp, chp, className }: { ltp?: number | null; chp?: number | null | undefined; className?: string }) {
+  if (ltp === null || ltp === undefined) return <span className={className}>—</span>
+  return (
+    <span className={cn('inline-flex items-center gap-1', className)}>
+      <span className="h-1 w-1 animate-pulse rounded-full bg-emerald-500" title="Live quote" />
+      {ltp.toLocaleString('en-IN')}
+      {chp !== null && chp !== undefined && (
+        <span className={deltaColor(chp)}>{chp >= 0 ? '+' : ''}{chp.toFixed(2)}%</span>
+      )}
+    </span>
+  )
+}
+
 export function OrderflowPanel({ activeSymbol }: { apiKey: string; activeSymbol: string | null }) {
   const [mode, setMode] = useState<'table' | 'detail'>('table')
   const [tf, setTf] = useState('5m')
@@ -74,6 +89,9 @@ export function OrderflowPanel({ activeSymbol }: { apiKey: string; activeSymbol:
   const [symbol, setSymbol] = useState<string>(activeSymbol ?? 'NSE:NIFTY 50')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [liveRows, setLiveRows] = useState<Record<string, { ltp: number | null; chp: number | null }>>({})
+  const [liveDetail, setLiveDetail] = useState<{ ltp: number | null; chp: number | null } | null>(null)
+  const aliveRef = useRef(true)
 
   // Adopt the focused chart's symbol when the pane changes
   useEffect(() => {
@@ -101,8 +119,58 @@ export function OrderflowPanel({ activeSymbol }: { apiKey: string; activeSymbol:
     setLoading(true)
     load()
     const t = setInterval(load, REFRESH_MS)
-    return () => clearInterval(t)
+    return () => {
+      clearInterval(t)
+      aliveRef.current = false
+    }
   }, [mode, tf, symbol])
+
+  // Live-quote overlay: table mode polls every visible root in parallel,
+  // detail mode polls the focused symbol. Quotes-only — no candle history —
+  // so it is light enough for a 5s cadence between the 45s table rebuilds.
+  useEffect(() => {
+    aliveRef.current = true
+    let stopped = false
+    const pollLive = async () => {
+      if (stopped) return
+      try {
+        if (mode === 'table') {
+          const targets = rows.slice(0, 12).map((r) => `${r.market}:${r.key}`)
+          if (!targets.length) return
+          const results = await Promise.all(
+            targets.map(async (sym) => {
+              try {
+                const q = await orderflowApi.getLive(sym)
+                return [sym, q.status === 'success' ? { ltp: q.ltp ?? null, chp: q.chp ?? null } : null] as const
+              } catch {
+                return [sym, null] as const
+              }
+            })
+          )
+          if (!aliveRef.current) return
+          const next: Record<string, { ltp: number | null; chp: number | null }> = {}
+          for (const [sym, v] of results) if (v) next[sym] = v
+          setLiveRows(next)
+        } else {
+          try {
+            const q = await orderflowApi.getLive(symbol)
+            if (!aliveRef.current) return
+            if (q.status === 'success') setLiveDetail({ ltp: q.ltp ?? null, chp: q.chp ?? null })
+          } catch {
+            /* keep last known value */
+          }
+        }
+      } catch {
+        /* overlay is best-effort */
+      }
+    }
+    pollLive()
+    const t = setInterval(pollLive, LIVE_MS)
+    return () => {
+      stopped = true
+      clearInterval(t)
+    }
+  }, [mode, rows, symbol])
 
   const s = detail?.summary
 
@@ -171,7 +239,13 @@ export function OrderflowPanel({ activeSymbol }: { apiKey: string; activeSymbol:
                   title={`Open ${r.key} orderflow`}
                 >
                   <td className="px-1.5 py-1 font-medium">{r.name}</td>
-                  <td className="px-1.5 py-1 text-right">{r.ltp?.toLocaleString('en-IN') ?? '—'}</td>
+                  <td className="px-1.5 py-1 text-right">
+                    {liveRows[`${r.market}:${r.key}`] ? (
+                      <LiveLtp ltp={liveRows[`${r.market}:${r.key}`].ltp} className="font-medium" />
+                    ) : (
+                      (r.ltp?.toLocaleString('en-IN') ?? '—')
+                    )}
+                  </td>
                   <td className={cn('px-1.5 py-1 text-right', deltaColor(r.chp ?? 0))}>{r.chp !== null && r.chp !== undefined ? `${r.chp >= 0 ? '+' : ''}${r.chp.toFixed(2)}%` : '—'}</td>
                   <td className={cn('px-1.5 py-1 text-right', deltaColor(r.session_delta ?? 0))}>{r.session_delta?.toLocaleString('en-IN') ?? '—'}</td>
                   <td className={cn('px-1.5 py-1 text-right', deltaColor(r.session_cvd ?? 0))}>{r.session_cvd?.toLocaleString('en-IN') ?? '—'}</td>
@@ -190,10 +264,19 @@ export function OrderflowPanel({ activeSymbol }: { apiKey: string; activeSymbol:
           <div>
             <div className="flex flex-wrap items-center gap-1.5 border-b border-border px-2 py-1 text-[10px]">
               <span className="font-semibold">{detail.name}</span>
-              <span className="tabular-nums">{s.ltp.toLocaleString('en-IN')}</span>
-              <span className={cn('tabular-nums', deltaColor(s.chp))}>{s.chp >= 0 ? '+' : ''}{s.chp.toFixed(2)}%</span>
+              {liveDetail ? (
+                <LiveLtp ltp={liveDetail.ltp} chp={liveDetail.chp} className="font-semibold" />
+              ) : (
+                <>
+                  <span className="tabular-nums">{s.ltp.toLocaleString('en-IN')}</span>
+                  <span className={cn('tabular-nums', deltaColor(s.chp))}>{s.chp >= 0 ? '+' : ''}{s.chp.toFixed(2)}%</span>
+                </>
+              )}
               <span className={cn('rounded border px-1 py-px', biasBadge(s.delta_bias))}>{s.delta_bias}</span>
               <span className="text-muted-foreground">{detail.target_symbol}</span>
+              <span className="ml-auto flex items-center gap-1 text-[9px] font-semibold text-emerald-600 dark:text-emerald-400">
+                <span className="h-1 w-1 animate-pulse rounded-full bg-emerald-500" /> LIVE
+              </span>
             </div>
             <div className="grid grid-cols-3 gap-px border-b border-border bg-border/40 text-[10px]">
               <div className="bg-background px-2 py-1"><div className="text-muted-foreground">Session Δ</div><div className={cn('font-semibold tabular-nums', deltaColor(s.session_delta))}>{s.session_delta.toLocaleString('en-IN')}</div></div>
