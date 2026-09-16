@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "openalgo": {
+      "type": "local",
+      "command": ["bash", "/home/ubuntu/openalgo/scripts/oa_mcp_launch.sh"],
+      "enabled": true
+    },
+    "openalgo-ops": {
+      "type": "local",
+      "command": ["python3", "/home/ubuntu/openalgo/mcp_openalgo_server.py"],
+      "enabled": true
+    }
+  }
+}
