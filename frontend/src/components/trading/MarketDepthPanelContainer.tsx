@@ -7,17 +7,18 @@ import { MarketDataManager, type SymbolData } from '@/lib/MarketDataManager'
 import { cn } from '@/lib/utils'
 
 /**
- * Sidebar market depth, live.
+ * Sidebar market depth — hybrid live feed.
  *
- * Data comes from the shared MarketDataManager WebSocket (Depth mode) — the
- * same stream the chart and option chain use, so the book updates on every
- * broker tick instead of a fixed 5-second REST poll. The REST /depth endpoint
- * is used for an initial fill (and the header chip's manual refresh); after
- * that the websocket keeps it live, including outside market hours via the
- * manager's REST-fallback mode.
+ * Base layer: REST /api/v1/depth polled every 2s (verified live against the
+ * broker — the book quantities move between polls). Upgrade layer: when the
+ * shared MarketDataManager websocket pushes depth ticks for the symbol they
+ * overwrite the poll instantly and the chip flips to TICK. The Fyers MCX
+ * depth stream does not currently emit, so the poll is what keeps the panel
+ * live; the websocket path lights up automatically wherever the broker feed
+ * works.
  */
 
-type FeedState = 'connecting' | 'live' | 'rest'
+type FeedState = 'connecting' | 'live' | 'poll'
 
 function toLevels(list: Array<{ price: number; quantity: number; orders?: number }> | undefined) {
   return (list ?? []).map((l) => ({
@@ -49,14 +50,12 @@ export function MarketDepthPanelContainer({
   const [feed, setFeed] = useState<FeedState>('connecting')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const restTried = useRef(false)
   const aliveRef = useRef(true)
-  const hasDepthRef = useRef(false)
+  const lastWsRef = useRef(0)
+  const POLL_MS = 2000
 
   useEffect(() => {
     aliveRef.current = true
-    restTried.current = false
-    hasDepthRef.current = false
     setDepth(null)
     setLoading(true)
     setError(null)
@@ -72,9 +71,9 @@ export function MarketDepthPanelContainer({
     const applyWs = (data: SymbolData) => {
       const d = convert(data)
       if (!d || !aliveRef.current) return
-      hasDepthRef.current = true
+      lastWsRef.current = Date.now()
       setDepth(d)
-      setFeed(data.updateSource === 'rest' ? 'rest' : 'live')
+      setFeed('live')
       setError(null)
       setLoading(false)
     }
@@ -88,14 +87,12 @@ export function MarketDepthPanelContainer({
 
     const stateUnsub = manager.addStateListener((state) => {
       if (!aliveRef.current) return
-      if (state.isFallbackMode) setFeed('rest')
+      if (state.isFallbackMode) setFeed((f) => (f === 'live' ? f : 'poll'))
     })
 
-    // One-time REST fill: an immediate book for context. Never loops — the
-    // websocket owns updates after this.
-    const restFill = async () => {
-      if (restTried.current) return
-      restTried.current = true
+    // Base layer: silent REST poll every 2s. No spinner toggling — the book
+    // just updates in place; the chip tells the user which feed is driving it.
+    const poll = async () => {
       try {
         const response = await tradingApi.getDepth(apiKey, symbol, exchange)
         if (!aliveRef.current) return
@@ -106,28 +103,22 @@ export function MarketDepthPanelContainer({
             sell: toLevels(depthData.asks),
           }
           if (converted.buy.length || converted.sell.length) {
-            setDepth((prev) => prev ?? converted)
-            setFeed((f) => (f === 'connecting' ? 'rest' : f))
+            setDepth(converted)
+            setFeed((f) => (Date.now() - lastWsRef.current < 10_000 ? 'live' : 'poll'))
+            setError(null)
             setLoading(false)
           }
         }
       } catch {
-        /* silent: the websocket path owns the error surface */
+        /* transient network/broker errors: the next poll retries */
       }
     }
-    restFill()
-    // One more REST attempt only if nothing has arrived within 4s (covers
-    // slow broker feed negotiation).
-    const retry = setTimeout(() => {
-      if (aliveRef.current && !hasDepthRef.current) {
-        restTried.current = false
-        restFill()
-      }
-    }, 4000)
+    poll()
+    const pollTimer = setInterval(poll, POLL_MS)
 
     return () => {
       aliveRef.current = false
-      clearTimeout(retry)
+      clearInterval(pollTimer)
       wsUnsub()
       stateUnsub()
     }
@@ -143,7 +134,7 @@ export function MarketDepthPanelContainer({
           buy: toLevels(depthData.bids),
           sell: toLevels(depthData.asks),
         })
-        setFeed((f) => (f === 'connecting' ? 'rest' : f))
+        setFeed((f) => (Date.now() - lastWsRef.current < 10_000 ? 'live' : 'poll'))
       } else {
         setError(`Failed to load depth: ${response.message}`)
       }
@@ -182,14 +173,14 @@ export function MarketDepthPanelContainer({
             className={cn(
               'flex items-center gap-1 rounded border px-1.5 py-px text-[10px] font-semibold',
               feed === 'live' && 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
-              feed === 'rest' && 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+              feed === 'poll' && 'border-sky-500/40 bg-sky-500/10 text-sky-600 dark:text-sky-400',
               feed === 'connecting' && 'border-border text-muted-foreground'
             )}
             title={
               feed === 'live'
-                ? 'Streaming live from the broker websocket — updates on every tick'
-                : feed === 'rest'
-                  ? 'Websocket unavailable — showing a REST snapshot. Click to refresh.'
+                ? 'Streaming from the broker websocket — updates on every tick'
+                : feed === 'poll'
+                  ? 'Live book polled every 2 seconds (broker websocket not pushing depth for this symbol)'
                   : 'Connecting…'
             }
           >
@@ -197,11 +188,11 @@ export function MarketDepthPanelContainer({
               className={cn(
                 'h-1.5 w-1.5 rounded-full',
                 feed === 'live' && 'animate-pulse bg-emerald-500',
-                feed === 'rest' && 'bg-amber-500',
+                feed === 'poll' && 'animate-pulse bg-sky-500',
                 feed === 'connecting' && 'animate-pulse bg-muted-foreground'
               )}
             />
-            {feed === 'live' ? 'LIVE' : feed === 'rest' ? 'SNAPSHOT' : '…'}
+            {feed === 'live' ? 'TICK' : feed === 'poll' ? 'LIVE · 2s' : '…'}
           </button>
         </div>
       </div>
