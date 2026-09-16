@@ -80,6 +80,7 @@ def scalper_advisor_route():
         arm_alert_id = request.args.get("arm_alert_id") or None
         close_alert_id = request.args.get("close_alert_id") or None
         close_reason = request.args.get("close_reason") or "Manual close"
+        auto_arm = (request.args.get("auto_arm") in ("1", "true", "yes"))
         data = scalper_advisor(
             refresh=refresh,
             arm_key=arm_key,
@@ -87,6 +88,7 @@ def scalper_advisor_route():
             arm_alert_id=arm_alert_id,
             close_alert_id=close_alert_id,
             close_reason=close_reason,
+            auto_arm=auto_arm,
         )
         return jsonify(data)
     except Exception as e:

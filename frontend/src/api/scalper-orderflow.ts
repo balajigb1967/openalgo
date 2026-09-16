@@ -60,6 +60,9 @@ export interface ScalperAdvice {
   armed_at?: string | null
   reversal_risk?: ScalperReversalRisk | null
   revision_log?: Array<{ ts: string; msg: string }>
+  /** Armed-position premium trail (chronological) for the live sparkline. */
+  premium_series?: Array<{ t: number; p: number }>
+  spot_series?: Array<{ t: number; s: number }>
 }
 
 export interface ScalperAlert {
@@ -93,6 +96,26 @@ export interface ScalperMonitorEvent {
   msg: string
 }
 
+export interface ScalperArmedPos {
+  key: string
+  name?: string
+  side?: 'CE' | 'PE' | null
+  option_symbol?: string
+  entry_premium?: number
+  current_premium?: number
+  pnl_pct?: number
+  target_premium?: number | null
+  sl_premium?: number | null
+  armed_at?: string
+  trail?: string
+  revision_log?: Array<{ ts: string; msg: string }>
+  premium_series?: Array<{ t: number; p: number }>
+  hi_premium?: number
+  lo_premium?: number
+  reversal_risk?: ScalperReversalRisk | null
+  alert_id?: string | null
+}
+
 export interface ScalperAdvisorResponse {
   generated_at: string
   instruments: ScalperAdvice[]
@@ -102,6 +125,7 @@ export interface ScalperAdvisorResponse {
     events: ScalperMonitorEvent[]
     since: string | null
     alerts?: ScalperAlert[]
+    armed_map?: Record<string, ScalperArmedPos>
   }
   new_events: ScalperMonitorEvent[]
   error?: string
@@ -111,13 +135,15 @@ export interface ScalperAdvisorResponse {
 export const scalperApi = {
   getAdvisor: async (
     refresh = false,
-    action?: { arm?: string; disarm?: string; armAlertId?: string }
+    action?: { arm?: string; disarm?: string; armAlertId?: string },
+    autoArm = false
   ): Promise<ScalperAdvisorResponse> => {
     const params: Record<string, string> = {}
     if (refresh) params.refresh = '1'
     if (action?.arm) params.arm = action.arm
     if (action?.disarm) params.disarm = action.disarm
     if (action?.armAlertId) params.arm_alert_id = action.armAlertId
+    if (autoArm) params.auto_arm = '1'
     const response = await webClient.get('/plugins/scalper/advisor', { params })
     return response.data
   },

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ExternalLink, Loader2, RefreshCw } from 'lucide-react'
+import { ChevronDown, ChevronRight, ExternalLink, Loader2, RefreshCw } from 'lucide-react'
 import { newsApi, type NewsItem } from '@/api/market-brief-news'
 import { PanelShell } from './panelShell'
 import { cn } from '@/lib/utils'
@@ -32,33 +32,75 @@ function sentimentDot(s?: string): string {
   return 'bg-amber-500/60'
 }
 
+function NewsRow({ n, expanded, onToggle }: { n: NewsItem; expanded: boolean; onToggle: () => void }) {
+  return (
+    <div className="border-b border-border/40 hover:bg-accent/40">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="block w-full px-2 py-1.5 text-left"
+        title={expanded ? 'Collapse' : 'Expand summary'}
+      >
+        <div className="flex items-start justify-between gap-1.5">
+          <span className="text-[11px] leading-snug text-foreground">{n.title}</span>
+          {expanded ? (
+            <ChevronDown className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+          )}
+        </div>
+        <div className="mt-0.5 flex items-center gap-1.5 text-[9px] text-muted-foreground">
+          {n.sentiment && <span className={cn('h-1.5 w-1.5 rounded-full', sentimentDot(n.sentiment))} title={n.sentiment} />}
+          <span className="font-medium">{n.source}</span>
+          <span>·</span>
+          <span className="tabular-nums">{timeAgo(n.published)}</span>
+          {!expanded && n.summary && <span className="min-w-0 truncate">· {n.summary}</span>}
+        </div>
+      </button>
+      {expanded && (
+        <div className="border-t border-border/40 bg-muted/20 px-2 py-1.5">
+          {n.summary ? (
+            <p className="text-[10px] leading-relaxed text-foreground/90">{n.summary}</p>
+          ) : (
+            <p className="text-[10px] italic text-muted-foreground">No summary available for this story.</p>
+          )}
+          {n.link && (
+            <a
+              href={n.link}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 inline-flex items-center gap-1 text-[10px] font-medium text-primary hover:underline"
+            >
+              Read full article <ExternalLink className="h-2.5 w-2.5" />
+            </a>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ItemList({ items, empty }: { items: NewsItem[]; empty: string }) {
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
   if (!items.length) {
     return <div className="p-2 text-[11px] text-muted-foreground">{empty}</div>
   }
+  const toggle = (id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
   return (
     <>
-      {items.map((n, i) => (
-        <a
-          key={n.id ?? `${i}-${n.link}`}
-          href={n.link}
-          target="_blank"
-          rel="noreferrer"
-          className="block border-b border-border/40 px-2 py-1.5 hover:bg-accent/40"
-        >
-          <div className="flex items-start justify-between gap-1.5">
-            <span className="text-[11px] leading-snug text-foreground">{n.title}</span>
-            <ExternalLink className="mt-0.5 h-2.5 w-2.5 shrink-0 text-muted-foreground" />
-          </div>
-          <div className="mt-0.5 flex items-center gap-1.5 text-[9px] text-muted-foreground">
-            {n.sentiment && <span className={cn('h-1.5 w-1.5 rounded-full', sentimentDot(n.sentiment))} title={n.sentiment} />}
-            <span className="font-medium">{n.source}</span>
-            <span>·</span>
-            <span className="tabular-nums">{timeAgo(n.published)}</span>
-            {n.summary && <span className="min-w-0 truncate">· {n.summary}</span>}
-          </div>
-        </a>
-      ))}
+      {items.map((n, i) => {
+        const id = n.id ?? `${i}-${n.link}`
+        return (
+          <NewsRow key={id} n={n} expanded={expandedIds.has(id)} onToggle={() => toggle(id)} />
+        )
+      })}
     </>
   )
 }

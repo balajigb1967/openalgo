@@ -5,6 +5,7 @@ import {
   type ScalperAdvice,
   type ScalperAlert,
   type ScalperAdvisorResponse,
+  type ScalperArmedPos,
 } from '@/api/scalper-orderflow'
 import { PanelShell } from './panelShell'
 import { cn } from '@/lib/utils'
@@ -45,6 +46,47 @@ function riskColor(label: string): string {
 function fmtPct(v?: number | null): string {
   if (v === null || v === undefined) return '—'
   return `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`
+}
+
+function fmtClock(t: number): string {
+  return new Date(t * 1000).toLocaleTimeString('en-IN', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Kolkata',
+  })
+}
+
+/** Small live premium sparkline for an armed position (chronological series). */
+function PremiumSpark({ series, target, sl, height = 34 }: {
+  series: Array<{ t: number; p: number }>
+  target?: number | null
+  sl?: number | null
+  height?: number
+}) {
+  if (series.length < 2) {
+    return <div className="rounded bg-muted/40 px-1.5 py-1 text-[9px] text-muted-foreground">Collecting premium trail…</div>
+  }
+  const pts = series.map((s) => s.p)
+  const levels = [target, sl].filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+  const all = [...pts, ...levels]
+  const min = Math.min(...all)
+  const max = Math.max(...all)
+  const span = max - min || 1
+  const W = 100
+  const path = series.map((s, i) => `${i === 0 ? 'M' : 'L'}${((s.p - min) / span * W).toFixed(2)},${((1 - (s.p - min) / span) * height).toFixed(2)}`).join(' ')
+  const last = pts[pts.length - 1]
+  const first = pts[0]
+  const up = last >= first
+  return (
+    <svg viewBox={`0 0 ${W} ${height}`} preserveAspectRatio="none" className="h-[34px] w-full">
+      {typeof target === 'number' && Number.isFinite(target) && (
+        <line x1={0} x2={W} y1={(1 - (target - min) / span) * height} y2={(1 - (target - min) / span) * height} stroke="rgb(16 185 129 / 0.55)" strokeWidth={0.6} strokeDasharray="2 2" />
+      )}
+      {typeof sl === 'number' && Number.isFinite(sl) && (
+        <line x1={0} x2={W} y1={(1 - (sl - min) / span) * height} y2={(1 - (sl - min) / span) * height} stroke="rgb(244 63 94 / 0.55)" strokeWidth={0.6} strokeDasharray="2 2" />
+      )}
+      <path d={path} fill="none" stroke={up ? 'rgb(16 185 129)' : 'rgb(244 63 94)'} strokeWidth={1.2} vectorEffect="non-scaling-stroke" />
+      <circle cx={(last - min) / span * W} cy={(1 - (last - min) / span) * height} r={1.4} fill={up ? 'rgb(16 185 129)' : 'rgb(244 63 94)'} />
+    </svg>
+  )
 }
 
 function AdviceCard({
@@ -106,14 +148,21 @@ function AdviceCard({
         )}
       </div>
 
-      {/* Armed position live strip: entry → current vs target / SL */}
+      {/* Armed position live strip + premium trail */}
       {adv.armed && (
-        <div className="mt-1 flex items-center justify-between rounded bg-primary/5 px-1.5 py-0.5 text-[10px] tabular-nums">
-          <span className="text-muted-foreground">
-            LIVE ₹{adv.entry_premium?.toFixed(1)} → <b className="text-foreground">₹{adv.current_premium?.toFixed(1)}</b>
-          </span>
-          <span className="text-emerald-600 dark:text-emerald-400">T ₹{adv.armed_target_premium?.toFixed(1)}</span>
-          <span className="text-rose-600 dark:text-rose-400">SL ₹{adv.armed_sl_premium?.toFixed(1)}</span>
+        <div className="mt-1 rounded bg-primary/5 px-1.5 py-1">
+          <div className="flex items-center justify-between text-[10px] tabular-nums">
+            <span className="text-muted-foreground">
+              LIVE ₹{adv.entry_premium?.toFixed(1)} → <b className="text-foreground">₹{adv.current_premium?.toFixed(1)}</b>
+            </span>
+            <span className="text-emerald-600 dark:text-emerald-400">T ₹{adv.armed_target_premium?.toFixed(1)}</span>
+            <span className="text-rose-600 dark:text-rose-400">SL ₹{adv.armed_sl_premium?.toFixed(1)}</span>
+          </div>
+          {adv.premium_series && adv.premium_series.length > 0 && (
+            <div className="mt-1">
+              <PremiumSpark series={adv.premium_series} target={adv.armed_target_premium} sl={adv.armed_sl_premium} />
+            </div>
+          )}
         </div>
       )}
 
@@ -166,12 +215,133 @@ function AdviceCard({
   )
 }
 
+/** Live monitor tab — armed positions with trail/P&L/revisions + active intraday alerts. */
+function MonitorTab({ armedMap, alerts, onDisarm, onCloseAlert, busy }: {
+  armedMap: Record<string, ScalperArmedPos>
+  alerts: ScalperAlert[]
+  onDisarm: (key: string) => void
+  onCloseAlert: (a: ScalperAlert) => void
+  busy: string | null
+}) {
+  const entries = Object.entries(armedMap) as Array<[string, ScalperArmedPos]>
+  const activeAlerts = alerts.filter((a) => a.status === 'ACTIVE')
+  if (!entries.length && !activeAlerts.length) {
+    return (
+      <div className="p-2 text-[11px] text-muted-foreground">
+        Nothing live-monitored yet. Arm a signal (or turn on AUTO) to start tracking.
+      </div>
+    )
+  }
+  return (
+    <>
+      {activeAlerts.length > 0 && (
+        <div className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">Intraday alerts ({activeAlerts.length})</div>
+      )}
+      {activeAlerts.map((a) => (
+        <div key={a.id} className="rounded-md border border-border bg-card/50 px-2 py-1">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-1.5">
+              {a.armed && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-emerald-500" />}
+              <span className="truncate text-[10px] font-semibold text-foreground">{a.name || a.key}</span>
+              <span className={cn('shrink-0 rounded border px-1 py-px text-[9px] font-bold', signalColor(`BUY ${a.side}`))}>{a.side}</span>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <span className={cn('text-[10px] font-semibold tabular-nums', (a.pnl_pct ?? 0) >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400')}>
+                {fmtPct(a.pnl_pct)}
+              </span>
+              <button type="button" onClick={() => onCloseAlert(a)} className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-destructive" title="Close alert">
+                <X className="h-2.5 w-2.5" />
+              </button>
+            </div>
+          </div>
+          <div className="mt-0.5 flex items-center justify-between text-[9px] text-muted-foreground tabular-nums">
+            <span className="truncate" title={a.option_symbol}>{a.option_symbol}</span>
+            <span>entry ₹{a.entry_premium?.toFixed(1)} · now ₹{a.current_premium?.toFixed(1)}</span>
+          </div>
+          {a.armed && a.reversal_risk && (
+            <div className={cn('mt-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium', riskColor(a.reversal_risk.label))}>
+              {a.reversal_risk.label} — risk {a.reversal_risk.score}/100
+            </div>
+          )}
+        </div>
+      ))}
+      {entries.length > 0 && (
+        <div className="pt-0.5 text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">Armed positions ({entries.length})</div>
+      )}
+      {entries.map(([key, p]) => {
+        const pnl = p.pnl_pct ?? 0
+        const trail = String(p.trail ?? 'FIXED')
+        return (
+          <div key={key} className="rounded-md border border-primary/40 bg-card/50 px-2 py-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-1.5">
+                <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-emerald-500" title="Live monitoring" />
+                <span className="truncate text-[11px] font-semibold text-foreground">{p.name || key}</span>
+                {p.side && (
+                  <span className={cn('shrink-0 rounded border px-1 py-px text-[9px] font-bold', signalColor(`BUY ${p.side}`))}>
+                    {p.side}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                disabled={busy === key}
+                onClick={() => onDisarm(key)}
+                className="shrink-0 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-px text-[9px] font-semibold text-amber-600 hover:bg-amber-500/20 disabled:opacity-50 dark:text-amber-400"
+                title="Release monitor"
+              >
+                {busy === key ? '…' : '◼ DISARM'}
+              </button>
+            </div>
+            <div className="mt-0.5 truncate text-[9px] text-muted-foreground" title={p.option_symbol}>
+              {p.option_symbol} · armed {p.armed_at ?? '—'} · trail {trail}
+            </div>
+            <div className="mt-1 flex items-center justify-between text-[10px] tabular-nums">
+              <span className="text-muted-foreground">
+                ₹{p.entry_premium?.toFixed(1)} → <b className="text-foreground">₹{p.current_premium?.toFixed(1)}</b>
+                {typeof p.hi_premium === 'number' && <span className="ml-1 text-emerald-600/70 dark:text-emerald-400/70">H ₹{p.hi_premium.toFixed(1)}</span>}
+              </span>
+              <span className={cn('font-semibold', pnl >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400')}>
+                {fmtPct(pnl)}
+              </span>
+            </div>
+            {p.reversal_risk && (
+              <div className={cn('mt-1 rounded px-1.5 py-0.5 text-[9px] font-medium', riskColor(p.reversal_risk.label))}>
+                {p.reversal_risk.label} — risk {p.reversal_risk.score}/100
+              </div>
+            )}
+            {p.premium_series && p.premium_series.length > 1 && (
+              <div className="mt-1">
+                <PremiumSpark series={p.premium_series} target={p.target_premium} sl={p.sl_premium} />
+                <div className="mt-0.5 flex justify-between text-[8px] text-muted-foreground tabular-nums">
+                  <span>{fmtClock(p.premium_series[0].t)}</span>
+                  <span>{fmtClock(p.premium_series[p.premium_series.length - 1].t)}</span>
+                </div>
+              </div>
+            )}
+            {(p.revision_log?.length ?? 0) > 0 && (
+              <div className="mt-1 space-y-0.5 border-t border-border/60 pt-1">
+                {p.revision_log!.slice(-3).map((r, i) => (
+                  <div key={i} className="text-[9px] leading-snug text-muted-foreground">
+                    <span className="tabular-nums">{r.ts}</span> — {r.msg}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </>
+  )
+}
+
 export function ScalperAdvisorPanel(_props: { apiKey: string }) {
   const [data, setData] = useState<ScalperAdvisorResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [tab, setTab] = useState<'signals' | 'alerts' | 'events'>('signals')
+  const [tab, setTab] = useState<'signals' | 'monitor' | 'events'>('signals')
   const [busy, setBusy] = useState<string | null>(null)
+  const [autoArm, setAutoArm] = useState<boolean>(() => localStorage.getItem('oa-scalper-autoarm') === '1')
 
   const load = async (
     refresh = false,
@@ -179,12 +349,28 @@ export function ScalperAdvisorPanel(_props: { apiKey: string }) {
   ) => {
     try {
       setError(null)
-      const res = await scalperApi.getAdvisor(refresh, action)
+      const res = await scalperApi.getAdvisor(refresh, action, autoArm)
       setData(res)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load advisor')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const toggleAutoArm = async () => {
+    const next = !autoArm
+    setAutoArm(next)
+    localStorage.setItem('oa-scalper-autoarm', next ? '1' : '0')
+    await load(true)
+  }
+
+  const closeAlert = async (a: ScalperAlert) => {
+    try {
+      await scalperApi.closeAlert(a.id, 'Manual close from sidebar')
+      await load(true)
+    } catch {
+      /* the next poll re-syncs state anyway */
     }
   }
 
@@ -210,27 +396,39 @@ export function ScalperAdvisorPanel(_props: { apiKey: string }) {
     load()
     const t = setInterval(() => load(), REFRESH_MS)
     return () => clearInterval(t)
-  }, [])
-
-  const closeAlert = async (a: ScalperAlert) => {
-    try {
-      await scalperApi.closeAlert(a.id, 'Manual close from sidebar')
-      await load(true)
-    } catch {
-      /* the next poll re-syncs state anyway */
-    }
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoArm])
 
   const alerts: ScalperAlert[] = data?.monitor?.alerts ?? []
-  const activeAlerts = alerts.filter((a) => a.status === 'ACTIVE')
   const events = data?.monitor?.events ?? []
+  const armedList: number = Object.keys(data?.monitor?.armed_map ?? {}).length
 
   return (
     <PanelShell id="oa-panel-scalper" label="Scalper Advisor" storageKey="oa-trading-scalper-width" defaultWidth={340}>
       <div className="flex items-center justify-between border-b border-border px-2 py-1.5">
-        <div className="text-xs font-semibold text-foreground">Scalper Advisor</div>
+        <div className="flex items-center gap-1.5">
+          <div className="text-xs font-semibold text-foreground">Scalper Advisor</div>
+          {autoArm && (
+            <span className="flex items-center gap-1 rounded bg-emerald-500/10 px-1 py-px text-[9px] font-semibold text-emerald-600 dark:text-emerald-400" title="Every fresh BUY signal is live-monitored automatically">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" /> AUTO
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-1">
           {data && <span className="text-[10px] text-muted-foreground tabular-nums">{data.active_signals} live</span>}
+          <button
+            type="button"
+            onClick={toggleAutoArm}
+            className={cn(
+              'rounded border px-1.5 py-0.5 text-[9px] font-semibold',
+              autoArm
+                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                : 'border-border text-muted-foreground hover:text-foreground'
+            )}
+            title="Automatically live-monitor every fresh BUY signal (target/SL/trailing/reversal) without manual arming"
+          >
+            {autoArm ? 'AUTO ON' : 'AUTO'}
+          </button>
           <button type="button" onClick={() => load(true)} className="rounded p-1 hover:bg-accent" title="Force refresh">
             {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
           </button>
@@ -238,7 +436,7 @@ export function ScalperAdvisorPanel(_props: { apiKey: string }) {
       </div>
 
       <div className="flex border-b border-border text-[11px]">
-        {(['signals', 'alerts', 'events'] as const).map((t) => (
+        {(['signals', 'monitor', 'events'] as const).map((t) => (
           <button
             key={t}
             type="button"
@@ -249,7 +447,7 @@ export function ScalperAdvisorPanel(_props: { apiKey: string }) {
             )}
           >
             {t}
-            {t === 'alerts' && activeAlerts.length > 0 && ` (${activeAlerts.length})`}
+            {t === 'monitor' && armedList > 0 && ` (${armedList})`}
           </button>
         ))}
       </div>
@@ -263,65 +461,15 @@ export function ScalperAdvisorPanel(_props: { apiKey: string }) {
             <AdviceCard key={adv.key} adv={adv} onArm={handleArm} onDisarm={handleDisarm} busy={busy} />
           ))}
 
-        {tab === 'alerts' &&
-          (alerts.length === 0 ? (
-            <div className="p-2 text-[11px] text-muted-foreground">No intraday alerts yet.</div>
-          ) : (
-            alerts.map((a) => (
-              <div key={a.id} className="rounded-md border border-border bg-card/50 px-2 py-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className={cn('rounded border px-1 py-px text-[10px] font-bold', signalColor(`BUY ${a.side}`))}>
-                      {a.side}
-                    </span>
-                    <span className="text-[11px] font-semibold truncate">{a.key}</span>
-                    <span className="text-[10px] text-muted-foreground truncate">{a.option_symbol}</span>
-                  </div>
-                  {a.status === 'ACTIVE' ? (
-                    <button type="button" onClick={() => closeAlert(a)} className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-destructive" title="Close alert">
-                      <X className="h-3 w-3" />
-                    </button>
-                  ) : (
-                    <span className={cn('text-[10px] font-bold', a.close_outcome === 'WIN' ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400')}>
-                      {a.close_outcome} {fmtPct(a.close_pnl_pct)}
-                    </span>
-                  )}
-                </div>
-                <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground tabular-nums">
-                  <span>entry ₹{a.entry_premium?.toFixed(1)} · now ₹{a.current_premium?.toFixed(1)}</span>
-                  {a.status === 'ACTIVE' && (
-                    <span className={cn('font-semibold', (a.pnl_pct ?? 0) >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400')}>
-                      {fmtPct(a.pnl_pct)}
-                    </span>
-                  )}
-                </div>
-                {a.armed && a.reversal_risk && (
-                  <div className={cn('mt-1 rounded px-1.5 py-0.5 text-[10px] font-medium', riskColor(a.reversal_risk.label))}>
-                    {a.reversal_risk.label} — risk {a.reversal_risk.score}/100
-                  </div>
-                )}
-                {a.status === 'ACTIVE' && !a.armed && (
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      setBusy(a.key)
-                      try {
-                        await load(true, { arm: a.key, armAlertId: a.id })
-                        setTab('events')
-                      } finally {
-                        setBusy(null)
-                      }
-                    }}
-                    disabled={busy === a.key}
-                    className="mt-1 w-full rounded border border-emerald-500/40 bg-emerald-500/10 px-1 py-0.5 text-[10px] font-semibold text-emerald-600 hover:bg-emerald-500/20 disabled:opacity-50 dark:text-emerald-400"
-                    title="Arm live monitoring for this alert"
-                  >
-                    ▶ ARM MONITOR
-                  </button>
-                )}
-              </div>
-            ))
-          ))}
+        {tab === 'monitor' && (
+          <MonitorTab
+            armedMap={data?.monitor?.armed_map ?? {}}
+            alerts={alerts}
+            onDisarm={handleDisarm}
+            onCloseAlert={closeAlert}
+            busy={busy}
+          />
+        )}
 
         {tab === 'events' &&
           (events.length === 0 ? (

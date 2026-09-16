@@ -1351,8 +1351,13 @@ def alert_chart_data(alert_id: str, symbol: str, timeframe: str = "5m", n_bars: 
 
 def scalper_advisor(refresh: bool = False, arm_key: str = None, disarm_key: str = None,
                     arm_alert_id: str = None, close_alert_id: str = None,
-                    close_reason: str = "Manual close") -> dict:
-    """Full advisory payload for all instruments + monitor state + intraday alerts."""
+                    close_reason: str = "Manual close", auto_arm: bool = False) -> dict:
+    """Full advisory payload for all instruments + monitor state + intraday alerts.
+
+    auto_arm=True live-monitors every fresh BUY signal without a manual arm:
+    any LIVE instrument with a BUY advisory and no armed position yet is armed
+    (linked to its ACTIVE alert), so target/SL hits, trailing and reversal
+    events stream from the moment a signal fires."""
     now = time.time()
     api_key = _api_key()
     if not api_key:
@@ -1439,6 +1444,22 @@ def scalper_advisor(refresh: bool = False, arm_key: str = None, disarm_key: str 
             disarm(closed.get("key"))
 
     _sync_alerts(advice_by_key)
+
+    if auto_arm:
+        for a_key, adv in advice_by_key.items():
+            if adv.get("status") != "LIVE":
+                continue
+            if not str(adv.get("signal") or "").startswith("BUY") or not adv.get("entry_premium"):
+                continue
+            with _MONITOR_LOCK:
+                already = a_key in _MONITOR["armed"]
+            if already:
+                continue
+            al_id = next((al["id"] for al in _ALERTS.values()
+                          if al.get("key") == a_key and al.get("status") == "ACTIVE"
+                          and al.get("option_symbol") == adv.get("option_symbol")), None)
+            arm(a_key, adv, alert_id=al_id)
+
     new_events = _monitor_pass(advice_by_key, api_key)
     mon = get_monitor()
     hist = alert_history()
