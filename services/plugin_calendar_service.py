@@ -1,16 +1,14 @@
 """
-Market calendar service — economic events + exchange holidays for OpenAlgo.
-
-Two surfaces, both cached hard (calendar data is time-of-day sensitive, not
-tick-sensitive):
+Market calendar plugin service — economic events + exchange holidays.
 
   - economic_calendar(): the week's macro events (the same TradingView-week
     JSON the market brief uses), filtered/paginated for a sidebar panel.
-  - holiday_calendar(): NSE/BSE/MCX holiday lists from NSE's public holiday
-    API, with a static MCX fallback for the current year when the API blocks
-    the request.
-
-No broker dependency: everything is public data.
+  - holiday_calendar(): exchange holidays sourced from OpenAlgo's own market
+    calendar database (database/market_calendar_db.py), which records per
+    holiday which exchanges are fully closed and which trade special sessions
+    — e.g. MCX's evening-only 17:00–23:55 session on most NSE holidays, and
+    MCX fully closed on Republic Day / Good Friday / Gandhi Jayanti /
+    Christmas. A static fallback covers years the DB has not seeded.
 """
 
 import datetime
@@ -22,6 +20,8 @@ import requests
 
 log = __import__("logging").getLogger(__name__)
 
+_IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30), name="IST")
+
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
@@ -32,20 +32,6 @@ _ECON_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
 _HOLIDAY_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
 _ECON_TTL = 600.0        # 10 min — events change a few times a day
 _HOLIDAY_TTL = 21600.0   # 6 h — holiday lists move once a year
-
-_IMPACT_RANK = {"High": 3, "Medium": 2, "Low": 1}
-
-
-def _nse_session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": _UA,
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.nseindia.com/",
-    })
-    s.get("https://www.nseindia.com", timeout=8)
-    return s
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +53,7 @@ def _fetch_economic_events() -> List[dict]:
                     "title": ev.get("title", ""),
                     "date": d,
                     "impact": impact,
-                    "impact_rank": _IMPACT_RANK.get(impact, 0),
+                    "impact_rank": {"High": 3, "Medium": 2, "Low": 1}.get(impact, 0),
                     "actual": ev.get("actual", ""),
                     "forecast": ev.get("forecast", ""),
                     "previous": ev.get("previous", ""),
@@ -105,35 +91,10 @@ def economic_calendar(refresh: bool = False, limit: int = 40) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Holiday calendar (NSE/BSE/MCX)
+# Holiday calendar — from OpenAlgo's market calendar DB (session-aware)
 # ---------------------------------------------------------------------------
-def _parse_nse_holidays(payload: dict) -> List[dict]:
-    """NSE /api/holidays CM payload: rows have tradingDate (dd-MMM-yyyy),
-    description, and sometimes week headers mixed in."""
-    rows = payload.get("data") or []
-    out: List[dict] = []
-    for row in rows:
-        try:
-            if not isinstance(row, dict):
-                continue
-            tm = str(row.get("tradingDate") or "").strip()
-            if not tm:
-                continue
-            day = datetime.datetime.strptime(tm, "%d-%b-%Y").date()
-            out.append({
-                "date": day.isoformat(),
-                "date_display": tm,
-                "day": day.strftime("%a"),
-                "name": str(row.get("description") or "").title(),
-            })
-        except Exception:
-            continue
-    return out
-
-
-# Static fallback: the fixed-date Indian market holidays (published by the
-# exchanges each year). Used only when NSE's API is unreachable so the panel
-# still shows a meaningful list; movable feasts may differ by a day.
+# Static fallback for years the DB has not seeded. Fixed-date holidays only;
+# movable feasts may differ. MCX is listed closed (conservative).
 _STATIC_HOLIDAYS = [
     ("01-26", "Republic Day"),
     ("03-14", "Holi"),
@@ -153,75 +114,188 @@ _STATIC_HOLIDAYS = [
 _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
-def _fallback_holidays(year: int) -> List[dict]:
-    out: List[dict] = []
+def _ms_to_ist_hhmm(ms: Any) -> str | None:
+    try:
+        return datetime.datetime.fromtimestamp(int(ms) / 1000, tz=_IST).strftime("%H:%M")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def _display(date_iso: str) -> tuple[str, str]:
+    d = datetime.date.fromisoformat(date_iso)
+    return d.strftime("%d-%b-%Y"), _WEEKDAYS[d.weekday()]
+
+
+def _within_session(session: str | None, now: datetime.datetime) -> bool:
+    """'17:00 – 23:55' vs now (IST)."""
+    if not session:
+        return False
+    try:
+        parts = session.replace("–", "-").split("-")
+        start = datetime.datetime.strptime(parts[0].strip(), "%H:%M").time()
+        end = datetime.datetime.strptime(parts[1].strip(), "%H:%M").time()
+        return start <= now.time() <= end
+    except (ValueError, IndexError):
+        return False
+
+
+def _upstream_rows(year: int) -> List[dict]:
+    """OpenAlgo's authoritative holiday rows for a year (closed + open exchanges)."""
+    try:
+        from database.market_calendar_db import get_holidays_by_year
+        return get_holidays_by_year(year) or []
+    except Exception as e:
+        log.warning("upstream holiday DB unavailable: %s", e)
+        return []
+
+
+def _fallback_rows(year: int) -> List[dict]:
+    rows = []
     for mmdd, name in _STATIC_HOLIDAYS:
         try:
-            day = datetime.date.fromisoformat(f"{year}-{mmdd}")
+            datetime.date.fromisoformat(f"{year}-{mmdd}")
         except ValueError:
             continue
-        out.append({
-            "date": day.isoformat(),
-            "date_display": day.strftime("%d-%b-%Y"),
-            "day": _WEEKDAYS[day.weekday()],
-            "name": name,
+        rows.append({
+            "date": f"{year}-{mmdd}",
+            "description": name,
+            "holiday_type": "TRADING_HOLIDAY",
+            "closed_exchanges": ["NSE", "BSE", "NFO", "BFO", "CDS", "BCD", "MCX"],
+            "open_exchanges": [],
         })
-    return sorted(out, key=lambda h: h["date"])
+    return rows
 
 
-def _fetch_holiday_payloads() -> Dict[str, dict]:
-    """NSE's public holiday endpoints (CM = equities, FO = derivatives).
-    MCX's metals & energy contracts follow the FO holiday schedule, and BSE
-    equity holidays match the CM list in practice."""
-    out: Dict[str, dict] = {}
-    try:
-        s = _nse_session()
-        for key, seg in (("CM", "CM"), ("FO", "FO")):
-            try:
-                r = s.get(
-                    "https://www.nseindia.com/api/holidays",
-                    params={"type": seg},
-                    timeout=10,
-                )
-                if r.status_code == 200:
-                    out[key] = r.json() or {}
-            except Exception:
-                continue
-    except Exception as e:
-        log.warning("holiday fetch failed: %s", e)
-    return out
+def _mcx_view(row: dict) -> dict:
+    """Classify one holiday row from MCX's perspective.
+
+    CLOSED    — MCX in closed_exchanges (full holiday)
+    EVENING   — MCX trades a special session that day (e.g. 17:00–23:55)
+    OPEN      — not listed / special day where MCX keeps normal hours
+    """
+    opens = {o.get("exchange"): o for o in (row.get("open_exchanges") or [])}
+    mcx_open = opens.get("MCX")
+    if "MCX" in (row.get("closed_exchanges") or []):
+        return {"kind": "CLOSED", "session": None}
+    if mcx_open:
+        s = _ms_to_ist_hhmm(mcx_open.get("start_time"))
+        e = _ms_to_ist_hhmm(mcx_open.get("end_time"))
+        session = f"{s} – {e}" if s and e else None
+        kind = "EVENING"
+        if s and s < "12:00":
+            kind = "SPECIAL"  # daytime special session (e.g. Muhurat-style)
+        return {"kind": kind, "session": session}
+    return {"kind": "OPEN", "session": None}
 
 
 def holiday_calendar(refresh: bool = False) -> Dict[str, Any]:
-    """NSE (CM), BSE (CM mirror) and MCX (FO mirror) holiday lists."""
+    """Holiday lists with per-exchange session detail (MCX evening sessions included)."""
     with _LOCK:
         if not refresh and _HOLIDAY_CACHE["data"] and time.time() - _HOLIDAY_CACHE["ts"] < _HOLIDAY_TTL:
             return _HOLIDAY_CACHE["data"]
 
-    now = datetime.datetime.now()
-    year = now.year
-    payloads = _fetch_holiday_payloads()
-
-    nse = _parse_nse_holidays(payloads.get("CM") or {})
-    nse_fo = _parse_nse_holidays(payloads.get("FO") or {})
-    if not nse:
-        nse = _fallback_holidays(year)
-    mcx = nse_fo or nse
-
+    now = datetime.datetime.now(_IST)
     today = now.date().isoformat()
+    year = now.year
+
+    rows = _upstream_rows(year)
+    source = "openalgo-db"
+    if not rows:
+        source = "fallback"
+        rows = _fallback_rows(year)
+
+    holidays: List[dict] = []
+    nse_list: List[dict] = []
+    bse_list: List[dict] = []
+    mcx_list: List[dict] = []       # MCX fully closed
+    mcx_special: List[dict] = []    # MCX evening / special sessions
+
+    for row in rows:
+        date_iso = str(row.get("date") or "")
+        if not date_iso:
+            continue
+        try:
+            disp, wd = _display(date_iso)
+        except ValueError:
+            continue
+        name = str(row.get("description") or "")
+        closed = set(row.get("closed_exchanges") or [])
+        mcx = _mcx_view(row)
+
+        item = {"date": date_iso, "date_display": disp, "day": wd, "name": name}
+        detail = {
+            **item,
+            "nse_closed": "NSE" in closed,
+            "bse_closed": "BSE" in closed,
+            "mcx_closed": mcx["kind"] == "CLOSED",
+            "mcx_kind": mcx["kind"],
+            "mcx_session": mcx["session"],
+            "mcx_note": (
+                "MCX closed" if mcx["kind"] == "CLOSED"
+                else f"MCX evening session {mcx['session']}" if mcx["kind"] == "EVENING" and mcx["session"]
+                else f"MCX special session {mcx['session']}" if mcx["kind"] == "SPECIAL" and mcx["session"]
+                else "MCX open (normal hours)"
+            ),
+        }
+        holidays.append(detail)
+        if detail["nse_closed"]:
+            nse_list.append(item)
+        if detail["bse_closed"]:
+            bse_list.append(item)
+        if detail["mcx_closed"]:
+            mcx_list.append(item)
+        if mcx["kind"] in ("EVENING", "SPECIAL"):
+            mcx_special.append({**item, "session": mcx["session"]})
+
+    holidays.sort(key=lambda h: h["date"])
+
+    def _today_status(exch: str) -> dict:
+        row = next((h for h in holidays if h["date"] == today), None)
+        if row:
+            if exch == "MCX":
+                if row["mcx_closed"]:
+                    return {"trading": False, "note": "Holiday — MCX closed today"}
+                if row["mcx_session"]:
+                    open_now = _within_session(row["mcx_session"], now)
+                    return {
+                        "trading": open_now,
+                        "note": f"Holiday: {row['mcx_session']} only" + (" — session OPEN now" if open_now else ""),
+                    }
+                return {"trading": True, "note": "Trading (special day, normal hours)"}
+            if row["nse_closed"]:
+                return {"trading": False, "note": "Holiday — closed today"}
+            return {"trading": True, "note": "Trading (special day, normal hours)"}
+        if now.weekday() >= 5:
+            return {"trading": False, "note": "Weekend"}
+        return {"trading": True, "note": "Trading today"}
+
+    nse_today = _today_status("NSE")
+    mcx_today = _today_status("MCX")
+
+    next_nse = next((h for h in holidays if h["date"] >= today and h["nse_closed"]), None)
+    next_mcx = next((h for h in holidays if h["date"] >= today and h["mcx_closed"]), None)
+
     data = {
         "status": "success",
         "year": year,
-        "nse": nse,
-        "bse": nse,
-        "mcx": mcx,
-        "next_nse_holiday": next((h for h in nse if h["date"] >= today), None),
+        "source": source,
+        # Detailed per-day rows (drives the panel's MCX session badges)
+        "holidays": holidays,
+        # Compat lists per exchange (full-holiday days only)
+        "nse": nse_list,
+        "bse": bse_list,
+        "mcx": mcx_list,
+        # MCX evening/special session days — the "open in evening" detail
+        "mcx_special": mcx_special,
         "today_status": {
             "today": today,
-            "nse_trading_day": not any(h["date"] == today for h in nse),
-            "mcx_trading_day": not any(h["date"] == today for h in mcx),
+            "nse_trading_day": nse_today["trading"],
+            "mcx_trading_day": mcx_today["trading"],
+            "nse": nse_today,
+            "mcx": mcx_today,
         },
-        "source": "nse" if payloads else "fallback",
+        "next_nse_holiday": next_nse,
+        "next_mcx_holiday": next_mcx,
         "ts": time.time(),
     }
     with _LOCK:

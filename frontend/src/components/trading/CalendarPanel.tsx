@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Loader2, RefreshCw } from 'lucide-react'
-import { calendarApi, type EconomicEvent, type Holiday } from '@/api/market-brief-news'
+import { calendarApi, type EconomicEvent, type HolidayDetail } from '@/api/market-brief-news'
 import { PanelShell } from './panelShell'
 import { cn } from '@/lib/utils'
 
@@ -59,21 +59,47 @@ function EventRow({ e }: { e: EconomicEvent }) {
   )
 }
 
-function HolidayList({ items, highlight }: { items: Holiday[]; highlight?: boolean }) {
+function HolidayList({ items, showAll = false }: { items: HolidayDetail[]; showAll?: boolean }) {
   const today = new Date().toISOString().slice(0, 10)
   const upcoming = items.filter((h) => h.date >= today)
-  if (!upcoming.length) {
+  // Default view: days where NSE/BSE or MCX is actually closed. The "all"
+  // sub-tab additionally shows special-session days (e.g. MCX evening-only).
+  const shown = showAll ? upcoming : upcoming.filter((h) => h.nse_closed || h.mcx_closed)
+  if (!shown.length) {
     return <div className="p-2 text-[11px] text-muted-foreground">No upcoming holidays on record.</div>
   }
   return (
     <>
-      {upcoming.map((h) => (
-        <div key={`${h.date}-${h.name}`} className={cn('flex items-center justify-between border-b border-border/40 px-2 py-1.5', highlight && 'bg-primary/[0.03]')}>
-          <div className="min-w-0">
-            <div className="text-[11px] leading-snug text-foreground">{h.name}</div>
-            <div className="text-[9px] text-muted-foreground">{h.day}</div>
+      {shown.map((h) => (
+        <div key={`${h.date}-${h.name}`} className="border-b border-border/40 px-2 py-1.5">
+          <div className="flex items-center justify-between gap-1.5">
+            <div className="min-w-0">
+              <div className="truncate text-[11px] leading-snug text-foreground">{h.name}</div>
+              <div className="text-[9px] text-muted-foreground">{h.day} · {h.date_display}</div>
+            </div>
+            <div className="flex shrink-0 flex-col items-end gap-0.5">
+              <span className={cn(
+                'rounded border px-1 py-px text-[9px] font-semibold',
+                h.nse_closed
+                  ? 'border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400'
+                  : 'border-border text-muted-foreground'
+              )}>
+                NSE {h.nse_closed ? '✕' : '●'}
+              </span>
+              <span className={cn(
+                'rounded border px-1 py-px text-[9px] font-semibold',
+                h.mcx_closed
+                  ? 'border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400'
+                  : h.mcx_kind === 'EVENING' || h.mcx_kind === 'SPECIAL'
+                    ? 'border-sky-500/30 bg-sky-500/10 text-sky-600 dark:text-sky-400'
+                    : 'border-border text-muted-foreground'
+              )}
+                title={h.mcx_note}
+              >
+                {h.mcx_closed ? 'MCX ✕' : h.mcx_session ? `MCX ${h.mcx_session}` : 'MCX ●'}
+              </span>
+            </div>
           </div>
-          <span className="shrink-0 text-[10px] font-medium tabular-nums text-muted-foreground">{h.date_display}</span>
         </div>
       ))}
     </>
@@ -84,7 +110,7 @@ export function CalendarPanel(_props: { apiKey: string }) {
   const [tab, setTab] = useState<'economic' | 'holidays'>('economic')
   const [econ, setEcon] = useState<Awaited<ReturnType<typeof calendarApi.getEconomic>> | null>(null)
   const [hol, setHol] = useState<Awaited<ReturnType<typeof calendarApi.getHolidays>> | null>(null)
-  const [holExchange, setHolExchange] = useState<'nse' | 'bse' | 'mcx'>('nse')
+  const [holExchange, setHolExchange] = useState<'all' | 'nse' | 'bse' | 'mcx'>('all')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -161,21 +187,23 @@ export function CalendarPanel(_props: { apiKey: string }) {
           hol ? (
             <>
               <div className="border-b border-border/40 bg-muted/20 px-2 py-1.5 text-[10px]">
-                <span className={cn('font-semibold', hol.today_status.nse_trading_day ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400')}>
-                  {hol.today_status.nse_trading_day ? 'NSE/BSE: trading today' : 'NSE/BSE: holiday today'}
-                </span>
-                <span className="mx-1.5 text-border">|</span>
-                <span className={cn('font-semibold', hol.today_status.mcx_trading_day ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400')}>
-                  {hol.today_status.mcx_trading_day ? 'MCX: trading today' : 'MCX: holiday today'}
-                </span>
+                <div className={cn('font-semibold', hol.today_status.nse.trading ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400')}>
+                  NSE/BSE: {hol.today_status.nse.note}
+                </div>
+                <div className={cn('font-semibold', hol.today_status.mcx.trading ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400')}>
+                  MCX: {hol.today_status.mcx.note}
+                </div>
                 {hol.next_nse_holiday && (
                   <div className="mt-0.5 text-[9px] text-muted-foreground">
-                    Next holiday: {hol.next_nse_holiday.name} · {hol.next_nse_holiday.date_display}
+                    Next NSE holiday: {hol.next_nse_holiday.name} · {hol.next_nse_holiday.date_display}
+                    {hol.next_nse_holiday.mcx_kind === 'EVENING' && hol.next_nse_holiday.mcx_session
+                      ? ` — MCX trades ${hol.next_nse_holiday.mcx_session}`
+                      : ''}
                   </div>
                 )}
               </div>
               <div className="flex border-b border-border/40 text-[10px]">
-                {(['nse', 'bse', 'mcx'] as const).map((x) => (
+                {(['all', 'nse', 'bse', 'mcx'] as const).map((x) => (
                   <button
                     key={x}
                     type="button"
@@ -186,7 +214,7 @@ export function CalendarPanel(_props: { apiKey: string }) {
                   </button>
                 ))}
               </div>
-              <HolidayList items={hol[holExchange]} />
+              <HolidayList items={hol.holidays} showAll={holExchange === 'all'} />
             </>
           ) : (
             <div className="p-2 text-[11px] text-muted-foreground">Loading…</div>

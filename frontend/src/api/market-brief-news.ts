@@ -225,19 +225,38 @@ export interface Holiday {
   name: string
 }
 
+/** One holiday with per-exchange session detail (from OpenAlgo's calendar DB). */
+export interface HolidayDetail extends Holiday {
+  nse_closed: boolean
+  bse_closed: boolean
+  mcx_closed: boolean
+  /** CLOSED = full holiday · EVENING = evening session only · SPECIAL = daytime special · OPEN */
+  mcx_kind: 'CLOSED' | 'EVENING' | 'SPECIAL' | 'OPEN'
+  mcx_session: string | null
+  mcx_note: string
+}
+
 export interface HolidayCalendarResponse {
   status: string
   year: number
+  source: string
+  /** Detailed rows, sorted by date — drives the MCX session badges. */
+  holidays: HolidayDetail[]
+  /** Full-holiday days per exchange (compat). */
   nse: Holiday[]
   bse: Holiday[]
   mcx: Holiday[]
-  next_nse_holiday: Holiday | null
+  /** Days where MCX trades an evening/special session despite an NSE holiday. */
+  mcx_special: Array<Holiday & { session: string }>
   today_status: {
     today: string
     nse_trading_day: boolean
     mcx_trading_day: boolean
+    nse: { trading: boolean; note: string }
+    mcx: { trading: boolean; note: string }
   }
-  source: string
+  next_nse_holiday: HolidayDetail | null
+  next_mcx_holiday: HolidayDetail | null
   ts: number
   error?: string
 }
