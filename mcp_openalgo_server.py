@@ -52,24 +52,44 @@ def _safe_repo_path(rel):
 
 
 def _find_api_key():
-    """Read the OpenAlgo API key straight from its sqlite DBs."""
-    for db in sorted((OA_DIR / "db").glob("*.db")):
-        try:
-            conn = sqlite3.connect(str(db))
-            tables = {
-                r[0]
-                for r in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
-            }
-            if "api_keys" in tables:
-                row = conn.execute("SELECT api_key FROM api_keys LIMIT 1").fetchone()
-                conn.close()
-                if row and row[0]:
-                    return row[0]
-            conn.close()
-        except Exception:  # noqa: BLE001, S110
-            continue
+    """Decrypt the OpenAlgo API key from its DB using the app's own KDF
+    (PBKDF2 over API_KEY_PEPPER + FERNET_SALT from .env). Values are never
+    printed or logged."""
+    try:
+        env = {}
+        for line in (OA_DIR / ".env").read_text().splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip().strip("\"'")
+        pepper = os.environ.get("API_KEY_PEPPER") or env.get("API_KEY_PEPPER")
+        salt_hex = os.environ.get("FERNET_SALT") or env.get("FERNET_SALT")
+        if not pepper or not salt_hex:
+            return None
+        from cryptography.fernet import Fernet
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        import base64
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
+                         salt=bytes.fromhex(salt_hex), iterations=100000)
+        fernet = Fernet(base64.urlsafe_b64encode(kdf.derive(pepper.encode())))
+        db_url = env.get("DATABASE_URL", "sqlite:///db/openalgo.db")
+        if db_url.startswith("sqlite:///"):
+            rel = db_url[len("sqlite:///"):]
+            db_path = rel if rel.startswith("/") else str(OA_DIR / rel)
+        else:
+            db_path = str(OA_DIR / "db" / "openalgo.db")
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT api_key_encrypted FROM api_keys "
+            "WHERE api_key_encrypted IS NOT NULL AND api_key_encrypted != '' "
+            "ORDER BY id LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if row:
+            return fernet.decrypt(row[0].encode()).decode()
+    except Exception:  # noqa: BLE001, S110
+        return None
     return None
 
 
