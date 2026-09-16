@@ -54,6 +54,11 @@ export interface ScalperAdvice {
   pretrade?: { verdict: string; notes: string[]; risk_score: number } | null
   armed?: boolean
   armed_pnl_pct?: number
+  armed_target_premium?: number | null
+  armed_sl_premium?: number | null
+  armed_target_pct?: number | null
+  armed_sl_pct?: number | null
+  armed_at?: string | null
   reversal_risk?: ScalperReversalRisk | null
   revision_log?: Array<{ ts: string; msg: string }>
 }
@@ -171,10 +176,16 @@ export interface OrderflowDetail {
 }
 
 export const scalperApi = {
-  getAdvisor: async (refresh = false): Promise<ScalperAdvisorResponse> => {
-    const response = await webClient.get('/plugins/scalper/advisor', {
-      params: refresh ? { refresh: '1' } : undefined,
-    })
+  getAdvisor: async (
+    refresh = false,
+    action?: { arm?: string; disarm?: string; armAlertId?: string }
+  ): Promise<ScalperAdvisorResponse> => {
+    const params: Record<string, string> = {}
+    if (refresh) params.refresh = '1'
+    if (action?.arm) params.arm = action.arm
+    if (action?.disarm) params.disarm = action.disarm
+    if (action?.armAlertId) params.arm_alert_id = action.armAlertId
+    const response = await webClient.get('/plugins/scalper/advisor', { params })
     return response.data
   },
 
@@ -200,9 +211,19 @@ export const orderflowApi = {
     return response.data
   },
 
-  getDetail: async (symbol: string, tf = '5m', bars = 25): Promise<OrderflowDetail> => {
+  getTableRefresh: async (
+    tf = '5m',
+    refresh = false
+  ): Promise<{ status: string; timeframe: string; rows: OrderflowRow[] }> => {
+    const response = await webClient.get('/plugins/orderflow/table', {
+      params: refresh ? { tf, refresh: '1' } : { tf },
+    })
+    return response.data
+  },
+
+  getDetail: async (symbol: string, tf = '5m', bars = 25, refresh = false): Promise<OrderflowDetail> => {
     const response = await webClient.get('/plugins/orderflow/detail', {
-      params: { symbol, tf, bars },
+      params: refresh ? { symbol, tf, bars, refresh: '1' } : { symbol, tf, bars },
     })
     return response.data
   },

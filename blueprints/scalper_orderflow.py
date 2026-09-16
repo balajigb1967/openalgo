@@ -16,6 +16,10 @@ Endpoints (all under /plugins/):
   GET  /plugins/orderflow/health     liveness + DB probes for both plugins
 """
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 from flask import Blueprint, jsonify, request
 from flask import session as flask_session
 
@@ -48,6 +52,15 @@ DEFAULT_ORDERFLOW_ROOTS = [
 ]
 
 _MAX_TF = {"1m", "3m", "5m", "15m", "30m", "1h"}
+
+# ---- server-side caches: the table fans out to 9 broker history calls, so a
+# 60s cache keeps the panel's 30s polling from rate-limit-tripping the broker
+# (history service enforces 3 req/s). refresh=1 bypasses.
+_TABLE_CACHE = {"ts": 0.0, "data": None, "lock": threading.Lock()}
+_TABLE_TTL = 60.0
+_DETAIL_CACHE = {}   # (symbol, tf, bars) -> {"ts": float, "data": dict}
+_DETAIL_TTL = 30.0
+_DETAIL_LOCK = threading.Lock()
 
 
 def _uid() -> str:
@@ -115,39 +128,54 @@ def scalper_chart_route():
         return jsonify({"status": "error", "message": f"Chart failed: {e}"}), 500
 
 
+def _orderflow_row(inst: dict, tf: str) -> dict:
+    """One table row (runs in a worker thread)."""
+    try:
+        data = get_orderflow(f"{inst['market']}:{inst['key']}", tf, 25)
+        s = data.get("summary") or {}
+        return {
+            "key": inst["key"],
+            "name": inst["name"],
+            "market": inst["market"],
+            "ltp": s.get("ltp"),
+            "chp": s.get("chp"),
+            "delta_bias": s.get("delta_bias"),
+            "session_delta": s.get("session_delta"),
+            "session_cvd": s.get("session_cvd"),
+            "total_volume": s.get("total_volume"),
+            "poc": s.get("poc"),
+            "vah": s.get("vah"),
+            "val": s.get("val"),
+            "bar_count": s.get("bar_count"),
+            "target_symbol": data.get("target_symbol"),
+            "updated_at": s.get("updated_at"),
+        }
+    except Exception as row_e:
+        logger.warning("orderflow row %s failed: %s", inst["key"], row_e)
+        return {"key": inst["key"], "name": inst["name"],
+                "market": inst["market"], "error": str(row_e)}
+
+
 @scalper_orderflow_bp.route("/orderflow/table", methods=["GET"])
 @check_session_validity
 def orderflow_table_route():
-    """Orderflow rows for the default root set. Query: tf (default 5m)."""
+    """Orderflow rows for the default root set. Query: tf (default 5m), refresh=1.
+    Rows are fetched in parallel and cached for 60s."""
     try:
         tf = request.args.get("tf") or "5m"
-        rows = []
-        for inst in DEFAULT_ORDERFLOW_ROOTS:
-            try:
-                data = get_orderflow(f"{inst['market']}:{inst['key']}", tf, 25)
-                s = data.get("summary") or {}
-                rows.append({
-                    "key": inst["key"],
-                    "name": inst["name"],
-                    "market": inst["market"],
-                    "ltp": s.get("ltp"),
-                    "chp": s.get("chp"),
-                    "delta_bias": s.get("delta_bias"),
-                    "session_delta": s.get("session_delta"),
-                    "session_cvd": s.get("session_cvd"),
-                    "total_volume": s.get("total_volume"),
-                    "poc": s.get("poc"),
-                    "vah": s.get("vah"),
-                    "val": s.get("val"),
-                    "bar_count": s.get("bar_count"),
-                    "target_symbol": data.get("target_symbol"),
-                    "updated_at": s.get("updated_at"),
-                })
-            except Exception as row_e:
-                logger.warning("orderflow row %s failed: %s", inst["key"], row_e)
-                rows.append({"key": inst["key"], "name": inst["name"],
-                             "market": inst["market"], "error": str(row_e)})
-        return jsonify({"status": "success", "timeframe": tf, "rows": rows})
+        refresh = (request.args.get("refresh") in ("1", "true", "yes"))
+        now = time.time()
+        with _TABLE_CACHE["lock"]:
+            cached = _TABLE_CACHE.get("data") if not refresh else None
+            if cached and cached.get("timeframe") == tf and now - _TABLE_CACHE["ts"] < _TABLE_TTL:
+                return jsonify(cached)
+        with ThreadPoolExecutor(max_workers=len(DEFAULT_ORDERFLOW_ROOTS)) as ex:
+            rows = list(ex.map(lambda inst: _orderflow_row(inst, tf), DEFAULT_ORDERFLOW_ROOTS))
+        payload = {"status": "success", "timeframe": tf, "rows": rows}
+        with _TABLE_CACHE["lock"]:
+            _TABLE_CACHE["ts"] = time.time()
+            _TABLE_CACHE["data"] = payload
+        return jsonify(payload)
     except Exception as e:
         logger.exception(f"orderflow table failed: {e}")
         return jsonify({"status": "error", "message": f"Orderflow failed: {e}"}), 500
@@ -163,7 +191,18 @@ def orderflow_detail_route():
         if tf not in _MAX_TF | {"D"}:
             tf = "5m"
         bars_n = int(request.args.get("bars") or 25)
+        refresh = (request.args.get("refresh") in ("1", "true", "yes"))
+        ck = (symbol.upper(), tf, bars_n)
+        now = time.time()
+        with _DETAIL_LOCK:
+            cached = _DETAIL_CACHE.get(ck) if not refresh else None
+            if cached and now - cached["ts"] < _DETAIL_TTL:
+                return jsonify(cached["data"])
         data = get_orderflow(symbol, tf, bars_n)
+        with _DETAIL_LOCK:
+            if len(_DETAIL_CACHE) > 64:
+                _DETAIL_CACHE.clear()
+            _DETAIL_CACHE[ck] = {"ts": time.time(), "data": data}
         return jsonify(data)
     except Exception as e:
         logger.exception(f"orderflow detail failed: {e}")

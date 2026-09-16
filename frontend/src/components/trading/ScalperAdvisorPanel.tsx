@@ -46,14 +46,26 @@ function fmtPct(v?: number | null): string {
   return `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`
 }
 
-function AdviceCard({ adv }: { adv: ScalperAdvice }) {
+function AdviceCard({
+  adv,
+  onArm,
+  onDisarm,
+  busy,
+}: {
+  adv: ScalperAdvice
+  onArm: (key: string) => void
+  onDisarm: (key: string) => void
+  busy: string | null
+}) {
   const [open, setOpen] = useState(false)
   const isBuy = adv.signal === 'BUY CE' || adv.signal === 'BUY PE'
   const pnl = adv.armed_pnl_pct
+  const isBusy = busy === adv.key
   return (
-    <div className="rounded-md border border-border bg-card/50 px-2 py-1.5">
+    <div className={cn('rounded-md border bg-card/50 px-2 py-1.5', adv.armed ? 'border-primary/50' : 'border-border')}>
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
+          {adv.armed && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-emerald-500" title="Monitor armed" />}
           <span className="text-[11px] font-semibold text-foreground truncate">{adv.name}</span>
           {adv.spot !== null && (
             <span className="text-[10px] text-muted-foreground tabular-nums">
@@ -93,13 +105,50 @@ function AdviceCard({ adv }: { adv: ScalperAdvice }) {
         )}
       </div>
 
-      {adv.note && !isBuy && <div className="mt-0.5 text-[10px] text-muted-foreground truncate" title={adv.note}>{adv.note}</div>}
-
-      {(adv.basis?.length > 0 || adv.reversal_risk) && (
-        <button type="button" onClick={() => setOpen((v) => !v)} className="mt-0.5 text-[10px] text-muted-foreground hover:text-foreground underline-offset-1 hover:underline">
-          {open ? 'Hide details' : 'Details'}
-        </button>
+      {/* Armed position live strip: entry → current vs target / SL */}
+      {adv.armed && (
+        <div className="mt-1 flex items-center justify-between rounded bg-primary/5 px-1.5 py-0.5 text-[10px] tabular-nums">
+          <span className="text-muted-foreground">
+            LIVE ₹{adv.entry_premium?.toFixed(1)} → <b className="text-foreground">₹{adv.current_premium?.toFixed(1)}</b>
+          </span>
+          <span className="text-emerald-600 dark:text-emerald-400">T ₹{adv.armed_target_premium?.toFixed(1)}</span>
+          <span className="text-rose-600 dark:text-rose-400">SL ₹{adv.armed_sl_premium?.toFixed(1)}</span>
+        </div>
       )}
+
+      <div className="mt-1 flex items-center justify-between gap-1">
+        {isBuy ? (
+          adv.armed ? (
+            <button
+              type="button"
+              disabled={isBusy}
+              onClick={() => onDisarm(adv.key)}
+              className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-600 hover:bg-amber-500/20 disabled:opacity-50 dark:text-amber-400"
+              title="Release the position monitor (stops tracking)"
+            >
+              {isBusy ? '…' : '◼ DISARM'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={isBusy}
+              onClick={() => onArm(adv.key)}
+              className="rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-600 hover:bg-emerald-500/20 disabled:opacity-50 dark:text-emerald-400"
+              title="Arm live monitoring: target/SL hits, trailing, reversal alerts"
+            >
+              {isBusy ? '…' : '▶ ARM'}
+            </button>
+          )
+        ) : (
+          <span className="text-[10px] text-muted-foreground">{adv.note?.slice(0, 44) || '—'}</span>
+        )}
+        {(adv.basis?.length > 0 || adv.reversal_risk) && (
+          <button type="button" onClick={() => setOpen((v) => !v)} className="text-[10px] text-muted-foreground hover:text-foreground underline-offset-1 hover:underline">
+            {open ? 'Hide' : 'Details'}
+          </button>
+        )}
+      </div>
+
       {open && (
         <div className="mt-1 space-y-0.5 border-t border-border pt-1">
           {adv.reversal_risk && adv.armed && (
@@ -121,16 +170,38 @@ export function ScalperAdvisorPanel(_props: { apiKey: string }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<'signals' | 'alerts' | 'events'>('signals')
+  const [busy, setBusy] = useState<string | null>(null)
 
-  const load = async (refresh = false) => {
+  const load = async (
+    refresh = false,
+    action?: { arm?: string; disarm?: string; armAlertId?: string }
+  ) => {
     try {
       setError(null)
-      const res = await scalperApi.getAdvisor(refresh)
+      const res = await scalperApi.getAdvisor(refresh, action)
       setData(res)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load advisor')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleArm = async (key: string) => {
+    setBusy(key)
+    try {
+      await load(true, { arm: key })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const handleDisarm = async (key: string) => {
+    setBusy(key)
+    try {
+      await load(true, { disarm: key })
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -187,7 +258,9 @@ export function ScalperAdvisorPanel(_props: { apiKey: string }) {
         {data?.error && <div className="rounded bg-amber-500/10 px-2 py-1 text-[11px] text-amber-600 dark:text-amber-400">{data.error}</div>}
 
         {tab === 'signals' &&
-          (data?.instruments ?? []).map((adv) => <AdviceCard key={adv.key} adv={adv} />)}
+          (data?.instruments ?? []).map((adv) => (
+            <AdviceCard key={adv.key} adv={adv} onArm={handleArm} onDisarm={handleDisarm} busy={busy} />
+          ))}
 
         {tab === 'alerts' &&
           (alerts.length === 0 ? (
@@ -225,6 +298,25 @@ export function ScalperAdvisorPanel(_props: { apiKey: string }) {
                   <div className={cn('mt-1 rounded px-1.5 py-0.5 text-[10px] font-medium', riskColor(a.reversal_risk.label))}>
                     {a.reversal_risk.label} — risk {a.reversal_risk.score}/100
                   </div>
+                )}
+                {a.status === 'ACTIVE' && !a.armed && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setBusy(a.key)
+                      try {
+                        await load(true, { arm: a.key, armAlertId: a.id })
+                        setTab('events')
+                      } finally {
+                        setBusy(null)
+                      }
+                    }}
+                    disabled={busy === a.key}
+                    className="mt-1 w-full rounded border border-emerald-500/40 bg-emerald-500/10 px-1 py-0.5 text-[10px] font-semibold text-emerald-600 hover:bg-emerald-500/20 disabled:opacity-50 dark:text-emerald-400"
+                    title="Arm live monitoring for this alert"
+                  >
+                    ▶ ARM MONITOR
+                  </button>
                 )}
               </div>
             ))

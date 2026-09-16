@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils'
  * near-month futures contract.
  */
 
-const REFRESH_MS = 30_000
+const REFRESH_MS = 45_000
 const TFS = ['1m', '3m', '5m', '15m', '30m', '1h']
 
 function deltaColor(v: number): string {
@@ -76,14 +76,14 @@ export function OrderflowPanel({ activeSymbol }: { apiKey: string; activeSymbol:
     if (activeSymbol) setSymbol(activeSymbol)
   }, [activeSymbol])
 
-  const load = async () => {
+  const load = async (refresh = false) => {
     try {
       setError(null)
       if (mode === 'table') {
-        const res = await orderflowApi.getTable(tf)
+        const res = await orderflowApi.getTableRefresh(tf, refresh)
         setRows(res.rows ?? [])
       } else {
-        const res = await orderflowApi.getDetail(symbol, tf, 25)
+        const res = await orderflowApi.getDetail(symbol, tf, 25, refresh)
         setDetail(res)
       }
     } catch (e) {
@@ -107,7 +107,7 @@ export function OrderflowPanel({ activeSymbol }: { apiKey: string; activeSymbol:
       <div className="flex items-center justify-between border-b border-border px-2 py-1.5">
         <div className="text-xs font-semibold text-foreground">Orderflow</div>
         <div className="flex items-center gap-1">
-          <button type="button" onClick={load} className="rounded p-1 hover:bg-accent" title="Refresh">
+          <button type="button" onClick={() => load(true)} className="rounded p-1 hover:bg-accent" title="Force refresh (bypasses the 60s server cache)">
             {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
           </button>
         </div>
