@@ -6,6 +6,7 @@ import {
   type ScalperAlert,
   type ScalperAdvisorResponse,
 } from '@/api/scalper-orderflow'
+import { PanelShell } from './panelShell'
 import { cn } from '@/lib/utils'
 
 /**
@@ -225,7 +226,7 @@ export function ScalperAdvisorPanel(_props: { apiKey: string }) {
   const events = data?.monitor?.events ?? []
 
   return (
-    <div className="flex h-full flex-col">
+    <PanelShell id="oa-panel-scalper" label="Scalper Advisor" storageKey="oa-trading-scalper-width" defaultWidth={340}>
       <div className="flex items-center justify-between border-b border-border px-2 py-1.5">
         <div className="text-xs font-semibold text-foreground">Scalper Advisor</div>
         <div className="flex items-center gap-1">
@@ -341,6 +342,6 @@ export function ScalperAdvisorPanel(_props: { apiKey: string }) {
       <div className="border-t border-border px-2 py-1 text-[9px] text-muted-foreground">
         Advisory only — option buying is high risk.
       </div>
-    </div>
+    </PanelShell>
   )
 }

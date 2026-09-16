@@ -25,6 +25,8 @@ from flask import session as flask_session
 
 from database.orderflow_db import health_check as of_health
 from database.scalper_db import health_check as scalper_health
+from services.market_brief_service import market_brief
+from services.market_news_service import fetch_news, fetch_symbol_news
 from services.orderflow_service import get_orderflow
 from services.scalper_advisor_service import (
     alert_chart_data,
@@ -222,3 +224,53 @@ def orderflow_health_route():
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Market Brief
+# ---------------------------------------------------------------------------
+_BRIEF_RT_CACHE = {"ts": 0.0, "data": None}
+_BRIEF_RT_LOCK = threading.Lock()
+
+
+@scalper_orderflow_bp.route("/brief", methods=["GET"])
+@check_session_validity
+def market_brief_route():
+    """Full market brief snapshot (server-cached 30s, stale-while-revalidate).
+    Query: refresh=1 forces a rebuild."""
+    try:
+        refresh = (request.args.get("refresh") in ("1", "true", "yes"))
+        data = market_brief(refresh=refresh)
+        return jsonify(data)
+    except Exception as e:
+        logger.exception(f"market brief failed: {e}")
+        return jsonify({"status": "error", "message": f"Brief failed: {e}"}), 500
+
+
+# ---------------------------------------------------------------------------
+# News (RSS + TradingView headlines)
+# ---------------------------------------------------------------------------
+@scalper_orderflow_bp.route("/news", methods=["GET"])
+@check_session_validity
+def news_route():
+    """Merged RSS headlines (Indian + global). Query: limit, refresh=1."""
+    try:
+        limit = min(100, max(10, int(request.args.get("limit") or 60)))
+        refresh = (request.args.get("refresh") in ("1", "true", "yes"))
+        return jsonify(fetch_news(limit=limit, refresh=refresh))
+    except Exception as e:
+        logger.exception(f"news failed: {e}")
+        return jsonify({"status": "error", "message": f"News failed: {e}"}), 500
+
+
+@scalper_orderflow_bp.route("/news/symbol", methods=["GET"])
+@check_session_validity
+def news_symbol_route():
+    """TradingView headlines + RSS for one symbol. Query: symbol, limit."""
+    try:
+        symbol = request.args.get("symbol") or "NSE:NIFTY"
+        limit = min(80, max(10, int(request.args.get("limit") or 40)))
+        return jsonify(fetch_symbol_news(symbol, limit))
+    except Exception as e:
+        logger.exception(f"symbol news failed: {e}")
+        return jsonify({"status": "error", "message": f"Symbol news failed: {e}"}), 500

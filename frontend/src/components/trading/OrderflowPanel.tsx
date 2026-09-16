@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Loader2, RefreshCw } from 'lucide-react'
-import { orderflowApi, type OrderflowBar, type OrderflowDetail, type OrderflowRow } from '@/api/scalper-orderflow'
+import { orderflowApi, type OrderflowBar, type OrderflowDetail, type OrderflowRow } from '@/api/market-brief-news'
+import { PanelShell } from './panelShell'
 import { cn } from '@/lib/utils'
 
 /**
@@ -106,7 +107,7 @@ export function OrderflowPanel({ activeSymbol }: { apiKey: string; activeSymbol:
   const s = detail?.summary
 
   return (
-    <div className="flex h-full flex-col">
+    <PanelShell id="oa-panel-orderflow" label="Orderflow" storageKey="oa-trading-orderflow-width" defaultWidth={340}>
       <div className="flex items-center justify-between border-b border-border px-2 py-1.5">
         <div className="text-xs font-semibold text-foreground">Orderflow</div>
         <div className="flex items-center gap-1">
@@ -214,6 +215,6 @@ export function OrderflowPanel({ activeSymbol }: { apiKey: string; activeSymbol:
       <div className="border-t border-border px-2 py-1 text-[9px] text-muted-foreground">
         Buy/Sell split is a model estimate from candle structure.
       </div>
-    </div>
+    </PanelShell>
   )
 }

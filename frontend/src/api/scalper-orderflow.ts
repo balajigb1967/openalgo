@@ -12,7 +12,6 @@ export interface ScalperBasisLine {
   name?: string
   note?: string
 }
-
 export interface ScalperReversalRisk {
   score: number
   label: string
@@ -109,72 +108,6 @@ export interface ScalperAdvisorResponse {
   disclaimer: string
 }
 
-export interface OrderflowRow {
-  key: string
-  name: string
-  market: string
-  ltp?: number | null
-  chp?: number | null
-  delta_bias?: string
-  session_delta?: number
-  session_cvd?: number
-  total_volume?: number
-  poc?: number
-  vah?: number
-  val?: number
-  bar_count?: number
-  target_symbol?: string
-  error?: string
-}
-
-export interface OrderflowBar {
-  timestamp: number
-  time: string
-  date: string
-  open: number
-  high: number
-  low: number
-  close: number
-  volume: number
-  buy_vol: number
-  sell_vol: number
-  buy_pct: number
-  sell_pct: number
-  delta: number
-  delta_pct: number
-  imbalance_type: string
-  imbalance_ratio: number
-  imbalance_label: string
-  is_stacked: boolean
-  cvd: number
-}
-
-export interface OrderflowDetail {
-  symbol: string
-  target_symbol: string
-  root: string
-  name: string
-  timeframe: string
-  bars: OrderflowBar[]
-  summary: {
-    ltp: number
-    ch: number
-    chp: number
-    total_volume: number
-    total_buy_vol: number
-    total_sell_vol: number
-    session_delta: number
-    session_cvd: number
-    delta_bias: string
-    imbalance_summary: string
-    poc: number
-    vah: number
-    val: number
-    bar_count: number
-    updated_at: number
-  }
-}
-
 export const scalperApi = {
   getAdvisor: async (
     refresh = false,
@@ -201,35 +134,6 @@ export const scalperApi = {
     const response = await webClient.get('/plugins/scalper/chart', {
       params: { alert_id: alertId, symbol, tf },
     })
-    return response.data
-  },
-}
-
-export const orderflowApi = {
-  getTable: async (tf = '5m'): Promise<{ status: string; timeframe: string; rows: OrderflowRow[] }> => {
-    const response = await webClient.get('/plugins/orderflow/table', { params: { tf } })
-    return response.data
-  },
-
-  getTableRefresh: async (
-    tf = '5m',
-    refresh = false
-  ): Promise<{ status: string; timeframe: string; rows: OrderflowRow[] }> => {
-    const response = await webClient.get('/plugins/orderflow/table', {
-      params: refresh ? { tf, refresh: '1' } : { tf },
-    })
-    return response.data
-  },
-
-  getDetail: async (symbol: string, tf = '5m', bars = 25, refresh = false): Promise<OrderflowDetail> => {
-    const response = await webClient.get('/plugins/orderflow/detail', {
-      params: refresh ? { symbol, tf, bars, refresh: '1' } : { symbol, tf, bars },
-    })
-    return response.data
-  },
-
-  getHealth: async (): Promise<{ status: string; scalper_db: boolean; orderflow_db: boolean }> => {
-    const response = await webClient.get('/plugins/orderflow/health')
     return response.data
   },
 }
