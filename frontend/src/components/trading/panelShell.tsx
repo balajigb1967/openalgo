@@ -30,9 +30,29 @@ const MIN_WIDTH = 260
 /** Wider than this and the chart, which is the point of the page, is squeezed. */
 const MAX_WIDTH = 520
 
+/**
+ * ONE width for every right-hand panel.
+ *
+ * The width used to be remembered per panel (each panel had its own
+ * localStorage key), so switching Watchlist → Option chain → Depth jumped the
+ * sidebar back and forth between saved widths — the rail visibly resized
+ * itself on every widget switch. The sidebar is one user-owned surface, so it
+ * now reads and writes a single shared key; storageKey is kept in the API so
+ * existing call sites do not change, but it only seeds the shared width the
+ * first time (the widest saved value wins, so nothing shrinks on migration).
+ */
+const SHARED_WIDTH_KEY = 'oa-trading-panel-width'
+
 function readWidth(storageKey: string, fallback: number): number {
-  const saved = Number(localStorage.getItem(storageKey))
-  return Number.isFinite(saved) && saved >= MIN_WIDTH && saved <= MAX_WIDTH ? saved : fallback
+  const shared = Number(localStorage.getItem(SHARED_WIDTH_KEY))
+  if (Number.isFinite(shared) && shared >= MIN_WIDTH && shared <= MAX_WIDTH) return shared
+  // One-time migration: adopt the widest per-panel width anyone had saved.
+  const own = Number(localStorage.getItem(storageKey))
+  if (Number.isFinite(own) && own >= MIN_WIDTH && own <= MAX_WIDTH) {
+    localStorage.setItem(SHARED_WIDTH_KEY, String(own))
+    return own
+  }
+  return fallback
 }
 
 interface Props {
@@ -92,8 +112,8 @@ export function PanelShell({
    * of every pointermove.
    */
   const persist = useCallback(
-    (value: number) => localStorage.setItem(storageKey, String(value)),
-    [storageKey]
+    (value: number) => localStorage.setItem(SHARED_WIDTH_KEY, String(value)),
+    []
   )
 
   const startResize = useCallback(

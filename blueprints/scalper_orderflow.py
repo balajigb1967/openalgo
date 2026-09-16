@@ -302,7 +302,7 @@ def calendar_economic_route():
     """This week's macro events, next-up first. Query: refresh=1."""
     try:
         refresh = (request.args.get("refresh") in ("1", "true", "yes"))
-        from services.market_calendar_service import economic_calendar
+        from services.plugin_calendar_service import economic_calendar
         return jsonify(economic_calendar(refresh=refresh))
     except Exception as e:
         logger.exception(f"economic calendar failed: {e}")
@@ -315,7 +315,7 @@ def calendar_holidays_route():
     """NSE/BSE/MCX holiday lists + today's trading-day status. Query: refresh=1."""
     try:
         refresh = (request.args.get("refresh") in ("1", "true", "yes"))
-        from services.market_calendar_service import holiday_calendar
+        from services.plugin_calendar_service import holiday_calendar
         return jsonify(holiday_calendar(refresh=refresh))
     except Exception as e:
         logger.exception(f"holiday calendar failed: {e}")
