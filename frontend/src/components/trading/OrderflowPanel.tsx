@@ -30,6 +30,9 @@ function biasBadge(bias?: string): string {
 }
 
 function BarsTable({ bars }: { bars: OrderflowBar[] }) {
+  // Newest bar first: the backend returns chronological order (CVD is computed
+  // cumulatively in that direction), so the table renders a reversed copy.
+  const rows = [...bars].reverse()
   return (
     <table className="w-full text-[10px] tabular-nums">
       <thead className="sticky top-0 bg-background/95 backdrop-blur">
@@ -45,7 +48,7 @@ function BarsTable({ bars }: { bars: OrderflowBar[] }) {
         </tr>
       </thead>
       <tbody>
-        {bars.map((b, i) => (
+        {rows.map((b, i) => (
           <tr key={i} className={cn('border-b border-border/40', b.is_stacked && 'bg-amber-500/5')}>
             <td className="px-1 py-0.5 text-muted-foreground">{b.time}</td>
             <td className="px-1 py-0.5 text-right">{b.close.toLocaleString('en-IN')}</td>

@@ -15,7 +15,7 @@ POC/VA calculation) is unchanged from the original.
 
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from database.orderflow_db import upsert_instrument_row
@@ -24,6 +24,8 @@ from services.option_symbol_service import find_near_month_futures
 from services.quotes_service import get_quotes
 
 log = logging.getLogger("services.orderflow")
+
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 INDEX_NAME_MAP = {
     "NIFTY": "NIFTY 50",
@@ -161,7 +163,9 @@ def compute_bar_orderflow(c: list) -> Dict[str, Any]:
     else:
         imbalance_label = "⚖️ Balanced"
 
-    dt = datetime.fromtimestamp(ts)
+    # Render in IST explicitly: the server may run UTC, and a naive
+    # fromtimestamp() would then label every bar with UTC wall time (5.5h early).
+    dt = datetime.fromtimestamp(ts, tz=_IST)
     time_str = dt.strftime("%H:%M")
     date_str = dt.strftime("%d %b")
 
