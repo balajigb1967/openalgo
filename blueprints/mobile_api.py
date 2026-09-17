@@ -108,17 +108,19 @@ def watchlist_quotes_route():
             rows.append(row)
             continue
         try:
-            if analyzer:
-                from database.auth_db import get_api_key_for_tradingview
-
-                api_key = get_api_key_for_tradingview(user)
-                success, res, _code = get_quotes(symbol=symbol, exchange=exchange, api_key=api_key)
-            else:
-                auth_token = get_auth_token(user)
+            auth_token = None if analyzer else get_auth_token(user)
+            if auth_token:
                 success, res, _code = get_quotes(
                     symbol=symbol, exchange=exchange, auth_token=auth_token,
                     broker=flask_session_broker(),
                 )
+            else:
+                # No broker token (fresh login, token rollover) — the API key
+                # path still serves market data, like the desktop panels.
+                from database.auth_db import get_api_key_for_tradingview
+
+                api_key = get_api_key_for_tradingview(user)
+                success, res, _code = get_quotes(symbol=symbol, exchange=exchange, api_key=api_key)
             if success and isinstance(res, dict):
                 data = res.get("data") or {}
                 ltp = data.get("ltp")
@@ -201,13 +203,13 @@ def account_route():
     funds, positions, orders = None, [], []
     try:
         api_key = get_api_key_for_tradingview(user)
-        if analyzer:
-            _s, fres, _c = get_funds(api_key=api_key)
-            _s1, ores, _c1 = get_orderbook(api_key=api_key)
-        else:
-            auth_token = get_auth_token(user)
+        auth_token = None if analyzer else get_auth_token(user)
+        if auth_token:
             _s, fres, _c = get_funds(auth_token=auth_token, broker=broker)
             _s1, ores, _c1 = get_orderbook(auth_token=auth_token, broker=broker)
+        else:
+            _s, fres, _c = get_funds(api_key=api_key)
+            _s1, ores, _c1 = get_orderbook(api_key=api_key)
         if isinstance(fres, dict):
             funds = fres.get("data") or fres.get("funds")
         if isinstance(ores, dict):
@@ -253,7 +255,11 @@ def _positions_payload():
         _s, res, _c = get_positionbook(api_key=api_key)
     else:
         auth_token = get_auth_token(user)
-        _s, res, _c = get_positionbook(auth_token=auth_token, broker=broker)
+        if auth_token:
+            _s, res, _c = get_positionbook(auth_token=auth_token, broker=broker)
+        else:
+            api_key = get_api_key_for_tradingview(user)
+            _s, res, _c = get_positionbook(api_key=api_key)
     if isinstance(res, dict):
         return {"positions": res.get("data") or [], "message": res.get("message")}
     return {"positions": [], "message": "positionbook unavailable"}
