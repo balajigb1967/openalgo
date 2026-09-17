@@ -662,7 +662,7 @@ export default function Trading() {
                 pane; the charts keep streaming underneath. */}
             {scalperOpen && apiKey && wsUrl && (
               <Suspense fallback={null}>
-                <ScalperTerminal apiKey={apiKey} armed={armed} onClose={() => setScalperOpen(false)} />
+                <ScalperTerminal apiKey={apiKey} wsUrl={wsUrl} armed={armed} onClose={() => setScalperOpen(false)} />
               </Suspense>
             )}
             {noApiKey ? (

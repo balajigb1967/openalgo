@@ -14,7 +14,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { ScalpChart } from '@/components/scalping/ScalpChart'
+import { ScalperChart } from '@/components/scalping/ScalperChart'
 import { useMarketData } from '@/hooks/useMarketData'
 import type {
   ScalpingAction,
@@ -86,11 +86,12 @@ function underlyingFromChart(symbol: string): {
 
 interface Props {
   apiKey: string
+  wsUrl: string
   armed: boolean
   onClose: () => void
 }
 
-export function ScalperTerminal({ apiKey, armed, onClose }: Props) {
+export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
   const queryClient = useQueryClient()
 
   /* ── selection state ─────────────────────────────────────────────────── */
@@ -633,6 +634,8 @@ export function ScalperTerminal({ apiKey, armed, onClose }: Props) {
           onDragStart={onDragStart}
           positionsQty={ceLeg ? netQtyOf(ceLeg.symbol) : 0}
           apiKey={apiKey}
+          wsUrl={wsUrl}
+          columnId="ce"
           depthEnabled={!!ceLeg}
           ordCfg={ordCfg}
           setOrdCfg={setOrdCfg}
@@ -675,6 +678,8 @@ export function ScalperTerminal({ apiKey, armed, onClose }: Props) {
           onDragStart={onDragStart}
           positionsQty={optionsMode ? 0 : netQtyOf(futSymbol)}
           apiKey={apiKey}
+          wsUrl={wsUrl}
+          columnId="spot"
           depthEnabled={!!(optionsMode ? underlyingSym : futSymbol)}
           ordCfg={ordCfg}
           setOrdCfg={setOrdCfg}
@@ -718,6 +723,8 @@ export function ScalperTerminal({ apiKey, armed, onClose }: Props) {
           onDragStart={onDragStart}
           positionsQty={peLeg ? netQtyOf(peLeg.symbol) : 0}
           apiKey={apiKey}
+          wsUrl={wsUrl}
+          columnId="pe"
           depthEnabled={!!peLeg}
           ordCfg={ordCfg}
           setOrdCfg={setOrdCfg}
@@ -782,6 +789,8 @@ function Column({
   onDragStart,
   positionsQty,
   apiKey,
+  wsUrl,
+  columnId,
   depthEnabled,
   ordCfg,
   setOrdCfg,
@@ -805,6 +814,8 @@ function Column({
   onDragStart: (e: React.MouseEvent | React.TouchEvent) => void
   positionsQty: number
   apiKey: string
+  wsUrl: string
+  columnId: string
   depthEnabled: boolean
   ordCfg: OrdCfg
   setOrdCfg: React.Dispatch<React.SetStateAction<OrdCfg>>
@@ -845,10 +856,10 @@ function Column({
         <div className="ml-auto flex items-center gap-1">{headerExtra}</div>
       </div>
 
-      {/* chart + resizer */}
+      {/* chart (the same OpenAlgo engine as the main grid) + resizer */}
       <div className="relative shrink-0 overflow-hidden rounded border border-border/60 bg-card" style={{ height: chartH }}>
         {symbol && exchange ? (
-          <ScalpChart symbol={symbol} exchange={exchange} interval="1m" title={label} />
+          <ScalperChart apiKey={apiKey} wsUrl={wsUrl} symbol={symbol} exchange={exchange} columnId={columnId} />
         ) : (
           <div className="flex h-full items-center justify-center text-[10px] text-muted-foreground">Pick a strike…</div>
         )}
