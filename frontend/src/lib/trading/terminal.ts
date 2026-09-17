@@ -452,6 +452,8 @@ export interface TerminalOptions {
   legendEl: HTMLElement
   /** localStorage namespace so each grid pane restores independently (default 'oa-trading'). */
   storageKey?: string
+  /** Load this instrument during init() instead of the saved/BHEL fallback — saves a wasted search+bars fetch. */
+  initialSymbol?: SearchRow
   /** Reads the app's current theme so the canvas chrome tracks it. */
   getTheme: () => { mode: ThemeMode; appMode: AppMode }
   callbacks: TerminalCallbacks
@@ -642,6 +644,8 @@ export class TradingTerminal {
   private readonly getTheme: () => { mode: ThemeMode; appMode: AppMode }
   private readonly cb: TerminalCallbacks
   private readonly sk: string
+  /** Host-requested first symbol; init() loads it instead of the saved/BHEL fallback. */
+  private readonly initialSymbol: SearchRow | null
 
   private chart: ChartInstance | null = null
   private offBranding: (() => void) | null = null
@@ -838,6 +842,7 @@ export class TradingTerminal {
     this.getTheme = opts.getTheme
     this.cb = opts.callbacks
     this.sk = opts.storageKey || 'oa-trading'
+    this.initialSymbol = opts.initialSymbol ?? null
     this.interval = this.lsGet('interval') || '5m'
     this.ctype = this.lsGet('ctype') || 'candlestick'
     this.restoreChartTools()
@@ -4143,6 +4148,13 @@ export class TradingTerminal {
     this.bookTimer = setInterval(() => this.pollBook(), 8000)
 
     // restore the last symbol; fall back to BHEL/NSE if it's gone or has no data.
+    // `initialSymbol` skips this entirely: the host loads its own instrument
+    // right after init() resolves, and a restore here would flash that symbol
+    // first (and its search + bars fetch) before the host's load replaces it.
+    if (this.initialSymbol) {
+      await this.loadSymbol(this.initialSymbol)
+      return
+    }
     let loaded = false
     try {
       const saved = JSON.parse(this.lsGet('symbol') || 'null') as {

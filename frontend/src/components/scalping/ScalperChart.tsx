@@ -7,11 +7,10 @@ import { useThemeStore } from '@/stores/themeStore'
  * engine (TradingTerminal: openalgo-charts canvas, OpenAlgoDataFeed history,
  * WebSocket candle builder, OHLC legend) as the main Trading grid.
  *
- * The engine owns the bar pipeline end to end; this wrapper only mounts a
- * fresh terminal per symbol/exchange change and reports connection state.
- * A terminal per symbol (rather than loadSymbol on a long-lived one) keeps
- * the columns isolated — each carries its own subscription, drawings
- * namespace and legend, exactly like a grid pane.
+ * Boot is once per column (apiKey/wsUrl/columnId); symbol switches reuse the
+ * live terminal via loadSymbol instead of tearing it down, so a watchlist
+ * click swaps the chart in one history fetch — no engine reboot, no wasted
+ * restore/fallback load, no BHEL flash.
  */
 
 export function ScalperChart({
@@ -30,6 +29,13 @@ export function ScalperChart({
 }) {
   const chartRef = useRef<HTMLDivElement>(null)
   const legendRef = useRef<HTMLDivElement>(null)
+  const terminalRef = useRef<TradingTerminal | null>(null)
+  /** `EXCHANGE:SYMBOL` the terminal is currently (or was last asked to be) showing. */
+  const loadedRef = useRef('')
+  const symbolRef = useRef(symbol)
+  symbolRef.current = symbol
+  const exchRef = useRef(exchange)
+  exchRef.current = exchange
   const [state, setState] = useState<'loading' | 'live' | 'down'>('loading')
 
   const onWsState = useCallback((s: string) => {
@@ -37,22 +43,29 @@ export function ScalperChart({
     else if (s === 'closed' || s === 'error' || s === 'auth failed') setState((p) => (p === 'live' ? 'live' : 'down'))
   }, [])
 
+  /* ── boot: once per column ──────────────────────────────────────────── */
   useEffect(() => {
     const chartEl = chartRef.current
     const legendEl = legendRef.current
     if (!chartEl || !legendEl || !apiKey || !wsUrl) return
 
     let alive = true
-    let terminal: TradingTerminal | null = null
     setState('loading')
 
     const boot = async () => {
-      terminal = new TradingTerminal({
+      const first = symbolRef.current && exchRef.current
+        ? { symbol: symbolRef.current, exchange: exchRef.current }
+        : undefined
+      loadedRef.current = first ? `${first.exchange}:${first.symbol}` : ''
+      const terminal = new TradingTerminal({
         apiKey,
         wsUrl,
         container: chartEl,
         legendEl,
         storageKey: `oa-scalper-${columnId}`,
+        // init() loads THIS instrument instead of restore/fallback-to-BHEL:
+        // one history fetch, straight to the symbol the user picked.
+        initialSymbol: first ?? undefined,
         getTheme: () => {
           const s = useThemeStore.getState()
           return { mode: s.mode, appMode: s.appMode }
@@ -73,15 +86,19 @@ export function ScalperChart({
           },
         },
       })
-      // init() is async and ENDS by restoring its saved symbol (or the
-      // BHEL/NSE fallback) via its own loadSymbol — so an explicit load raced
-      // it and the fallback won, freezing every column on BHEL. Await init,
-      // then load the column's contract last; the last loadSymbol wins.
+      terminalRef.current = terminal
+      // init() resolves AFTER the first symbol's bars are requested, so the
+      // chart below is never a stale instrument. A symbol picked while boot
+      // was in flight is applied here (loadSymbol needs rest, set inside init).
       await terminal.init()
       if (!alive) return
-      if (symbol && exchange) {
+      const want = symbolRef.current && exchRef.current
+        ? `${exchRef.current}:${symbolRef.current}`
+        : ''
+      if (want && want !== loadedRef.current) {
+        loadedRef.current = want
         await terminal
-          .loadSymbol({ symbol, exchange } satisfies SearchRow)
+          .loadSymbol({ symbol: symbolRef.current, exchange: exchRef.current } satisfies SearchRow)
           .catch(() => {})
       }
       if (alive) setState((p) => (p === 'loading' ? 'live' : p))
@@ -90,10 +107,20 @@ export function ScalperChart({
 
     return () => {
       alive = false
-      terminal?.destroy()
-      terminal = null
+      terminalRef.current?.destroy()
+      terminalRef.current = null
     }
-  }, [apiKey, wsUrl, symbol, exchange, columnId, onWsState])
+  }, [apiKey, wsUrl, columnId, onWsState])
+
+  /* ── symbol switches: reuse the live terminal ───────────────────────── */
+  useEffect(() => {
+    const t = terminalRef.current
+    if (!t || !symbol || !exchange) return
+    const key = `${exchange}:${symbol}`
+    if (loadedRef.current === key) return
+    loadedRef.current = key
+    void t.loadSymbol({ symbol, exchange } satisfies SearchRow).catch(() => {})
+  }, [symbol, exchange])
 
   return (
     <div className="relative h-full w-full" data-scalper-chart={symbol ? `${exchange}:${symbol}` : 'empty'}>
