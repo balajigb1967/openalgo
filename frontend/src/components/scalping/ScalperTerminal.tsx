@@ -57,10 +57,39 @@ function exchForMarket(m: string | null | undefined): TermExchange {
 }
 
 function exchForChartPrefix(p: string): TermExchange {
-  return ({ NSE: 'NFO', NFO: 'NFO', BSE: 'BFO', BFO: 'BFO', MCX: 'MCX', CDS: 'CDS' } as Record<
-    string,
-    TermExchange
-  >)[p.toUpperCase()] ?? 'NFO'
+  return (
+    ({
+      NSE: 'NFO',
+      NFO: 'NFO',
+      NSE_INDEX: 'NFO',
+      BSE: 'BFO',
+      BFO: 'BFO',
+      BSE_INDEX: 'BFO',
+      MCX: 'MCX',
+      MCX_INDEX: 'MCX',
+      CDS: 'CDS',
+    } as Record<string, TermExchange>)[p.toUpperCase()] ?? 'NFO'
+  )
+}
+
+/** Index display names → their F&O option-family root. */
+const INDEX_ROOT_MAP: Record<string, string> = {
+  'NIFTY 50': 'NIFTY',
+  NIFTY50: 'NIFTY',
+  'NIFTY BANK': 'BANKNIFTY',
+  'FIN NIFTY': 'FINNIFTY',
+  'NIFTY FIN SERVICE': 'FINNIFTY',
+  'NIFTY FINANCIAL SERVICES': 'FINNIFTY',
+  'NIFTY MIDCAP SELECT': 'MIDCPNIFTY',
+  SENSEX: 'SENSEX',
+  'BSE SENSEX': 'SENSEX',
+  'BSE SENSEX 50': 'SENSEX50',
+}
+
+/** F&O root for a clicked symbol: index display names mapped, noise stripped. */
+function normalizeUnd(sym: string): string {
+  const s = sym.trim().toUpperCase()
+  return INDEX_ROOT_MAP[s] ?? cleanRoot(s)
 }
 
 function cleanRoot(s: string): string {
@@ -71,6 +100,7 @@ function cleanRoot(s: string): string {
 
 function underlyingFromChart(symbol: string): {
   underlying: string
+  rawSym: string
   isOption: boolean
   optionType: 'CE' | 'PE' | null
   strike: number | null
@@ -79,9 +109,21 @@ function underlyingFromChart(symbol: string): {
   const upper = sym.toUpperCase()
   const m = upper.match(/^(.+?)(\d+(?:\.\d+)?)(CE|PE)$/)
   if (m) {
-    return { underlying: cleanRoot(m[1]), isOption: true, optionType: m[3] as 'CE' | 'PE', strike: Number(m[2]) }
+    return {
+      underlying: normalizeUnd(m[1]),
+      rawSym: sym,
+      isOption: true,
+      optionType: m[3] as 'CE' | 'PE',
+      strike: Number(m[2]),
+    }
   }
-  return { underlying: cleanRoot(upper.replace(/FUT$/, '')), isOption: false, optionType: null, strike: null }
+  return {
+    underlying: normalizeUnd(upper.replace(/FUT$/, '')),
+    rawSym: sym,
+    isOption: false,
+    optionType: null,
+    strike: null,
+  }
 }
 
 interface Props {
@@ -168,14 +210,31 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
   const pendingStrike = useRef<{ side: 'CE' | 'PE'; strike: number } | null>(null)
 
   /* ── sync: chart symbol + advisor alerts ─────────────────────────────── */
-  const selRef = useRef({ exchange, underlying })
+  const selRef = useRef({ exchange, underlying, rawSpot: '', rawSpotExch: '' })
   selRef.current.exchange = exchange
   selRef.current.underlying = underlying
+  /** The exact instrument the user clicked (index/equity/futures), for the SPOT chart. */
+  const [rawSpot, setRawSpot] = useState('')
+  /** Its original exchange (NSE / NSE_INDEX / BSE…), which may differ from the F&O one. */
+  const [rawSpotExch, setRawSpotExch] = useState('')
 
   const aimAt = useCallback(
-    (exch: TermExchange, und: string) => {
+    (exch: TermExchange, und: string, rawSym?: string, rawExch?: string) => {
       const cur = selRef.current
-      if (cur.exchange === exch && cur.underlying === und) return
+      const setRaw = (sym: string, exch2: string) => {
+        if (cur.rawSpot === sym && cur.rawSpotExch === exch2) return
+        cur.rawSpot = sym
+        cur.rawSpotExch = exch2
+        setRawSpot(sym)
+        setRawSpotExch(exch2)
+      }
+      if (cur.exchange === exch && cur.underlying === und) {
+        // Same family: still refresh the raw SPOT chart instrument.
+        if (rawSym !== undefined) setRaw(rawSym, rawExch ?? cur.rawSpotExch)
+        return
+      }
+      if (rawSym !== undefined) setRaw(rawSym, rawExch ?? '')
+      else setRaw('', '')
       setExchange(exch)
       setUnderlying(und)
       setExpiry('')
@@ -191,7 +250,7 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
       const prefix = s.symbol.split(':')[0] ?? ''
       const info = underlyingFromChart(s.symbol)
       if (!info.underlying) return
-      aimAt(exchForChartPrefix(prefix), info.underlying)
+      aimAt(exchForChartPrefix(prefix), info.underlying, info.rawSym, prefix.toUpperCase())
       if (info.isOption && info.optionType && info.strike != null) {
         pendingStrike.current = { side: info.optionType, strike: info.strike }
       }
@@ -333,12 +392,13 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
       list.push({ symbol, exchange })
     }
     if (underlyingSym && underlyingExch) add(underlyingSym, underlyingExch)
+    if (rawSpot && (rawSpotExch || underlyingExch)) add(rawSpot, rawSpotExch || underlyingExch)
     if (ceLeg) add(ceLeg.symbol, ceLeg.exchange)
     if (peLeg) add(peLeg.symbol, peLeg.exchange)
     if (!optionsMode && futSymbol) add(futSymbol, exchange)
     for (const p of positions) add(p.symbol, p.exchange)
     return list
-  }, [optionsMode, underlyingSym, underlyingExch, ceLeg, peLeg, futSymbol, exchange, positions])
+  }, [optionsMode, underlyingSym, underlyingExch, rawSpot, rawSpotExch, ceLeg, peLeg, futSymbol, exchange, positions])
 
   const { data: marketData, isConnected, isAuthenticated, isFallbackMode } = useMarketData({
     symbols,
@@ -385,6 +445,12 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
   marketDataRef.current = marketData
 
   const undTick = getTick(underlyingSym, underlyingExch)
+  /** SPOT column's live tick — the raw clicked instrument when we have one. */
+  const rawSpotTick =
+    rawSpot && (rawSpotExch || underlyingExch) && rawSpot !== underlyingSym
+      ? getTick(rawSpot, rawSpotExch || underlyingExch)
+      : undefined
+  const spotTick = rawSpotTick ?? undTick
   const ceTick = ceLeg ? getTick(ceLeg.symbol, ceLeg.exchange) : undefined
   const peTick = peLeg ? getTick(peLeg.symbol, peLeg.exchange) : undefined
   const futTick = !optionsMode && futSymbol ? getTick(futSymbol, exchange) : undefined
@@ -495,7 +561,9 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
 
   const dec = priceDecimals(exchange)
   const fmtNum = (v: number | null | undefined, d = dec) => (v == null ? '—' : v.toFixed(d))
-  const spotLabel = optionsMode ? underlyingSym ?? underlying : futSymbol
+  const spotLabel = optionsMode ? rawSpot || underlyingSym || underlying : futSymbol
+  /** The SPOT chart/depth instrument: raw clicked symbol, else chain resolution. */
+  const spotSym = optionsMode ? rawSpot || underlyingSym || '' : futSymbol
 
   return (
     <div
@@ -508,6 +576,10 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
         <Select
           value={exchange}
           onValueChange={(v) => {
+            selRef.current.rawSpot = ''
+            selRef.current.rawSpotExch = ''
+            setRawSpot('')
+            setRawSpotExch('')
             setExchange(v as TermExchange)
             setUnderlying(DEFAULT_UNDERLYING[v as TermExchange])
             setExpiry('')
@@ -537,6 +609,10 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
           exchange={exchange}
           value={underlying}
           onPick={(u) => {
+            selRef.current.rawSpot = ''
+            selRef.current.rawSpotExch = ''
+            setRawSpot('')
+            setRawSpotExch('')
             setUnderlying(u)
             setExpiry('')
             setCeStrike('')
@@ -582,12 +658,12 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
           ×{strikeCount}
         </button>
 
-        {undTick?.ltp != null && spotLabel && (
+        {spotTick?.ltp != null && spotLabel && (
           <span className="font-mono text-[10px] font-semibold tabular-nums text-foreground">
             {underlying}{' '}
-            <span className={(undTick.change_percent ?? 0) >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}>
-              {fmtNum(undTick.ltp)} {(undTick.change_percent ?? 0) >= 0 ? '+' : ''}
-              {(undTick.change_percent ?? 0).toFixed(2)}%
+            <span className={(spotTick.change_percent ?? 0) >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}>
+              {fmtNum(spotTick.ltp)} {(spotTick.change_percent ?? 0) >= 0 ? '+' : ''}
+              {(spotTick.change_percent ?? 0).toFixed(2)}%
             </span>
           </span>
         )}
@@ -618,6 +694,11 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
       {/* ── three columns: CE · SPOT · PE ─────────────────────────────── */}
       {chainLoading && optionsMode && (
         <div className="px-2 py-1 text-[10px] text-muted-foreground">Loading chain…</div>
+      )}
+      {!chainLoading && optionsMode && !expiry && expiries.length === 0 && (
+        <div className="border-b bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+          No F&amp;O options for this symbol — SPOT column charts it live; pick an index/futures root for CE·PE trading
+        </div>
       )}
       <div className="grid min-h-0 flex-1 grid-cols-3 gap-1.5 overflow-y-auto p-1.5">
         <Column
@@ -669,10 +750,10 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
           label="SPOT"
           badgeCls="bg-sky-500/15 text-sky-600 dark:text-sky-400"
           accent="#2962ff"
-          symbol={optionsMode ? (underlyingSym ?? '') : futSymbol}
+          symbol={spotSym}
           exchange={underlyingExch ?? exchange}
           lotsize={optionsMode ? 0 : lotOf(null)}
-          tick={optionsMode ? undTick : futTick}
+          tick={optionsMode ? spotTick : futTick}
           dec={priceDecimals(underlyingExch ?? exchange)}
           chartH={chartH}
           onDragStart={onDragStart}
@@ -680,7 +761,7 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
           apiKey={apiKey}
           wsUrl={wsUrl}
           columnId="spot"
-          depthEnabled={!!(optionsMode ? underlyingSym : futSymbol)}
+          depthEnabled={!!spotSym}
           ordCfg={ordCfg}
           setOrdCfg={setOrdCfg}
           lots={qtyOverride.pe ?? 1}
