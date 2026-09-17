@@ -695,19 +695,21 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
         </div>
       </div>
 
-      {flash && (
-        <div className="border-b bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-600 dark:text-sky-400">⚡ {flash}</div>
-      )}
+      {/* One FIXED-height status slot — flash, loading and chain notices share
+          it so nothing below ever reflows (insert/remove rows stole clicks). */}
+      <div className="h-4 shrink-0 overflow-hidden border-b border-border/40 px-2 text-[10px] leading-4">
+        {flash ? (
+          <span className="font-medium text-sky-600 dark:text-sky-400">⚡ {flash}</span>
+        ) : chainLoading && optionsMode ? (
+          <span className="text-muted-foreground">Loading chain…</span>
+        ) : !chainLoading && optionsMode && !expiry && expiries.length === 0 ? (
+          <span className="text-amber-600 dark:text-amber-400">
+            No F&amp;O options for this symbol — SPOT charts it live; pick an index/futures root for CE·PE trading
+          </span>
+        ) : null}
+      </div>
 
       {/* ── three columns: CE · SPOT · PE ─────────────────────────────── */}
-      {chainLoading && optionsMode && (
-        <div className="px-2 py-1 text-[10px] text-muted-foreground">Loading chain…</div>
-      )}
-      {!chainLoading && optionsMode && !expiry && expiries.length === 0 && (
-        <div className="border-b bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
-          No F&amp;O options for this symbol — SPOT column charts it live; pick an index/futures root for CE·PE trading
-        </div>
-      )}
       <div className="grid min-h-0 flex-1 grid-cols-3 gap-1.5 overflow-y-auto p-1.5">
         <Column
           side="ce"

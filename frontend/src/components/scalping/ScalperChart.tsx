@@ -73,9 +73,12 @@ export function ScalperChart({
           },
         },
       })
-      terminal.init()
-      // init() restores its default symbol; re-aim at the column's contract
-      // once the engine is up so the chart shows what the header picked.
+      // init() is async and ENDS by restoring its saved symbol (or the
+      // BHEL/NSE fallback) via its own loadSymbol — so an explicit load raced
+      // it and the fallback won, freezing every column on BHEL. Await init,
+      // then load the column's contract last; the last loadSymbol wins.
+      await terminal.init()
+      if (!alive) return
       if (symbol && exchange) {
         await terminal
           .loadSymbol({ symbol, exchange } satisfies SearchRow)
