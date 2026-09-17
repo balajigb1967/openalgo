@@ -110,6 +110,9 @@ from blueprints.tv_json import tv_json_bp
 from blueprints.scalper_orderflow import (
     scalper_orderflow_bp,  # Import the Scalper Advisor + Orderflow plugin blueprint
 )
+from blueprints.mobile_api import (
+    mobile_bp,  # Import the mobile app API blueprint
+)
 from blueprints.tv_watchlist import (
     tv_watchlist_bp,  # Import the TradingView watchlist plugin blueprint
 )
@@ -339,6 +342,23 @@ def create_app():
     app.register_blueprint(watchlist_bp)  # Register charting watchlist blueprint
     app.register_blueprint(tv_watchlist_bp)  # Register TradingView watchlist plugin blueprint
     app.register_blueprint(scalper_orderflow_bp)  # Register Scalper Advisor + Orderflow plugin blueprint
+    app.register_blueprint(mobile_bp)  # Register mobile app API blueprint
+
+    # The mobile SPA talks to /m/api with same-origin session cookies only —
+    # the same trust level as the React SPA's own JSON endpoints, so the CSRF
+    # form-token requirement is waived for this prefix (mirrors api_v1_bp).
+    try:
+        import blueprints.mobile_api as _mobile_mod
+
+        _mobile_views = {
+            name
+            for name, vf in app.view_functions.items()
+            if getattr(vf, "__module__", "") == _mobile_mod.__name__
+        }
+        for name in _mobile_views:
+            app.csrf.exempt(app.view_functions[name])
+    except Exception as e:  # noqa: BLE001 — CSRF wiring must never break boot
+        logger.warning(f"mobile CSRF exemption failed: {e}")
     app.register_blueprint(oitracker_bp)  # Register OI tracker blueprint
     app.register_blueprint(gamma_density_bp)  # Register Gamma Density blueprint
     app.register_blueprint(straddle_bp)  # Register straddle chart blueprint
@@ -638,7 +658,7 @@ def create_app():
         # white-screening the SPA with "Unexpected token '<'" instead of failing
         # cleanly. React routes without a Flask endpoint still fall through to
         # the shell, which is deliberate.
-        if path.startswith(("/api/", "/flow/api/", "/flow/webhook/")):
+        if path.startswith(("/api/", "/m/api/", "/flow/api/", "/flow/webhook/")):
             return jsonify({"status": "error", "message": "Not found", "path": path}), 404
 
         if path.startswith(("/assets/", "/static/")) or "." in path.rsplit("/", 1)[-1]:

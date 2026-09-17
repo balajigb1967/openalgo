@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#0d1117" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>OpenAlgo Mobile</title>
+<link rel="manifest" href="/static/mobile/manifest.json" />
+<link rel="stylesheet" href="/static/mobile/app.css" />
+</head>
+<body>
+<div id="app">
+  <!-- Login gate -->
+  <div id="login-view" class="login-wrap hidden">
+    <div class="login-card">
+      <div class="login-logo">⚡</div>
+      <h1>OpenAlgo Mobile</h1>
+      <p class="login-sub">Sign in to your OpenAlgo server</p>
+      <input id="login-server" type="url" placeholder="Server URL e.g. http://137.23.32.190:5000" autocomplete="off" autocapitalize="off" />
+      <input id="login-user" type="text" placeholder="Username" autocomplete="username" autocapitalize="off" />
+      <input id="login-pass" type="password" placeholder="Password" autocomplete="current-password" />
+      <button id="login-btn" class="btn btn-primary btn-block">Sign In</button>
+      <div id="login-msg" class="login-msg hidden"></div>
+    </div>
+  </div>
+
+  <!-- App shell -->
+  <div id="shell" class="hidden">
+    <header class="topbar">
+      <div class="topbar-title" id="topbar-title">Hub</div>
+      <div class="topbar-right">
+        <span id="conn-dot" class="conn-dot" title="Server connection"></span>
+        <span id="mode-badge" class="mode-badge" title="Live / Analyzer">—</span>
+        <button id="refresh-btn" class="icon-btn" title="Refresh">⟳</button>
+      </div>
+    </header>
+
+    <main id="view" class="view"></main>
+
+    <nav class="tabbar" id="tabbar">
+      <button class="tab active" data-view="hub"><span class="tab-ico">🧩</span><span class="tab-lbl">Hub</span></button>
+      <button class="tab" data-view="watchlist"><span class="tab-ico">★</span><span class="tab-lbl">Watch</span></button>
+      <button class="tab" data-view="chart"><span class="tab-ico">📈</span><span class="tab-lbl">Chart</span></button>
+      <button class="tab" data-view="scalper"><span class="tab-ico">🎯</span><span class="tab-lbl">Scalper</span></button>
+      <button class="tab" data-view="tools"><span class="tab-ico">🛠</span><span class="tab-lbl">Tools</span></button>
+      <button class="tab" data-view="account"><span class="tab-ico">👤</span><span class="tab-lbl">Account</span></button>
+    </nav>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+</div>
+<script src="/static/mobile/app.js"></script>
+</body>
+</html>

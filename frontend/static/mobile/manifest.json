@@ -1,0 +1,17 @@
+{
+  "name": "OpenAlgo Mobile",
+  "short_name": "OA Mobile",
+  "description": "OpenAlgo trading terminal on the phone: watchlist, charts, orderflow, scalper advisor & terminal, tools, account.",
+  "start_url": "/m/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [
+    {
+      "src": "/static/mobile/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

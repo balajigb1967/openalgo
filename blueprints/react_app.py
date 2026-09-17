@@ -52,6 +52,25 @@ def _accepts_encoding(header: str, encoding: str) -> bool:
 # Path to the pre-built React frontend
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 
+# Mobile SPA (lightweight phone terminal served at /m/)
+MOBILE_DIST = Path(__file__).parent.parent / "frontend" / "static" / "mobile"
+
+
+@react_bp.route("/m", strict_slashes=False)
+def mobile_index():
+    """Mobile SPA shell."""
+    if not (MOBILE_DIST / "index.html").exists():
+        return "Mobile app not found", 404
+    response = send_from_directory(MOBILE_DIST, "index.html")
+    response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+@react_bp.route("/m/<path:filename>")
+def mobile_assets(filename):
+    """Mobile SPA assets (app.js, views.js, app.css, manifest, icon)."""
+    return send_from_directory(MOBILE_DIST, filename)
+
 
 def _configured_brokers():
     """Broker names this deployment loads, per VALID_BROKERS in .env."""
