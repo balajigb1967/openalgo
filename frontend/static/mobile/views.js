@@ -72,7 +72,7 @@ async function loadNews(body) {
   body.innerHTML = '<div class="card"><div class="spinner"></div> Loading news…</div>';
   try {
     const r = await api('/news?limit=40', { timeout: 30000 });
-    const items = r.items || r.data || [];
+    const items = r.articles || r.items || r.data || [];
     body.innerHTML = '<div class="card">' + (items.length ? items.map((n) =>
       '<div class="news-item"><div class="news-title">' + esc(n.title) + '</div>' +
       '<div class="news-meta">' + esc(n.source || '') + ' · ' + esc(n.published || n.time || '') + '</div>' +

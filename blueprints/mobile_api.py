@@ -108,18 +108,15 @@ def watchlist_quotes_route():
             rows.append(row)
             continue
         try:
-            auth_token = None if analyzer else get_auth_token(user)
+            _analyzer, auth_token, _broker, api_key = _resolve_data_auth()
             if auth_token:
                 success, res, _code = get_quotes(
                     symbol=symbol, exchange=exchange, auth_token=auth_token,
                     broker=flask_session_broker(),
                 )
             else:
-                # No broker token (fresh login, token rollover) — the API key
-                # path still serves market data, like the desktop panels.
-                from database.auth_db import get_api_key_for_tradingview
-
-                api_key = get_api_key_for_tradingview(user)
+                # No live broker session (fresh login, token rollover) — the
+                # API-key path still serves market data, like the desktop panels.
                 success, res, _code = get_quotes(symbol=symbol, exchange=exchange, api_key=api_key)
             if success and isinstance(res, dict):
                 data = res.get("data") or {}
@@ -146,6 +143,32 @@ def flask_session_broker():
     from flask import session as flask_session
 
     return flask_session.get("broker")
+
+
+def _resolve_data_auth():
+    """Resolve (analyzer, auth_token, broker, api_key) for market-data calls.
+
+    The auth_token/broker pair is only returned when a broker session actually
+    exists (token in DB **and** broker in session) — otherwise callers fall
+    back to the API-key path, which serves market data regardless.
+    """
+    from database.auth_db import get_api_key_for_tradingview, get_auth_token
+    from database.settings_db import get_analyze_mode
+    from flask import session as flask_session
+
+    user = _user()
+    broker = flask_session.get("broker")
+    try:
+        analyzer = bool(get_analyze_mode())
+    except Exception:  # noqa: BLE001
+        analyzer = False
+    api_key = get_api_key_for_tradingview(user)
+    if analyzer:
+        return analyzer, None, None, api_key
+    auth_token = get_auth_token(user)
+    if auth_token and broker:
+        return analyzer, auth_token, broker, api_key
+    return analyzer, None, None, api_key
 
 
 # ---------------------------------------------------------------------------
@@ -202,8 +225,7 @@ def account_route():
 
     funds, positions, orders = None, [], []
     try:
-        api_key = get_api_key_for_tradingview(user)
-        auth_token = None if analyzer else get_auth_token(user)
+        _analyzer, auth_token, _broker, api_key = _resolve_data_auth()
         if auth_token:
             _s, fres, _c = get_funds(auth_token=auth_token, broker=broker)
             _s1, ores, _c1 = get_orderbook(auth_token=auth_token, broker=broker)
@@ -250,16 +272,11 @@ def _positions_payload():
         analyzer = bool(get_analyze_mode())
     except Exception:  # noqa: BLE001
         analyzer = False
-    if analyzer:
-        api_key = get_api_key_for_tradingview(user)
-        _s, res, _c = get_positionbook(api_key=api_key)
+    _analyzer, auth_token, _broker, api_key = _resolve_data_auth()
+    if auth_token:
+        _s, res, _c = get_positionbook(auth_token=auth_token, broker=broker)
     else:
-        auth_token = get_auth_token(user)
-        if auth_token:
-            _s, res, _c = get_positionbook(auth_token=auth_token, broker=broker)
-        else:
-            api_key = get_api_key_for_tradingview(user)
-            _s, res, _c = get_positionbook(api_key=api_key)
+        _s, res, _c = get_positionbook(api_key=api_key)
     if isinstance(res, dict):
         return {"positions": res.get("data") or [], "message": res.get("message")}
     return {"positions": [], "message": "positionbook unavailable"}
