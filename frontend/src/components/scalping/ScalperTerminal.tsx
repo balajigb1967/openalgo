@@ -564,6 +564,14 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
   const spotLabel = optionsMode ? rawSpot || underlyingSym || underlying : futSymbol
   /** The SPOT chart/depth instrument: raw clicked symbol, else chain resolution. */
   const spotSym = optionsMode ? rawSpot || underlyingSym || '' : futSymbol
+  /** SPOT's exchange: the raw instrument's own (NSE / NSE_INDEX / BSE…),
+   * else the chain's underlying exchange — never the F&O options exchange,
+   * which has no equities/indices and made every raw load fail silently. */
+  const spotExch = optionsMode
+    ? rawSpot
+      ? rawSpotExch || underlyingExch || 'NSE'
+      : underlyingExch || 'NSE'
+    : exchange
 
   return (
     <div
@@ -751,10 +759,10 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
           badgeCls="bg-sky-500/15 text-sky-600 dark:text-sky-400"
           accent="#2962ff"
           symbol={spotSym}
-          exchange={underlyingExch ?? exchange}
+          exchange={spotExch}
           lotsize={optionsMode ? 0 : lotOf(null)}
           tick={optionsMode ? spotTick : futTick}
-          dec={priceDecimals(underlyingExch ?? exchange)}
+          dec={priceDecimals(spotExch)}
           chartH={chartH}
           onDragStart={onDragStart}
           positionsQty={optionsMode ? 0 : netQtyOf(futSymbol)}
