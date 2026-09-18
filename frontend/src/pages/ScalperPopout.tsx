@@ -81,6 +81,8 @@ export default function ScalperPopout() {
           // One-Click off in the popout until the user arms it there: arming is
           // a deliberate act per surface, not something to inherit silently.
           armed={false}
+          // The popout window has nothing to float over — fill it.
+          defaultMaximized
           onClose={() => {
             // The terminal's ✕ closes the window it lives in.
             window.close()

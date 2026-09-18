@@ -24,7 +24,7 @@ import type {
   Segment,
 } from '@/types/scalping'
 import { showToast } from '@/utils/toast'
-import { X } from 'lucide-react'
+import { Maximize2, Minimize2, X } from 'lucide-react'
 
 /**
  * Scalper terminal, fno-trader-pro style: three columns — CE · SPOT · PE.
@@ -131,10 +131,18 @@ interface Props {
   wsUrl: string
   armed: boolean
   onClose: () => void
+  /** Start filling the whole parent (the popout window sets this). */
+  defaultMaximized?: boolean
 }
 
-export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
+export function ScalperTerminal({ apiKey, wsUrl, armed, onClose, defaultMaximized = false }: Props) {
   const queryClient = useQueryClient()
+
+  /* ── window state ──────────────────────────────────────────────────── */
+  // Maximized: fill the whole chart area instead of the floating 1180px
+  // card. The popout passes defaultMaximized because a detached window has
+  // nothing to float over — the terminal IS the page there.
+  const [maximized, setMaximized] = useState(defaultMaximized)
 
   /* ── selection state ─────────────────────────────────────────────────── */
   const [exchange, setExchange] = useState<TermExchange>('NFO')
@@ -576,7 +584,13 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
   return (
     <div
       data-trading-scalper-terminal
-      className="absolute left-2 top-12 z-30 flex max-h-[calc(100%-3.5rem)] min-h-[560px] w-[min(1180px,calc(100%-1rem))] flex-col overflow-hidden rounded-lg border bg-background/95 shadow-xl backdrop-blur-sm"
+      className={cn(
+        'absolute z-30 flex flex-col overflow-hidden border bg-background/95 shadow-xl backdrop-blur-sm',
+        maximized
+          // Fullscreen: cover the whole chart area edge-to-edge.
+          ? 'inset-0 rounded-none'
+          : 'left-2 top-12 max-h-[calc(100%-3.5rem)] min-h-[560px] w-[min(1180px,calc(100%-1rem))] rounded-lg'
+      )}
     >
       {/* Header: identity + sync */}
       <div className="flex items-center gap-1.5 border-b bg-muted/30 px-2 py-1">
@@ -688,6 +702,25 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose }: Props) {
             title="Follow the focused chart pane's symbol"
           >
             {followChart ? 'SYNC ●' : 'SYNC ○'}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              // Maximize/restore inside the parent; when already maximized
+              // the first click asks the OS for true fullscreen (hides the
+              // browser chrome), the second restores both.
+              if (maximized && document.fullscreenElement) {
+                void document.exitFullscreen().catch(() => {})
+              } else if (maximized) {
+                void document.documentElement.requestFullscreen().catch(() => {})
+              }
+              setMaximized((v) => !v)
+            }}
+            className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            aria-label={maximized ? 'Restore the scalper terminal' : 'Maximize the scalper terminal'}
+            title={maximized ? 'Restore (or exit fullscreen)' : 'Maximize — wider view (click again for true fullscreen)'}
+          >
+            {maximized ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
           </button>
           <button type="button" onClick={onClose} className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" title="Close scalper">
             <X className="h-3.5 w-3.5" />
