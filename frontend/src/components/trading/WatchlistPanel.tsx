@@ -14,6 +14,7 @@
 
 import {
   ChevronDown,
+  FolderPlus,
   GripVertical,
   MoreHorizontal,
   Plus,
@@ -45,6 +46,9 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
@@ -280,6 +284,9 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
     value: string
   } | null>(null)
   const [confirm, setConfirm] = useState<{ kind: 'delete' | 'clear'; name: string } | null>(null)
+  /** "New section" flow: names a group, then files the chosen row into it. */
+  const [sectionDialog, setSectionDialog] = useState<{ item: WatchlistItem } | null>(null)
+  const [sectionName, setSectionName] = useState('')
 
   const fileRef = useRef<HTMLInputElement>(null)
   const { isMarketOpen } = useMarketStatus()
@@ -734,6 +741,66 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
     }
   }
 
+  /** File a row under `section` from the row menu — same persistence as the
+   * drag path, but reachable without a drag: touch devices, keyboard users
+   * and anyone who finds dropping on a header fiddly. Also used right after
+   * "New section" creates a group for the row being filed. */
+  const moveItemToSection = async (item: WatchlistItem, section: string | null) => {
+    if (!active || (item.section ?? null) === section) return
+    // Optimistic like the rest of the panel: re-file locally, persist, roll
+    // back on failure by refreshing.
+    setLists((prev) =>
+      prev.map((l) =>
+        l.id === active.id
+          ? { ...l, items: l.items.map((i) => (i.id === item.id ? { ...i, section } : i)) }
+          : l
+      )
+    )
+    try {
+      await watchlistApi.setItemSection(item.id, section)
+    } catch (error) {
+      showToast.error(watchlistError(error, 'Could not move the instrument'))
+      await refresh(active.id).catch(() => {})
+    }
+  }
+
+  /** Distinct section names in the active list, in stored order — the row
+   * menu's filing targets. Unnamed rows are the "(no section)" target. */
+  const sectionNames = useMemo(() => {
+    const seen: string[] = []
+    for (const i of items) {
+      const name = i.section?.trim()
+      if (name && !seen.includes(name)) seen.push(name)
+    }
+    return seen
+  }, [items])
+
+  /** Create a section from the dialog and file the triggering row into it.
+   * Moving the row to the END of the list under its new name keeps the
+   * stored order grouped (the display is a fold over stored order). */
+  const submitNewSection = async () => {
+    const name = sectionName.trim()
+    const item = sectionDialog?.item
+    setSectionDialog(null)
+    setSectionName('')
+    if (!item || !name || !active) return
+    // Re-order locally: pull the row to the end, then set its section.
+    const ordered = [...active.items.filter((i) => i.id !== item.id), { ...item, section: name }]
+    setLists((prev) => prev.map((l) => (l.id === active.id ? { ...l, items: ordered } : l)))
+    try {
+      await watchlistApi.reorderItems(
+        active.id,
+        ordered.map((i) => i.id)
+      )
+      await watchlistApi.setItemSection(item.id, name)
+      // Sections view turns on automatically: the user just made one.
+      setDisplay((prev) => ({ ...prev, sections: true }))
+    } catch (error) {
+      showToast.error(watchlistError(error, 'Could not create the section'))
+      await refresh(active.id).catch(() => {})
+    }
+  }
+
   /* ── import / export ──────────────────────────────────────────────────── */
   const exportList = () => {
     if (!active) return
@@ -972,16 +1039,60 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
                   </span>
                 ))}
 
-                <button
-                  type="button"
-                  tabIndex={-1}
-                  onClick={() => void removeSymbol(item)}
-                  className="relative z-10 flex h-4 w-4 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
-                  title={`Remove ${item.symbol}`}
-                  aria-label={`Remove ${item.symbol}`}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      tabIndex={-1}
+                      className="relative z-10 flex h-4 w-4 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100 data-[state=open]:opacity-100"
+                      title={`Actions for ${item.symbol}`}
+                      aria-label={`Actions for ${item.symbol}`}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <MoreHorizontal className="h-3.5 w-3.5" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-48" onClick={(e) => e.stopPropagation()}>
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger>
+                        <FolderPlus className="mr-2 h-3.5 w-3.5" />
+                        Move to section
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent className="w-44">
+                        {item.section?.trim() ? (
+                          <DropdownMenuItem onClick={() => void moveItemToSection(item, null)}>
+                            (no section)
+                          </DropdownMenuItem>
+                        ) : null}
+                        {sectionNames
+                          .filter((n) => n !== item.section?.trim())
+                          .map((name) => (
+                            <DropdownMenuItem key={name} onClick={() => void moveItemToSection(item, name)}>
+                              {name}
+                            </DropdownMenuItem>
+                          ))}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onClick={() => {
+                            setSectionName('')
+                            setSectionDialog({ item })
+                          }}
+                        >
+                          <Plus className="mr-2 h-3.5 w-3.5" />
+                          New section…
+                        </DropdownMenuItem>
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      variant="destructive"
+                      onClick={() => void removeSymbol(item)}
+                    >
+                      <Trash2 className="mr-2 h-3.5 w-3.5" />
+                      Remove {item.symbol}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </div>
             )
   }
@@ -1299,6 +1410,38 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
             </Button>
             <Button disabled={!nameDialog?.value.trim()} onClick={() => void submitName()}>
               Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* New section: names a group and files one row into it */}
+      <Dialog open={sectionDialog !== null} onOpenChange={(open) => !open && setSectionDialog(null)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>New section</DialogTitle>
+            <DialogDescription>
+              {sectionDialog
+                ? `Group for ${sectionDialog.item.symbol} — it moves to the end of the list, under this name.`
+                : ''}
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            autoFocus
+            value={sectionName}
+            maxLength={32}
+            placeholder="Section name"
+            onChange={(e) => setSectionName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void submitNewSection()
+            }}
+          />
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSectionDialog(null)}>
+              Cancel
+            </Button>
+            <Button disabled={!sectionName.trim()} onClick={() => void submitNewSection()}>
+              Create & move
             </Button>
           </DialogFooter>
         </DialogContent>

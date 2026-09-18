@@ -132,7 +132,7 @@ describe('WatchlistPanel', () => {
     const change = await screen.findByText('+0.59%')
     // Not opacity-0: the most common reason to point at a row is to read it.
     expect(change.className).not.toContain('group-hover:opacity-0')
-    expect(screen.getByLabelText('Remove RELIANCE')).toBeInTheDocument()
+    expect(screen.getByLabelText('Actions for RELIANCE')).toBeInTheDocument()
   })
 
   it('charts the instrument when its row is clicked', async () => {
@@ -169,7 +169,9 @@ describe('WatchlistPanel', () => {
     api.list.mockResolvedValue([LIST])
     renderPanel()
 
-    await userEvent.click(await screen.findByLabelText('Remove RELIANCE'))
+    // Removal lives in the row's ⋯ menu now (alongside move-to-section).
+    await userEvent.click(await screen.findByLabelText('Actions for RELIANCE'))
+    await userEvent.click(await screen.findByText('Remove RELIANCE'))
     expect(api.removeItem).toHaveBeenCalledWith(1, 10)
   })
 
