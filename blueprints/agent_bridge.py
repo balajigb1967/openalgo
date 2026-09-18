@@ -14,7 +14,7 @@
 import json
 from typing import Any
 
-from flask import jsonify, request
+from flask import Response, jsonify, request, stream_with_context
 from flask import session as flask_session
 
 from services.agent import attachments as agent_attachments
@@ -219,12 +219,20 @@ def agent_bridge_chat():
         viz_sink=viz_sink,
         web_search=bool(body.get("web_search", True)),
     )
+    # The phone owns its latency budget: it sends `reasoning_effort` ("off"
+    # for snappy answers, low/medium/high when it wants depth) and
+    # `web_search` (False by default from the app — a search round trip is
+    # seconds the chat UI does not owe every turn). Unvalidated values fall
+    # back to the builder's own resolution, exactly like the desktop route.
+    requested_effort = str(body.get("reasoning_effort") or "").strip().lower()
+    if requested_effort not in ("", "off", "low", "medium", "high"):
+        requested_effort = None
     try:
         agent = builder.build_agent(
             context,
             model_id=body.get("model_id"),
             session_id=session_id,
-            reasoning_effort=None,
+            reasoning_effort=requested_effort or None,
             extra_runtime_lines=[],
         )
     except builder.AgentBuildError as exc:
@@ -379,3 +387,144 @@ def _compose(frames: list[dict[str, Any]]) -> dict[str, Any] | None:
         "run_id": run_id,
         "session_id": session_id,
     }
+
+
+# ---------------------------------------------------------------------------
+# Streaming bridge: the same turn as SSE, for clients that want the answer
+# to appear as it is generated rather than after the whole turn completes.
+# The wire format is exactly the desktop `/agent/api/chat/stream` frames, so
+# a phone can reuse the same rendering rules.
+# ---------------------------------------------------------------------------
+
+
+def _bridge_preconditions(body: dict):
+    """Everything that can fail before the stream opens. Returns
+    (username, api_key, conversation, error_response)."""
+    from database import agent_db
+
+    username = _agent_username()
+    if not username:
+        return None, None, None, (jsonify({"status": "error", "message": "unknown user for key"}), 401)
+    if not agent_db.is_configured():
+        return None, None, None, (
+            jsonify(
+                {"status": "error", "message": "No model is configured for the agent", "kind": "config"}
+            ),
+            409,
+        )
+    api_key = _openalgo_key_for(username)
+    if not api_key:
+        return None, None, None, (
+            jsonify({"status": "error", "message": "No OpenAlgo API key available for agent tools", "kind": "config"}),
+            409,
+        )
+
+    message = str(body.get("message") or "").strip()
+    if not message:
+        return None, None, None, (jsonify({"status": "error", "message": "message is required"}), 400)
+
+    raw_conversation = body.get("conversation_id")
+    if raw_conversation in (None, ""):
+        created, store_message = agent_db.create_conversation(username, title=message[:80], surface="chat")
+        if created is None:
+            return None, None, None, (jsonify({"status": "error", "message": store_message or "Could not create conversation"}), 500)
+        conversation = agent_db.get_conversation(created["id"], username)
+        if conversation is None:
+            return None, None, None, (jsonify({"status": "error", "message": "Could not create conversation"}), 500)
+    else:
+        try:
+            conversation_id = int(raw_conversation)
+        except (TypeError, ValueError):
+            return None, None, None, (jsonify({"status": "error", "message": "conversation_id must be a number"}), 400)
+        conversation = agent_db.get_conversation(conversation_id, username)
+        if conversation is None:
+            return None, None, None, (jsonify({"status": "error", "message": "conversation not found"}), 404)
+    return username, api_key, conversation, None
+
+
+@scalper_orderflow_bp.route("/agent/chat/stream", methods=["POST"])
+@app_key_required
+def agent_bridge_chat_stream():
+    """One agent turn as Server-Sent Events — the phone's fast path.
+
+    Same body as /agent/chat. Frames arrive as they are generated: token
+    deltas paint the answer while tools run, so the first pixels land in
+    ~1s instead of after the whole turn. The final frame is `done`.
+    """
+    from blueprints.agent import _TurnRecorder, _build_context, _model_id_of, _persist_turn
+    from database import agent_db
+
+    body = request.get_json(silent=True) or {}
+    for k, v in request.args.items():
+        body.setdefault(k, v)
+
+    username, api_key, conversation, error = _bridge_preconditions(body)
+    if error:
+        return error
+
+    message = str(body.get("message") or "").strip()
+    conversation_id = conversation.id
+    session_id = conversation.agno_session_id
+    if not conversation.title:
+        agent_db.update_conversation(conversation_id, username, title=message[:80])
+
+    requested_effort = str(body.get("reasoning_effort") or "").strip().lower()
+    if requested_effort not in ("", "off", "low", "medium", "high"):
+        requested_effort = None
+
+    viz_sink: list = []
+    context = _build_context(
+        username,
+        api_key,
+        body,
+        conversation_id,
+        "chat",
+        operator_message=message,
+        viz_sink=viz_sink,
+        web_search=bool(body.get("web_search", True)),
+    )
+    try:
+        agent = builder.build_agent(
+            context,
+            model_id=body.get("model_id"),
+            session_id=session_id,
+            reasoning_effort=requested_effort or None,
+            extra_runtime_lines=[],
+        )
+    except builder.AgentBuildError as exc:
+        return jsonify({"status": "error", "message": exc.message or "Could not start the agent"}), 502
+    except Exception:  # noqa: BLE001
+        logger.exception("agent bridge stream: build failed for conversation %s", conversation_id)
+        return jsonify({"status": "error", "message": "Could not start the agent"}), 500
+
+    stored_user, _err = agent_db.add_message(conversation_id, "user", message)
+    user_message_id = (stored_user or {}).get("id") or ""
+
+    recorder = _TurnRecorder()
+
+    def _generate():
+        try:
+            chunks = agent_stream.stream_run(
+                agent,
+                message,
+                conversation_id=conversation_id,
+                session_id=session_id,
+                user_id=username,
+                model=_model_id_of(agent),
+                tool_frames=_viz_hook(viz_sink),
+                user_message_id=user_message_id,
+            )
+            for chunk in chunks:
+                if chunk.startswith("data: "):
+                    try:
+                        recorder.observe(json.loads(chunk[6:]))
+                    except (ValueError, TypeError):
+                        pass
+                yield chunk
+        finally:
+            _persist_turn(recorder, conversation_id, username)
+
+    response = Response(stream_with_context(_generate()), mimetype="text/event-stream")
+    for header, value in SSE_HEADERS.items():
+        response.headers[header] = value
+    return response

@@ -653,7 +653,15 @@ export default function Trading() {
       aria-label="Pop out the scalper terminal"
       onClick={() => {
         const w = window.open('/scalper', 'oa-scalper', 'width=1280,height=860')
-        w?.focus()
+        // Popup blockers swallow window.open silently — tell the operator
+        // instead of leaving a button that appears to do nothing.
+        if (!w) {
+          window.alert(
+            'The browser blocked the pop-out window. Allow pop-ups for this site and try again.'
+          )
+          return
+        }
+        w.focus()
       }}
     >
       <ExternalLink className="h-4 w-4" />
