@@ -50,6 +50,28 @@ MAX_RETRIES = 3
 BASE_BACKOFF = 1.0  # seconds; exponential fallback when no Retry-After header: 1, 2, 4
 
 
+def retry_delay_from_headers(headers, attempt):
+    """Compute how long to wait before retrying a 429.
+
+    Fyers documents both `Retry-After` (seconds) and `X-Retry-After-Ms`
+    (milliseconds) response headers on rate-limited requests -- prefer those
+    over a blind exponential guess when present.
+    """
+    retry_after_ms = headers.get("X-Retry-After-Ms") or headers.get("x-retry-after-ms")
+    if retry_after_ms:
+        try:
+            return max(float(retry_after_ms) / 1000.0, 0.05)
+        except (TypeError, ValueError):
+            pass
+    retry_after = headers.get("Retry-After") or headers.get("retry-after")
+    if retry_after:
+        try:
+            return max(float(retry_after), 0.05)
+        except (TypeError, ValueError):
+            pass
+    return BASE_BACKOFF * (2**attempt)
+
+
 def apply_rate_limit():
     """Block the calling thread until it is safe to make another Fyers API call.
 
