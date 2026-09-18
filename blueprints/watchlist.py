@@ -26,6 +26,7 @@ from database.watchlist_db import (
     remove_item,
     rename_watchlist,
     reorder_items,
+    set_item_section,
 )
 from utils.logging import get_logger
 from utils.session import check_session_validity
@@ -172,6 +173,18 @@ def order_symbols(watchlist_id: int):
 
     if not reorder_items(_user(), watchlist_id, [i for i in order if isinstance(i, int)]):
         return jsonify({"status": "error", "message": "List not found"}), 404
+    return jsonify({"status": "success"})
+
+
+@watchlist_bp.route("/watchlist/api/items/<int:item_id>/section", methods=["PUT"])
+@check_session_validity
+def item_section(item_id: int):
+    """Move one item into a named section ("" clears it). Sections are the
+    user's own grouping — the desktop groups under headers, the phone uses
+    them in its long-press menu, and both persist on the item row."""
+    payload = request.get_json(silent=True) or {}
+    if not set_item_section(_user(), item_id, payload.get("section")):
+        return jsonify({"status": "error", "message": "Item not found"}), 404
     return jsonify({"status": "success"})
 
 

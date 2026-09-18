@@ -17,6 +17,8 @@ export interface WatchlistItem {
   symbol: string
   exchange: string
   position: number
+  /** Named section the row renders under; null/empty = the default group. */
+  section?: string | null
 }
 
 export interface Watchlist {
@@ -76,6 +78,11 @@ export const watchlistApi = {
 
   reorderItems: async (id: number, order: number[]): Promise<void> => {
     await webClient.put(`/watchlist/api/lists/${id}/items/order`, { order })
+  },
+
+  /** Move one row into a named section (null clears it). Server-side PUT. */
+  setItemSection: async (itemId: number, section: string | null): Promise<void> => {
+    await webClient.put(`/watchlist/api/items/${itemId}/section`, { section })
   },
 
   /**

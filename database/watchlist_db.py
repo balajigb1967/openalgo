@@ -89,6 +89,10 @@ class WatchlistItem(Base):
     symbol = Column(String(64), nullable=False)
     exchange = Column(String(16), nullable=False)
     position = Column(Integer, nullable=False, default=0)
+    # Optional user grouping inside one list ("Index", "F&O", ...). Null rows
+    # render under the list's default section; the column is late-added, so
+    # init_db patches older databases in place.
+    section = Column(String(32), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     watchlist = relationship("Watchlist", back_populates="items")
@@ -106,6 +110,23 @@ def init_db():
     from database.db_init_helper import init_db_with_logging
 
     init_db_with_logging(Base, engine, "Watchlist DB", logger)
+    _migrate_section_column()
+
+
+def _migrate_section_column():
+    """Older installs predate WatchlistItem.section — add it in place."""
+    from sqlalchemy import inspect, text
+
+    try:
+        insp = inspect(engine)
+        if insp.has_table("watchlist_items") and not any(
+            c["name"] == "section" for c in insp.get_columns("watchlist_items")
+        ):
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE watchlist_items ADD COLUMN section VARCHAR(32)"))
+            logger.info("Watchlist DB: added watchlist_items.section")
+    except Exception:
+        logger.exception("Watchlist DB: section migration failed")
 
 
 def _serialize(watchlist: Watchlist) -> dict:
@@ -120,6 +141,7 @@ def _serialize(watchlist: Watchlist) -> dict:
                 "symbol": item.symbol,
                 "exchange": item.exchange,
                 "position": item.position,
+                "section": item.section,
             }
             for item in watchlist.items
         ],
@@ -178,6 +200,7 @@ def create_watchlist(user_id: str, name: str, items: list[dict] | None = None) -
                         symbol=symbol,
                         exchange=exchange,
                         position=position,
+                        section=((item.get("section") or "").strip()[:32] or None),
                     )
                 )
 
@@ -251,7 +274,9 @@ def clear_watchlist(user_id: str, watchlist_id: int) -> bool:
         return False
 
 
-def add_item(user_id: str, watchlist_id: int, symbol: str, exchange: str) -> dict | None:
+def add_item(
+    user_id: str, watchlist_id: int, symbol: str, exchange: str, section: str | None = None
+) -> dict | None:
     """Append an instrument. Returns the existing row if it is already there.
 
     Adding a duplicate is a no-op rather than an error: the user's intent
@@ -270,11 +295,17 @@ def add_item(user_id: str, watchlist_id: int, symbol: str, exchange: str) -> dic
 
         for item in watchlist.items:
             if item.symbol == symbol and item.exchange == exchange:
+                # A duplicate add carries the caller's latest section choice.
+                if section is not None:
+                    clean = (section or "").strip()[:32]
+                    item.section = clean or None
+                    db_session.commit()
                 return {
                     "id": item.id,
                     "symbol": item.symbol,
                     "exchange": item.exchange,
                     "position": item.position,
+                    "section": item.section,
                 }
 
         if len(watchlist.items) >= MAX_ITEMS_PER_LIST:
@@ -285,7 +316,11 @@ def add_item(user_id: str, watchlist_id: int, symbol: str, exchange: str) -> dic
         # deletion leaves a gap, so the count is not the next free slot.
         next_position = max((item.position for item in watchlist.items), default=-1) + 1
         item = WatchlistItem(
-            watchlist_id=watchlist.id, symbol=symbol, exchange=exchange, position=next_position
+            watchlist_id=watchlist.id,
+            symbol=symbol,
+            exchange=exchange,
+            position=next_position,
+            section=((section or "").strip()[:32] or None),
         )
         db_session.add(item)
         db_session.commit()
@@ -294,6 +329,7 @@ def add_item(user_id: str, watchlist_id: int, symbol: str, exchange: str) -> dic
             "symbol": item.symbol,
             "exchange": item.exchange,
             "position": item.position,
+            "section": item.section,
         }
     except Exception:
         logger.exception("Could not add %s:%s to watchlist %s", exchange, symbol, watchlist_id)
@@ -352,6 +388,28 @@ def reorder_items(user_id: str, watchlist_id: int, item_ids: list[int]) -> bool:
         return True
     except Exception:
         logger.exception("Could not reorder watchlist %s", watchlist_id)
+        db_session.rollback()
+        return False
+
+
+def set_item_section(user_id: str, item_id: int, section: str | None) -> bool:
+    """Move one item into a named section ("" or None clears it). The
+    caller must own the list the item belongs to."""
+    try:
+        item = (
+            db_session.query(WatchlistItem)
+            .join(Watchlist, Watchlist.id == WatchlistItem.watchlist_id)
+            .filter(WatchlistItem.id == item_id, Watchlist.user_id == user_id)
+            .first()
+        )
+        if not item:
+            return False
+        clean = (section or "").strip()[:32]
+        item.section = clean or None
+        db_session.commit()
+        return True
+    except Exception:
+        logger.exception("Could not set section for watchlist item %s", item_id)
         db_session.rollback()
         return False
 

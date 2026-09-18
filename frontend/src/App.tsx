@@ -60,6 +60,7 @@ const WebSocketOrder = lazy(() => import('@/pages/WebSocketOrder'))
 const ChartTest = lazy(() => import('@/pages/ChartTest'))
 const Playground = lazy(() => import('@/pages/Playground'))
 const Trading = lazy(() => import('@/pages/Trading'))
+const ScalperPopout = lazy(() => import('@/pages/ScalperPopout'))
 const Historify = lazy(() => import('@/pages/Historify'))
 const HistorifyCharts = lazy(() => import('@/pages/HistorifyCharts'))
 
@@ -308,6 +309,9 @@ function App() {
               <Route element={<FullWidthLayout />}>
                 <Route path="/playground" element={<Playground />} />
                 <Route path="/trading" element={<Trading />} />
+                {/* Scalper terminal popout — the detached /trading widget, no
+                    chrome, driven by the same terminal component. */}
+                <Route path="/scalper" element={<ScalperPopout />} />
                 {/* The agent is an application surface, not a document: the
                     thread scrolls inside a fixed viewport with the composer
                     pinned under it, and a conversation sidebar sits beside it.

@@ -1,4 +1,4 @@
-import { Crosshair, LayoutGrid, Link2 as LinkIcon } from 'lucide-react'
+import { Crosshair, ExternalLink, LayoutGrid, Link2 as LinkIcon } from 'lucide-react'
 import { type ChartObjects, createLinkGroup, type LinkGroup } from 'openalgo-charts'
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { Navbar } from '@/components/layout/Navbar'
@@ -637,6 +637,29 @@ export default function Trading() {
     </Button>
   )
 
+  /**
+   * Pop the terminal out into its own window — same component, same keys,
+   * same websocket, so a second monitor carries the scalper while the grid
+   * keeps every pane. Deliberately `window.open` rather than an in-app
+   * dialog: the point is a separate OS window that can be moved to another
+   * screen and keeps running beside the charts.
+   */
+  const scalperPopout = (
+    <Button
+      variant="outline"
+      size="icon"
+      className="h-8 w-8 shrink-0"
+      title="Pop out the scalper terminal"
+      aria-label="Pop out the scalper terminal"
+      onClick={() => {
+        const w = window.open('/scalper', 'oa-scalper', 'width=1280,height=860')
+        w?.focus()
+      }}
+    >
+      <ExternalLink className="h-4 w-4" />
+    </Button>
+  )
+
   return (
     <>
       {/* Full-bleed page: the nav must match the chart width, not
@@ -707,6 +730,7 @@ export default function Trading() {
                           {syncPicker}
                           {armedControl}
                           {scalperControl}
+                          {scalperPopout}
                         </>
                       ) : undefined
                     }

@@ -562,6 +562,22 @@ def plugin_tool_arbitrage():
     return jsonify(response), (status_code or 200)
 
 
+@scalper_orderflow_bp.route("/watchlist/sections", methods=["POST"])
+@app_key_required
+def plugin_watchlist_sections():
+    """Set one item's watchlist section (mobile long-press → Move to section).
+    Body: {item_id, section} — section "" or null clears it."""
+    from database.watchlist_db import set_item_section
+
+    payload = request.get_json(silent=True) or {}
+    item_id = payload.get("item_id")
+    if not isinstance(item_id, int):
+        return jsonify({"status": "error", "message": "item_id is required"}), 400
+    ok = set_item_section(_sync_user(), item_id, payload.get("section"))
+    return (jsonify({"status": "success"}), 200) if ok \
+        else (jsonify({"status": "error", "message": "item not found"}), 404)
+
+
 # ---- Watchlist sync (the same DB lists the desktop terminal keeps) ----
 
 def _sync_user():
@@ -628,7 +644,11 @@ def plugin_watchlist_sync():
             sym = (it.get("symbol") or "").strip().upper()
             exch = (it.get("exchange") or "").strip().upper()
             if sym and exch:
-                items.append({"symbol": sym, "exchange": exch})
+                items.append({
+                    "symbol": sym,
+                    "exchange": exch,
+                    "section": ((it.get("section") or "").strip()[:32] or None),
+                })
         target = existing_by_name.get(name)
         if target is None:
             created = create_watchlist(user, name, items or None)
@@ -638,7 +658,7 @@ def plugin_watchlist_sync():
         # Exists: rebuild its items (clear, then re-add in order).
         clear_watchlist(user, target["id"])
         for it in items:
-            add_item(user, target["id"], it["symbol"], it["exchange"])
+            add_item(user, target["id"], it["symbol"], it["exchange"], section=it.get("section"))
     for lname, lst in existing_by_name.items():
         if lname not in incoming_names:
             delete_watchlist(user, lst["id"])

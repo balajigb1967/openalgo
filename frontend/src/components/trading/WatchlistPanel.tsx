@@ -175,6 +175,8 @@ interface Display {
   columns: ColumnId[]
   logo: boolean
   exchange: boolean
+  /** Group rows under named section headers. */
+  sections: boolean
 }
 
 const DISPLAY_KEY = 'oa-trading-watchlist-display'
@@ -182,6 +184,7 @@ const DISPLAY_DEFAULT: Display = {
   columns: ['last', 'changePercent'],
   logo: true,
   exchange: true,
+  sections: false,
 }
 
 function readDisplay(): Display {
@@ -196,6 +199,7 @@ function readDisplay(): Display {
         : DISPLAY_DEFAULT.columns,
       logo: typeof saved.logo === 'boolean' ? saved.logo : true,
       exchange: typeof saved.exchange === 'boolean' ? saved.exchange : true,
+      sections: typeof saved.sections === 'boolean' ? saved.sections : false,
     }
   } catch {
     return DISPLAY_DEFAULT
@@ -256,6 +260,19 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
   const [searchOpen, setSearchOpen] = useState(false)
   const [dragId, setDragId] = useState<number | null>(null)
   const [overId, setOverId] = useState<number | null>(null)
+  /**
+   * Where the row lands relative to the hovered one. dropOn splices the row
+   * out before re-inserting it, so a downward drag naturally lands BELOW the
+   * target; tracking the side here is what draws the line and inserts on the
+   * side the user actually sees.
+   */
+  const [dropAfterId, setDropAfterId] = useState(false)
+  /**
+   * The section header the dragged row is over. Undefined is "over no
+   * header" — kept apart from null, which is the default (unnamed) group's
+   * header, so it does not light up while the row is over other rows.
+   */
+  const [overSection, setOverSection] = useState<string | null | undefined>(undefined)
 
   /** One dialog drives create, rename and copy; `mode` says which. */
   const [nameDialog, setNameDialog] = useState<{
@@ -646,25 +663,73 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
   /* ── drag to reorder ──────────────────────────────────────────────────── */
   const dropOn = async (targetId: number) => {
     setOverId(null)
+    setOverSection(undefined)
     if (!active || dragId == null || dragId === targetId) return
+    const after = dropAfterId
+    setDropAfterId(false)
 
     const ordered = [...active.items]
     const from = ordered.findIndex((i) => i.id === dragId)
-    const to = ordered.findIndex((i) => i.id === targetId)
-    if (from < 0 || to < 0) return
+    if (from < 0 || !ordered.some((i) => i.id === targetId)) return
 
+    // Splice out, then re-insert on the side of the target the user saw.
     const [moved] = ordered.splice(from, 1)
-    ordered.splice(to, 0, moved)
-    setLists((prev) => prev.map((l) => (l.id === active.id ? { ...l, items: ordered } : l)))
+    const insertAt = ordered.findIndex((i) => i.id === targetId) + (after ? 1 : 0)
+    ordered.splice(insertAt, 0, moved)
+
+    // Landing between two rows of one section files the row under it: the
+    // stored order groups the display, so crossing a boundary IS moving
+    // between sections. Sections off, the row keeps whatever it had.
+    let section = moved.section ?? null
+    if (display.sections) {
+      const above = insertAt > 0 ? ordered[insertAt - 1] : undefined
+      const below = ordered[insertAt + 1]
+      section = above?.section ?? below?.section ?? null
+    }
+    const next = display.sections ? { ...moved, section } : moved
+    const withMoved = ordered.map((i) => (i.id === next.id ? next : i))
+
+    setLists((prev) => prev.map((l) => (l.id === active.id ? { ...l, items: withMoved } : l)))
     setDragId(null)
 
     try {
       await watchlistApi.reorderItems(
         active.id,
-        ordered.map((i) => i.id)
+        withMoved.map((i) => i.id)
       )
+      if (display.sections && (next.section ?? null) !== (moved.section ?? null)) {
+        await watchlistApi.setItemSection(next.id, next.section ?? null)
+      }
     } catch (error) {
       showToast.error(watchlistError(error, 'Could not save the new order'))
+      await refresh(active.id).catch(() => {})
+    }
+  }
+
+  /**
+   * Drop the dragged row straight onto a section header — the fastest way to
+   * file a row without hunting for the boundary between two groups.
+   */
+  const dropOnSection = async (section: string | null) => {
+    setOverId(null)
+    setOverSection(undefined)
+    setDropAfterId(false)
+    if (!active || dragId == null) return
+    const item = active.items.find((i) => i.id === dragId)
+    setDragId(null)
+    if (!item || (item.section ?? null) === section) return
+
+    setLists((prev) =>
+      prev.map((l) =>
+        l.id === active.id
+          ? { ...l, items: l.items.map((i) => (i.id === item.id ? { ...i, section } : i)) }
+          : l
+      )
+    )
+    try {
+      await watchlistApi.setItemSection(item.id, section)
+    } catch (error) {
+      showToast.error(watchlistError(error, 'Could not move the instrument'))
       await refresh(active.id).catch(() => {})
     }
   }
@@ -722,6 +787,203 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
           : watchlistError(error, (error as Error)?.message || 'Could not import that file')
       )
     }
+  }
+
+  /**
+   * The list as it renders: section headers interleaved with rows.
+   *
+   * The stored order is already grouped — rows keep position within their
+   * section — so grouping is a fold that emits a header whenever the section
+   * name changes. With no section named anywhere the header would only say
+   * "everything", which the column header already says, so it is skipped.
+   */
+  const renderSections = useCallback(
+    (rows: WatchlistItem[]): Array<
+      | { kind: 'section'; name: string | null; dim: boolean; count: number }
+      | { kind: 'row'; item: WatchlistItem; index: number }
+    > => {
+      if (!display.sections) return rows.map((item, index) => ({ kind: 'row' as const, item, index }))
+      const anySectioned = rows.some((r) => (r.section ?? '').length > 0)
+      if (!anySectioned) return rows.map((item, index) => ({ kind: 'row' as const, item, index }))
+      const out: Array<
+        | { kind: 'section'; name: string | null; dim: boolean; count: number }
+        | { kind: 'row'; item: WatchlistItem; index: number }
+      > = []
+      let current: string | null | undefined = undefined
+      for (let i = 0; i < rows.length; i++) {
+        const name = rows[i].section?.trim() || null
+        if (name !== current) {
+          current = name
+          let count = 0
+          for (let j = i; j < rows.length && (rows[j].section?.trim() || null) === name; j++) count++
+          out.push({ kind: 'section', name, dim: name === null, count })
+        }
+        out.push({ kind: 'row', item: rows[i], index: i })
+      }
+      return out
+    },
+    [display.sections]
+  )
+
+  /** A row as it renders — extracted so section headers can interleave. */
+  const itemRow = (item: WatchlistItem, index: number) => {
+            const key = `${item.exchange}:${item.symbol}`
+            const quote = quotes[key]
+            // Three states, not two: no previous close means no direction.
+            const direction =
+              quote?.changePercent == null ? 'flat' : quote.changePercent >= 0 ? 'up' : 'down'
+            // Which side of the hovered row the dragged one lands on,
+            // decided by the pointer's half and recorded in onDragOver.
+            const dropBelow = dropAfterId
+            return (
+              <div
+                key={item.id}
+                draggable
+                onDragStart={(e) => {
+                  // Firefox refuses to begin a drag unless dataTransfer carries
+                  // something, so this is what makes reordering work there.
+                  e.dataTransfer.effectAllowed = 'move'
+                  e.dataTransfer.setData('text/plain', String(item.id))
+                  setDragId(item.id)
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  e.dataTransfer.dropEffect = 'move'
+                  setOverId(item.id)
+                  // Above or below the midline decides which side the row
+                  // lands on — the line the user sees is the line they get.
+                  setDropAfterId(e.clientY > e.currentTarget.getBoundingClientRect().bottom / 2)
+                  // Back over rows after a pass over a header: the header's
+                  // highlight must not stick.
+                  setOverSection((s) => (s === undefined ? s : undefined))
+                }}
+                onDragLeave={() => setOverId((id) => (id === item.id ? null : id))}
+                onDrop={() => void dropOn(item.id)}
+                onDragEnd={() => {
+                  setDragId(null)
+                  setOverId(null)
+                }}
+                style={{ gridTemplateColumns: gridTemplate }}
+                className={cn(
+                  'grid gap-x-1.5',
+                  'group relative items-center px-2 py-1 text-[12px] transition-colors hover:bg-accent/50',
+                  // The charted row carries a left marker as well as a wash.
+                  // Hover alone was the same bg-accent, so pointing at any row
+                  // made it look like the one currently on the chart.
+                  //
+                  // var(--color-primary), never hsl(var(--primary)): this app
+                  // carries two token systems and the later, unlayered one
+                  // defines --primary as a complete oklch(), so hsl() of it is
+                  // invalid and the whole box-shadow is dropped. Tailwind's
+                  // @theme maps --color-primary to whichever is live. See the
+                  // long-form account in TickBox.tsx.
+                  //
+                  // hover:bg-accent/50 outranks bg-accent on specificity, so the
+                  // wash needs !important or hovering the charted row lightens
+                  // it into looking like every other hovered row.
+                  activeSymbol === key &&
+                    '!bg-accent font-medium shadow-[inset_2px_0_0_0_var(--color-primary)]',
+                  dragId === item.id && 'opacity-40',
+                  // A line where the row will land. An inset shadow rather than
+                  // a border: a border adds 2px to an auto-height row, so every
+                  // row below it jumped as the pointer moved down the list.
+                  overId === item.id &&
+                    dragId !== item.id &&
+                    (dropBelow
+                      ? 'shadow-[inset_0_-2px_0_0_var(--color-primary)]'
+                      : 'shadow-[inset_0_2px_0_0_var(--color-primary)]')
+                )}
+              >
+                {/* A real button stretched over the row rather than a
+                    role="button" div. The row carries a delete control of its
+                    own, and a button inside a button is invalid HTML; laying
+                    the click target underneath keeps both real buttons and
+                    gives keyboard users the row for free. The drag handlers
+                    stay on the wrapper, which still receives them because a
+                    plain button is not itself draggable. */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    // GLOBAL rows are chartable too: the terminal feeds the
+                    // pane from the Yahoo-backed global history plugin, so a
+                    // click loads the international benchmark's dollar chart.
+                    onPick({ symbol: item.symbol, exchange: item.exchange })
+                  }}
+                  onKeyDown={(e) => {
+                    // Removing from the row itself is what lets the trash stay
+                    // out of the tab order: two stops per row would be sixty
+                    // on a thirty-symbol list before anything else is reachable.
+                    if (e.key === 'Delete') {
+                      e.preventDefault()
+                      void removeSymbol(item)
+                    }
+                  }}
+                  className={cn(
+                    'absolute inset-0 rounded-sm cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring'
+                  )}
+                  aria-label={`Chart ${item.symbol} on ${item.exchange}`}
+                  // The charted row said so only in colour. This states it, so
+                  // a screen reader hears which instrument is on the chart and a
+                  // test can assert the fact rather than a Tailwind class that
+                  // jsdom has no cascade to evaluate.
+                  aria-current={activeSymbol === key ? true : undefined}
+                />
+
+                {/* Out of flow: at rest the grip costs the symbol column no
+                    width at all, which is the column under the most pressure. */}
+                <GripVertical className="pointer-events-none absolute left-0 top-1/2 h-3 w-3 -translate-y-1/2 text-transparent transition-colors group-hover:text-muted-foreground/50" />
+
+                <span className="pointer-events-none relative flex min-w-0 items-center gap-1.5">
+                  {display.logo && (
+                    <span
+                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold text-white"
+                      style={{ backgroundColor: symbolTint(item.symbol) }}
+                      aria-hidden="true"
+                    >
+                      {item.symbol.charAt(0)}
+                    </span>
+                  )}
+                  <span className="truncate font-medium" title={item.symbol}>
+                    {item.symbol}
+                  </span>
+                  {display.exchange && (
+                    <span className="shrink-0 text-[10px] text-muted-foreground">
+                      {item.exchange}
+                    </span>
+                  )}
+                </span>
+
+                {/* Always visible. Hiding the number the user hovered in order
+                    to read it, so a control can borrow its cell, trades the
+                    panel's whole purpose for one action used once per row. */}
+                {shownColumns.map((column) => (
+                  <span
+                    key={column.id}
+                    className={cn(
+                      'pointer-events-none relative text-right tabular-nums',
+                      // Only a column carrying direction is coloured.
+                      column.tone && direction === 'up' && 'text-emerald-600 dark:text-emerald-400',
+                      column.tone && direction === 'down' && 'text-rose-600 dark:text-rose-400',
+                      (!column.tone || direction === 'flat') && 'text-muted-foreground',
+                      !column.tone && quote && 'text-foreground'
+                    )}
+                  >
+                    {quote ? column.get(quote) : '-'}
+                  </span>
+                ))}
+
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  onClick={() => void removeSymbol(item)}
+                  className="relative z-10 flex h-4 w-4 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
+                  title={`Remove ${item.symbol}`}
+                  aria-label={`Remove ${item.symbol}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )
   }
 
   /* ── render ───────────────────────────────────────────────────────────── */
@@ -886,6 +1148,14 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
             >
               Exchange
             </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem
+              checked={display.sections}
+              onSelect={(e) => e.preventDefault()}
+              onCheckedChange={(v) => setDisplay((prev) => ({ ...prev, sections: v }))}
+              className="text-[12px]"
+            >
+              Sections
+            </DropdownMenuCheckboxItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -929,161 +1199,40 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
             </Button>
           </div>
         ) : (
-          items.map((item, index) => {
-            const key = `${item.exchange}:${item.symbol}`
-            const quote = quotes[key]
-            // Three states, not two: no previous close means no direction.
-            const direction =
-              quote?.changePercent == null ? 'flat' : quote.changePercent >= 0 ? 'up' : 'down'
-            // Which side of the hovered row the dragged one will land on.
-            // dropOn splices out then re-inserts at the target index, so a
-            // downward drag lands BELOW the row it was dropped on; drawing
-            // the line above it both times told the user the wrong thing.
-            const dropBelow = dragId != null && items.findIndex((i) => i.id === dragId) < index
-            return (
+          renderSections(items).map((row) =>
+            row.kind === 'section' ? (
+              // A header is a drop target too: dropping a row on it files the
+              // row under that section, which beats hunting for the boundary
+              // between two groups.
               <div
-                key={item.id}
-                draggable
-                onDragStart={(e) => {
-                  // Firefox refuses to begin a drag unless dataTransfer carries
-                  // something, so this is what makes reordering work there.
-                  e.dataTransfer.effectAllowed = 'move'
-                  e.dataTransfer.setData('text/plain', String(item.id))
-                  setDragId(item.id)
-                }}
+                key={`sec:${row.name ?? ''}`}
                 onDragOver={(e) => {
                   e.preventDefault()
                   e.dataTransfer.dropEffect = 'move'
-                  setOverId(item.id)
+                  setOverSection(row.name)
                 }}
-                onDragLeave={() => setOverId((id) => (id === item.id ? null : id))}
-                onDrop={() => void dropOn(item.id)}
-                onDragEnd={() => {
-                  setDragId(null)
-                  setOverId(null)
+                onDragLeave={() => setOverSection((s) => (s === row.name ? undefined : s))}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  void dropOnSection(row.name)
                 }}
-                style={{ gridTemplateColumns: gridTemplate }}
                 className={cn(
-                  'grid gap-x-1.5',
-                  'group relative items-center px-2 py-1 text-[12px] transition-colors hover:bg-accent/50',
-                  // The charted row carries a left marker as well as a wash.
-                  // Hover alone was the same bg-accent, so pointing at any row
-                  // made it look like the one currently on the chart.
-                  //
-                  // var(--color-primary), never hsl(var(--primary)): this app
-                  // carries two token systems and the later, unlayered one
-                  // defines --primary as a complete oklch(), so hsl() of it is
-                  // invalid and the whole box-shadow is dropped. Tailwind's
-                  // @theme maps --color-primary to whichever is live. See the
-                  // long-form account in TickBox.tsx.
-                  //
-                  // hover:bg-accent/50 outranks bg-accent on specificity, so the
-                  // wash needs !important or hovering the charted row lightens
-                  // it into looking like every other hovered row.
-                  activeSymbol === key &&
-                    '!bg-accent font-medium shadow-[inset_2px_0_0_0_var(--color-primary)]',
-                  dragId === item.id && 'opacity-40',
-                  // A line where the row will land. An inset shadow rather than
-                  // a border: a border adds 2px to an auto-height row, so every
-                  // row below it jumped as the pointer moved down the list.
-                  overId === item.id &&
-                    dragId !== item.id &&
-                    (dropBelow
-                      ? 'shadow-[inset_0_-2px_0_0_var(--color-primary)]'
-                      : 'shadow-[inset_0_2px_0_0_var(--color-primary)]')
+                  'sticky top-0 z-10 flex items-center gap-1.5 border-b bg-background/95 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground backdrop-blur',
+                  row.dim && 'opacity-70',
+                  overSection === row.name &&
+                    dragId != null &&
+                    'bg-accent text-foreground shadow-[inset_0_2px_0_0_var(--color-primary)]'
                 )}
               >
-                {/* A real button stretched over the row rather than a
-                    role="button" div. The row carries a delete control of its
-                    own, and a button inside a button is invalid HTML; laying
-                    the click target underneath keeps both real buttons and
-                    gives keyboard users the row for free. The drag handlers
-                    stay on the wrapper, which still receives them because a
-                    plain button is not itself draggable. */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    // GLOBAL rows are chartable too: the terminal feeds the
-                    // pane from the Yahoo-backed global history plugin, so a
-                    // click loads the international benchmark's dollar chart.
-                    onPick({ symbol: item.symbol, exchange: item.exchange })
-                  }}
-                  onKeyDown={(e) => {
-                    // Removing from the row itself is what lets the trash stay
-                    // out of the tab order: two stops per row would be sixty
-                    // on a thirty-symbol list before anything else is reachable.
-                    if (e.key === 'Delete') {
-                      e.preventDefault()
-                      void removeSymbol(item)
-                    }
-                  }}
-                  className={cn(
-                    'absolute inset-0 rounded-sm cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring'
-                  )}
-                  aria-label={`Chart ${item.symbol} on ${item.exchange}`}
-                  // The charted row said so only in colour. This states it, so
-                  // a screen reader hears which instrument is on the chart and a
-                  // test can assert the fact rather than a Tailwind class that
-                  // jsdom has no cascade to evaluate.
-                  aria-current={activeSymbol === key ? true : undefined}
-                />
-
-                {/* Out of flow: at rest the grip costs the symbol column no
-                    width at all, which is the column under the most pressure. */}
-                <GripVertical className="pointer-events-none absolute left-0 top-1/2 h-3 w-3 -translate-y-1/2 text-transparent transition-colors group-hover:text-muted-foreground/50" />
-
-                <span className="pointer-events-none relative flex min-w-0 items-center gap-1.5">
-                  {display.logo && (
-                    <span
-                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold text-white"
-                      style={{ backgroundColor: symbolTint(item.symbol) }}
-                      aria-hidden="true"
-                    >
-                      {item.symbol.charAt(0)}
-                    </span>
-                  )}
-                  <span className="truncate font-medium" title={item.symbol}>
-                    {item.symbol}
-                  </span>
-                  {display.exchange && (
-                    <span className="shrink-0 text-[10px] text-muted-foreground">
-                      {item.exchange}
-                    </span>
-                  )}
+                <span className="truncate">{row.dim ? 'Symbols' : row.name}</span>
+                <span className="ml-auto text-[10px] font-medium tabular-nums text-muted-foreground/70">
+                  {row.count}
                 </span>
-
-                {/* Always visible. Hiding the number the user hovered in order
-                    to read it, so a control can borrow its cell, trades the
-                    panel's whole purpose for one action used once per row. */}
-                {shownColumns.map((column) => (
-                  <span
-                    key={column.id}
-                    className={cn(
-                      'pointer-events-none relative text-right tabular-nums',
-                      // Only a column carrying direction is coloured.
-                      column.tone && direction === 'up' && 'text-emerald-600 dark:text-emerald-400',
-                      column.tone && direction === 'down' && 'text-rose-600 dark:text-rose-400',
-                      (!column.tone || direction === 'flat') && 'text-muted-foreground',
-                      !column.tone && quote && 'text-foreground'
-                    )}
-                  >
-                    {quote ? column.get(quote) : '-'}
-                  </span>
-                ))}
-
-                <button
-                  type="button"
-                  tabIndex={-1}
-                  onClick={() => void removeSymbol(item)}
-                  className="relative z-10 flex h-4 w-4 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
-                  title={`Remove ${item.symbol}`}
-                  aria-label={`Remove ${item.symbol}`}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
               </div>
+            ) : (
+              itemRow(row.item, row.index)
             )
-          })
+          )
         )}
       </div>
 
