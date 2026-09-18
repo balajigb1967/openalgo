@@ -4,7 +4,8 @@
 // control. Reserve the glyph for where it distinguishes something.
 import { ChevronDown, RefreshCw, Search, Settings } from 'lucide-react'
 import type { ChartObjects, LinkGroup } from 'openalgo-charts'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { scalpingApi } from '@/api/scalping'
 import { GridIcon, PencilIcon, VolumeIcon } from '@/components/chart/menuIcons'
 import { Button } from '@/components/ui/button'
 import {
@@ -18,6 +19,7 @@ import { Input } from '@/components/ui/input'
 import { CHART_TYPE_GROUPS, CHART_TYPES, chartTypeIcon } from '@/lib/trading/chartTypes'
 import type { IntervalGroup } from '@/lib/trading/intervals'
 import { lotInfoText } from '@/lib/trading/legend'
+import { parseSyncSymbol } from '@/lib/scalperSync'
 import type { ProfileMenuAction } from '@/lib/trading/profileLayer'
 import { isProfileKind } from '@/lib/trading/profileSettings'
 import {
@@ -597,6 +599,47 @@ export function ChartPane({
   }
 
   /** Portal target for menus: the pane itself in fullscreen, body otherwise. */
+  /* ── CE/PE strike selector (option underlyings) ───────────────────────── */
+  // For an option underlying (NIFTY, BANKNIFTY, MCX roots...) the pane offers
+  // the surrounding strikes for the near expiry: picking one loads that CE or
+  // PE straight into this pane, no option-chain panel detour. Cash symbols
+  // (RELIANCE...) render nothing -- there is no chain to ask for.
+  const parsed = useMemo(() => (sym ? parseSyncSymbol(`${sym.exchange}:${sym.symbol}`) : null), [sym])
+  const isOptionUnderlying = Boolean(parsed && parsed.optionType === null && parsed.root &&
+    ['NSE', 'BSE', 'NFO', 'BFO', 'MCX'].includes(sym?.exchange ?? ''))
+  const [strikes, setStrikes] = useState<number[]>([])
+  const [strikeOpen, setStrikeOpen] = useState(false)
+  useEffect(() => {
+    setStrikes([])
+    setStrikeOpen(false)
+    if (!isOptionUnderlying || !parsed?.root) return
+    let alive = true
+    ;(async () => {
+      try {
+        const exp = await scalpingApi.getExpiry(parsed.root, sym!.exchange, 'options')
+        const expiry = exp.data?.[0]
+        if (!expiry || !alive) return
+        const res = await scalpingApi.getStrikes(parsed.root, sym!.exchange, expiry, 10)
+        if (!alive) return
+        const rows = (res as unknown as { chain?: Array<{ strike: number }> }).chain ?? []
+        setStrikes(rows.map((r) => r.strike))
+      } catch {
+        if (alive) setStrikes([])
+      }
+    })()
+    return () => { alive = false }
+  }, [isOptionUnderlying, parsed?.root, sym?.exchange])
+  const pickStrike = async (strike: number, type: 'CE' | 'PE') => {
+    if (!sym || !parsed?.root) return
+    // Resolve the exact contract through the terminal's symbol search so lot
+    // size and tick come from the master contract, not the chain row.
+    const rows = await terminalRef.current?.search(`${parsed.root}${strike}${type}`, sym.exchange, 5) ?? []
+    const exact = rows.find((r) => r.symbol.replace(/\s+/g, '').toUpperCase() === `${parsed.root}${strike}${type}`.replace(/\s+/g, '')) ?? rows[0]
+    if (exact) void terminalRef.current?.loadSymbol(exact)
+    else showToast.error(`No ${strike}${type} contract found for ${parsed.root}`)
+    setStrikeOpen(false)
+  }
+
   const menuHost = fullscreen ? paneRef.current : null
 
   // The product the toggle switches to; with two options that is "the other".
@@ -645,6 +688,41 @@ export function ChartPane({
             </span>
           )}
         </Button>
+
+        {/* CE/PE strike picker — option underlyings only */}
+        {isOptionUnderlying && strikes.length > 0 && (
+          <DropdownMenu open={strikeOpen} onOpenChange={setStrikeOpen}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 shrink-0 gap-1 font-medium"
+                title="Pick a strike, then CE or PE"
+              >
+                <Settings className="hidden" />
+                <span className="text-[11px] tracking-wide">STRIKE</span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent container={menuHost} align="start" className="max-h-72 w-56 overflow-y-auto">
+              {strikes.map((k) => (
+                <div key={k} className="flex items-stretch gap-1 px-1 py-0.5">
+                  <DropdownMenuItem
+                    onSelect={() => void pickStrike(k, 'CE')}
+                    className="flex-1 justify-center rounded border border-emerald-500/40 bg-emerald-500/10 text-xs font-semibold text-emerald-600 dark:text-emerald-400"
+                  >
+                    {k} CE
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => void pickStrike(k, 'PE')}
+                    className="flex-1 justify-center rounded border border-rose-500/40 bg-rose-500/10 text-xs font-semibold text-rose-600 dark:text-rose-400"
+                  >
+                    {k} PE
+                  </DropdownMenuItem>
+                </div>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
 
         {/* Timeframe */}
         <DropdownMenu>

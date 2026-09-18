@@ -335,7 +335,7 @@ function MonitorTab({ armedMap, alerts, onDisarm, onCloseAlert, busy }: {
   )
 }
 
-export function ScalperAdvisorPanel(_props: { apiKey: string }) {
+export function ScalperAdvisorPanel({ activeSymbol }: { apiKey: string; activeSymbol?: string | null }) {
   const [data, setData] = useState<ScalperAdvisorResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -349,7 +349,7 @@ export function ScalperAdvisorPanel(_props: { apiKey: string }) {
   ) => {
     try {
       setError(null)
-      const res = await scalperApi.getAdvisor(refresh, action, autoArm)
+      const res = await scalperApi.getAdvisor(refresh, action, autoArm, activeSymbol ?? null)
       setData(res)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load advisor')
@@ -397,7 +397,7 @@ export function ScalperAdvisorPanel(_props: { apiKey: string }) {
     const t = setInterval(() => load(), REFRESH_MS)
     return () => clearInterval(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoArm])
+  }, [autoArm, activeSymbol])
 
   const alerts: ScalperAlert[] = data?.monitor?.alerts ?? []
   const events = data?.monitor?.events ?? []

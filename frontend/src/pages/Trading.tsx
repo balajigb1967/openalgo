@@ -750,7 +750,7 @@ export default function Trading() {
           )}
           {apiKey && wsUrl && panel === 'scalper' && (
             <Suspense fallback={null}>
-              <ScalperAdvisorPanel apiKey={apiKey} />
+              <ScalperAdvisorPanel apiKey={apiKey} activeSymbol={paneSymbols[focusedPane] ?? null} />
             </Suspense>
           )}
           {apiKey && wsUrl && panel === 'orderflow' && (

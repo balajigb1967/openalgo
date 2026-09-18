@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils'
  * near-month futures contract.
  */
 
-const REFRESH_MS = 45_000
+const REFRESH_MS = 15_000 // realtime cadence — service recomputes flow per call
 const LIVE_MS = 5_000 // live-quote overlay cadence (quotes endpoint, no candles)
 const TFS = ['1m', '3m', '5m', '15m', '30m', '1h']
 
@@ -103,7 +103,13 @@ export function OrderflowPanel({ activeSymbol }: { apiKey: string; activeSymbol:
       setError(null)
       if (mode === 'table') {
         const res = await orderflowApi.getTableRefresh(tf, refresh)
-        setRows(res.rows ?? [])
+        const next = res.rows ?? []
+        // Latest on top: rank by the last bar time the service computed.
+        const rank = (r: OrderflowRow) => {
+          const m = String(r.last_bar ?? '').match(/(\d{1,2}):(\d{2})/)
+          return m ? Number(m[1]) * 60 + Number(m[2]) : 0
+        }
+        setRows([...next].sort((a, b) => rank(b) - rank(a)))
       } else {
         const res = await orderflowApi.getDetail(symbol, tf, 25, refresh)
         setDetail(res)

@@ -18,6 +18,8 @@ export interface OrderflowRow {
   val?: number
   bar_count?: number
   target_symbol?: string
+  /** Label of the most recent computed bar (e.g. "14:35"), used for latest-on-top sorting. */
+  last_bar?: string | null
   error?: string
 }
 

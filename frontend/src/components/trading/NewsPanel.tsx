@@ -15,7 +15,7 @@ import { cn } from '@/lib/utils'
  *    Yahoo, CNBC), newest first.
  */
 
-const REFRESH_MS = 120_000
+const REFRESH_MS = 60_000 // headline freshness
 
 function timeAgo(ts?: number): string {
   if (!ts) return ''

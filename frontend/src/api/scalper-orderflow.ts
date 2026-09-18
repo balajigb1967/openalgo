@@ -146,7 +146,8 @@ export const scalperApi = {
   getAdvisor: async (
     refresh = false,
     action?: { arm?: string; disarm?: string; armAlertId?: string },
-    autoArm = false
+    autoArm = false,
+    focus?: string | null
   ): Promise<ScalperAdvisorResponse> => {
     const params: Record<string, string> = {}
     if (refresh) params.refresh = '1'
@@ -154,6 +155,7 @@ export const scalperApi = {
     if (action?.disarm) params.disarm = action.disarm
     if (action?.armAlertId) params.arm_alert_id = action.armAlertId
     if (autoArm) params.auto_arm = '1'
+    if (focus) params.focus = focus
     const response = await webClient.get('/plugins/scalper/advisor', { params })
     return response.data
   },

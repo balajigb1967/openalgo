@@ -87,7 +87,7 @@ _MAX_TF = {"1m", "3m", "5m", "15m", "30m", "1h"}
 # 60s cache keeps the panel's 30s polling from rate-limit-tripping the broker
 # (history service enforces 3 req/s). refresh=1 bypasses.
 _TABLE_CACHE = {"ts": 0.0, "data": None, "lock": threading.Lock()}
-_TABLE_TTL = 60.0
+_TABLE_TTL = 20.0  # realtime cadence — flow recomputes on every cache miss
 _DETAIL_CACHE = {}   # (symbol, tf, bars) -> {"ts": float, "data": dict}
 _DETAIL_TTL = 30.0
 _DETAIL_LOCK = threading.Lock()
@@ -109,6 +109,9 @@ def scalper_advisor_route():
         close_alert_id = request.args.get("close_alert_id") or None
         close_reason = request.args.get("close_reason") or "Manual close"
         auto_arm = (request.args.get("auto_arm") in ("1", "true", "yes"))
+        # Symbol sync: "NSE:NIFTY 50" / "MCX:GOLD" -> the advisor's instrument key.
+        raw_focus = (request.args.get("focus") or "").upper()
+        focus_key = raw_focus.split(":")[-1].strip() if raw_focus else None
         data = scalper_advisor(
             refresh=refresh,
             arm_key=arm_key,
@@ -117,6 +120,7 @@ def scalper_advisor_route():
             close_alert_id=close_alert_id,
             close_reason=close_reason,
             auto_arm=auto_arm,
+            focus_key=focus_key,
         )
         return jsonify(data)
     except Exception as e:
@@ -165,8 +169,12 @@ def _orderflow_row(inst: dict, tf: str) -> dict:
     try:
         data = get_orderflow(f"{inst['market']}:{inst['key']}", tf, 25)
         s = data.get("summary") or {}
+        bars = data.get("bars") or []
+        # Label of the most recent bar ("14:35") so clients can sort latest-on-top.
+        last_bar = (bars[-1] or {}).get("time") if bars else None
         return {
             "key": inst["key"],
+            "last_bar": last_bar,
             "name": inst["name"],
             "market": inst["market"],
             "ltp": s.get("ltp"),

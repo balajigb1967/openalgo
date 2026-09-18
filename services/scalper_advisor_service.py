@@ -1352,7 +1352,8 @@ def alert_chart_data(alert_id: str, symbol: str, timeframe: str = "5m", n_bars: 
 
 def scalper_advisor(refresh: bool = False, arm_key: str = None, disarm_key: str = None,
                     arm_alert_id: str = None, close_alert_id: str = None,
-                    close_reason: str = "Manual close", auto_arm: bool = False) -> dict:
+                    close_reason: str = "Manual close", auto_arm: bool = False,
+                    focus_key: str = None) -> dict:
     """Full advisory payload for all instruments + monitor state + intraday alerts.
 
     auto_arm=True live-monitors every fresh BUY signal without a manual arm:
@@ -1432,6 +1433,18 @@ def scalper_advisor(refresh: bool = False, arm_key: str = None, disarm_key: str 
                         _ADVICE_REFRESHING.discard(inst["key"])
 
         threading.Thread(target=_rebuild_stale, daemon=True, name="advisor-swr").start()
+
+    advice_by_key = {a["key"]: a for a in results}
+
+    # Symbol sync: rebuild the focused instrument fresh and float it to the top
+    # so the sidebar reflects the chart's selected symbol immediately.
+    focused_inst = next((i for i in INSTRUMENTS if i["key"] == (focus_key or "").upper()), None)
+    if focused_inst is not None:
+        try:
+            _store(_advise_one(focused_inst, api_key))
+            results.sort(key=lambda a: 0 if a.get("key") == focused_inst["key"] else 1)
+        except Exception as focus_e:
+            log.warning("advisor focus rebuild %s failed: %s", focused_inst["key"], focus_e)
 
     advice_by_key = {a["key"]: a for a in results}
 
