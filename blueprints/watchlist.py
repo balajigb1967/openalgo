@@ -173,3 +173,21 @@ def order_symbols(watchlist_id: int):
     if not reorder_items(_user(), watchlist_id, [i for i in order if isinstance(i, int)]):
         return jsonify({"status": "error", "message": "List not found"}), 404
     return jsonify({"status": "success"})
+
+
+@watchlist_bp.route("/watchlist/api/global/quotes", methods=["GET"])
+@check_session_validity
+def global_quotes():
+    """Dollar quotes for the global catalog (USOIL, GOLD, SILVER, NATGAS,
+    BRENT, GIFTNIFTY).
+
+    These do not exist on any Indian exchange, so they never touch the
+    broker: the service pulls them from TradingView's public scanner (Yahoo
+    fallback for the commodities) and caches process-wide for 30s, which the
+    panel's poll then shares with the phone app.
+    """
+    from services.global_quotes_service import get_global_quotes
+
+    keys = request.args.get("keys")
+    rows = get_global_quotes([k for k in keys.split(",") if k] if keys else None)
+    return jsonify({"status": "success", "data": rows})

@@ -22,7 +22,13 @@ import {
   Trash2,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { type Watchlist, type WatchlistItem, watchlistApi, watchlistError } from '@/api/watchlist'
+import {
+  type GlobalQuote,
+  type Watchlist,
+  type WatchlistItem,
+  watchlistApi,
+  watchlistError,
+} from '@/api/watchlist'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -53,6 +59,16 @@ import { SymbolSearchDialog } from './SymbolSearchDialog'
 
 /** Remembers which list was open, so a reload lands where the user left off. */
 const ACTIVE_LIST_KEY = 'oa-trading-watchlist'
+
+/**
+ * Global (dollar) instruments the panel can show alongside exchange rows.
+ *
+ * They are stored in the same lists with exchange GLOBAL — which no Indian
+ * master contract carries — and priced from TradingView by the backend. The
+ * catalog here must stay in step with services/global_quotes_service.py.
+ */
+const GLOBAL_KEYS = ['USOIL', 'BRENT', 'GOLD', 'SILVER', 'NATGAS', 'GIFTNIFTY'] as const
+const GLOBAL_POLL_MS = 30000
 
 /** Created on first open so the panel is never an empty shell with no list. */
 const DEFAULT_LIST_NAME = 'Watchlist'
@@ -93,6 +109,8 @@ interface Quote {
   high?: number
   low?: number
   open?: number
+  /** Set on GLOBAL rows, whose prices are dollar-denominated. */
+  currency?: 'USD'
 }
 
 /**
@@ -115,13 +133,16 @@ interface Column {
 }
 
 const COLUMNS: readonly Column[] = [
-  { id: 'last', label: 'Last', width: 64, get: (q: Quote) => fmt(q.ltp) },
+  { id: 'last', label: 'Last', width: 64, get: (q: Quote) => (q.currency === 'USD' ? `$${fmt(q.ltp)}` : fmt(q.ltp)) },
   {
     id: 'change',
     label: 'Chg',
     width: 60,
     tone: true,
-    get: (q: Quote) => (q.change == null ? '-' : `${q.change >= 0 ? '+' : ''}${fmt(q.change)}`),
+    get: (q: Quote) =>
+      q.change == null
+        ? '-'
+        : `${q.change >= 0 ? '+' : ''}${q.currency === 'USD' ? '$' : ''}${fmt(q.change)}`,
   },
   {
     id: 'changePercent',
@@ -134,9 +155,9 @@ const COLUMNS: readonly Column[] = [
         : `${q.changePercent >= 0 ? '+' : ''}${q.changePercent.toFixed(2)}%`,
   },
   { id: 'volume', label: 'Vol', width: 58, get: (q: Quote) => compact(q.volume) },
-  { id: 'high', label: 'High', width: 60, get: (q: Quote) => (q.high ? fmt(q.high) : '-') },
-  { id: 'low', label: 'Low', width: 60, get: (q: Quote) => (q.low ? fmt(q.low) : '-') },
-  { id: 'open', label: 'Open', width: 60, get: (q: Quote) => (q.open ? fmt(q.open) : '-') },
+  { id: 'high', label: 'High', width: 60, get: (q: Quote) => dollarOr(q.high, q) },
+  { id: 'low', label: 'Low', width: 60, get: (q: Quote) => dollarOr(q.low, q) },
+  { id: 'open', label: 'Open', width: 60, get: (q: Quote) => dollarOr(q.open, q) },
 ] as const
 type ColumnId = string
 
@@ -179,6 +200,12 @@ function readDisplay(): Display {
   } catch {
     return DISPLAY_DEFAULT
   }
+}
+
+/** High/low/open: a dollar cell when the row is global, a dash when absent. */
+function dollarOr(value: number | null | undefined, q: Quote): string {
+  if (!value) return '-'
+  return q.currency === 'USD' ? `$${fmt(value)}` : fmt(value)
 }
 
 /**
@@ -369,7 +396,12 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
   const symbolKey = items.map((i) => `${i.exchange}:${i.symbol}`).join(',')
   // biome-ignore lint/correctness/useExhaustiveDependencies: symbolKey IS the identity of items; depending on the array itself resubscribes every render
   const priceable = useMemo<PriceableItem[]>(
-    () => items.map((i) => ({ symbol: i.symbol, exchange: i.exchange })),
+    // GLOBAL rows are priced from TradingView via the panel's own poll, not
+    // the broker feed — subscribing them would only produce dead rows.
+    () =>
+      items
+        .filter((i) => i.exchange.toUpperCase() !== 'GLOBAL')
+        .map((i) => ({ symbol: i.symbol, exchange: i.exchange })),
     [symbolKey]
   )
 
@@ -396,6 +428,33 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
    */
   const [resolvedCloses, setResolvedCloses] = useState<Record<string, number>>({})
 
+  /* ── global (dollar) rows ─────────────────────────────────────────────── */
+  const hasGlobals = useMemo(
+    () => items.some((i) => i.exchange.toUpperCase() === 'GLOBAL'),
+    [items]
+  )
+  const [globalQuotes, setGlobalQuotes] = useState<Record<string, GlobalQuote>>({})
+
+  useEffect(() => {
+    if (!hasGlobals) return
+    let alive = true
+    const load = async () => {
+      try {
+        const rows = await watchlistApi.globalQuotes()
+        if (alive) setGlobalQuotes(rows)
+      } catch {
+        // Quiet: the next poll retries, and globals moving slowly means a
+        // missed cycle leaves the last prices on the rows.
+      }
+    }
+    void load()
+    const t = setInterval(load, GLOBAL_POLL_MS)
+    return () => {
+      alive = false
+      clearInterval(t)
+    }
+  }, [hasGlobals])
+
   /**
    * Last price and change per row.
    *
@@ -408,6 +467,9 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
     const next: Record<string, Quote> = {}
     for (const row of priced) {
       const key = `${row.exchange}:${row.symbol}`
+      // GLOBAL rows never reach the broker feed; their prices arrive from
+      // watchlistApi.globalQuotes below, not from this loop.
+      if (row.exchange.toUpperCase() === 'GLOBAL') continue
       const snapshot = multiQuotes.get(key)
       const ltp = row.ltp ?? snapshot?.ltp
       if (typeof ltp !== 'number' || ltp === 0) continue
@@ -426,8 +488,24 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
         open: snapshot?.open,
       }
     }
+    // Dollar rows ride the same Quote shape, so the columns below cannot
+    // tell them apart — except that change/changePercent come straight from
+    // the source (it reports its own previous close).
+    for (const gk of GLOBAL_KEYS) {
+      const g = globalQuotes[gk]
+      if (!g || typeof g.ltp !== 'number') continue
+      next[`GLOBAL:${gk}`] = {
+        ltp: g.ltp,
+        change: g.ch,
+        changePercent: g.chp,
+        volume: undefined,
+        high: g.high ?? undefined,
+        low: g.low ?? undefined,
+        open: g.open ?? undefined,
+      }
+    }
     return next
-  }, [priced, multiQuotes, resolvedCloses])
+  }, [priced, multiQuotes, resolvedCloses, globalQuotes])
 
   // One request per instrument per trading day, and only for the ones that
   // need it, so a broker whose quote already carries a real previous close
@@ -924,7 +1002,14 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
                     plain button is not itself draggable. */}
                 <button
                   type="button"
-                  onClick={() => onPick({ symbol: item.symbol, exchange: item.exchange })}
+                  onClick={() => {
+                    // A GLOBAL row has no contract to load into a chart pane
+                    // (no Indian master contract carries it), so clicking it
+                    // would only blank the pane. The row still shows live
+                    // dollar prices; it is just not chartable.
+                    if (item.exchange.toUpperCase() === 'GLOBAL') return
+                    onPick({ symbol: item.symbol, exchange: item.exchange })
+                  }}
                   onKeyDown={(e) => {
                     // Removing from the row itself is what lets the trash stay
                     // out of the tab order: two stops per row would be sixty
@@ -934,7 +1019,12 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
                       void removeSymbol(item)
                     }
                   }}
-                  className="absolute inset-0 cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+                  className={cn(
+                    'absolute inset-0 rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring',
+                    item.exchange.toUpperCase() === 'GLOBAL'
+                      ? 'cursor-default'
+                      : 'cursor-pointer'
+                  )}
                   aria-label={`Chart ${item.symbol} on ${item.exchange}`}
                   // The charted row said so only in colour. This states it, so
                   // a screen reader hears which instrument is on the chart and a

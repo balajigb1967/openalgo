@@ -15,7 +15,24 @@ import { cn } from '@/lib/utils'
  */
 
 type Category = 'Index' | 'Cash' | 'F&O' | 'Currency' | 'Commodity' | 'Crypto'
-type Chip = 'ALL' | Category
+type Chip = 'ALL' | Category | 'Global'
+
+/**
+ * Global (dollar) instruments offered alongside broker symbols.
+ *
+ * They exist on no Indian master contract, so broker search cannot return
+ * them; the dialog always appends the ones matching the query. Exchange
+ * GLOBAL is what the watchlist stores, and the backend prices them from
+ * TradingView (services/global_quotes_service.py — keep the two in step).
+ */
+const GLOBAL_ROWS: SearchRow[] = [
+  { symbol: 'USOIL', exchange: 'GLOBAL', name: 'Crude Oil WTI (USD)' },
+  { symbol: 'BRENT', exchange: 'GLOBAL', name: 'Brent Crude (USD)' },
+  { symbol: 'GOLD', exchange: 'GLOBAL', name: 'Gold Spot (USD)' },
+  { symbol: 'SILVER', exchange: 'GLOBAL', name: 'Silver Spot (USD)' },
+  { symbol: 'NATGAS', exchange: 'GLOBAL', name: 'Natural Gas (USD)' },
+  { symbol: 'GIFTNIFTY', exchange: 'GLOBAL', name: 'GIFT NIFTY Future (USD)' },
+]
 
 /** Map an OpenAlgo exchange code to its trading segment (chip). Any exchange
  * ending in _INDEX (NSE_INDEX, BSE_INDEX, GLOBAL_INDEX, MCX_INDEX, CDS_INDEX)
@@ -111,6 +128,7 @@ const MAX_ROWS = 150
 /** Short instrument-type badge (INDEX / FUT / CE / PE / EQ). */
 function typeBadge(row: SearchRow): string {
   const ex = String(row.exchange)
+  if (ex === 'GLOBAL') return 'GLOBAL'
   if (ex.endsWith('_INDEX')) return 'INDEX'
   const s = String(row.symbol).toUpperCase()
   if (s.endsWith('CE')) return 'CE'
@@ -157,17 +175,24 @@ export function SymbolSearchDialog({ open, onOpenChange, search, onPick, initial
   const reqIdRef = useRef(0)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Chips = ALL + only the segments the broker actually supports.
+  // Chips = ALL + only the segments the broker actually supports + Global
+  // (dollar instruments, which no broker carries).
   const chips = useMemo<Chip[]>(() => {
     const present = new Set<Category>()
     for (const e of allExchanges) present.add(categoryOf(e.value))
-    return ['ALL', ...CHIP_ORDER.filter((c) => present.has(c))]
+    return ['ALL', ...CHIP_ORDER.filter((c) => present.has(c)), 'Global']
   }, [allExchanges])
 
   const filtered = useMemo(() => {
     const q = query.trim().toUpperCase()
+    const gMatch = (g: SearchRow) =>
+      !q || String(g.symbol).includes(q) || String(g.name ?? '').toUpperCase().includes(q)
+    if (chip === 'Global') return GLOBAL_ROWS.filter(gMatch).slice(0, MAX_ROWS)
     const base = chip === 'ALL' ? rows : rows.filter((r) => categoryOf(String(r.exchange)) === chip)
-    return [...base].sort((a, b) => compareRows(a, b, q)).slice(0, MAX_ROWS)
+    const ranked = [...base].sort((a, b) => compareRows(a, b, q)).slice(0, MAX_ROWS)
+    // Global rows ride after the broker's own matches: they are few, and a
+    // name query like "GOLD" should not bury the MCX contract under them.
+    return [...ranked, ...GLOBAL_ROWS.filter(gMatch)]
   }, [rows, chip, query])
 
   // On open: seed query with the current symbol, select it, focus, reset chip.

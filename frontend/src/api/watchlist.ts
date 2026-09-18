@@ -77,6 +77,29 @@ export const watchlistApi = {
   reorderItems: async (id: number, order: number[]): Promise<void> => {
     await webClient.put(`/watchlist/api/lists/${id}/items/order`, { order })
   },
+
+  /**
+   * Dollar quotes for the global catalog (USOIL, BRENT, GOLD, SILVER,
+   * NATGAS, GIFTNIFTY). Server-cached 30s; TradingView-sourced, no broker.
+   */
+  globalQuotes: async (): Promise<Record<string, GlobalQuote>> => {
+    const res = await webClient.get<Envelope<Record<string, GlobalQuote>>>(
+      '/watchlist/api/global/quotes'
+    )
+    return res.data.data ?? {}
+  },
+}
+
+/** One global (dollar-denominated) instrument quote. */
+export interface GlobalQuote {
+  name: string
+  ltp: number
+  ch: number | null
+  chp: number | null
+  open?: number | null
+  high?: number | null
+  low?: number | null
+  currency: 'USD'
 }
 
 /**

@@ -384,3 +384,102 @@ def plugin_option_chain():
         with_greeks=True,
     )
     return jsonify(resp), code
+
+
+# ---- Global (dollar) quotes for the watchlists (desktop + Flutter) ----
+
+@scalper_orderflow_bp.route("/globals/quotes", methods=["GET"])
+@app_key_required
+def plugin_global_quotes():
+    """Dollar quotes for the global catalog: USOIL, BRENT, GOLD, SILVER,
+    NATGAS, GIFTNIFTY. TradingView scanner with Yahoo fallback, 30s cache."""
+    from services.global_quotes_service import get_global_quotes
+
+    keys = request.args.get("keys")
+    rows = get_global_quotes([k for k in keys.split(",") if k] if keys else None)
+    return jsonify({"status": "success", "data": rows})
+
+
+# ---- Watchlist sync (the same DB lists the desktop terminal keeps) ----
+
+def _sync_user():
+    """Session user, or the OpenAlgo user an API key belongs to."""
+    u = flask_session.get("user")
+    if u:
+        return u
+    from database.auth_db import verify_api_key
+
+    _key = request.headers.get("X-API-KEY") or request.args.get("apikey")
+    return verify_api_key(_key) if _key else None
+
+
+@scalper_orderflow_bp.route("/watchlist/sync", methods=["GET", "POST"])
+@app_key_required
+def plugin_watchlist_sync():
+    """Read or replace the synced watchlist.
+
+    GET  -> {lists: [{id, name, items: [{id, symbol, exchange, position}]}]}
+    POST -> body {"lists": [{"name": "...", "items": [{"symbol", "exchange"}]}]}
+            replaces the caller's lists wholesale (the phone is one device
+            among several, so last-writer-wins is the whole contract).
+
+    GLOBAL rows carry dollar prices from /plugins/globals/quotes, keyed by the
+    symbol (USOIL, GOLD, SILVER, NATGAS, BRENT, GIFTNIFTY).
+    """
+    from database.watchlist_db import (
+        add_item,
+        clear_watchlist,
+        create_watchlist,
+        delete_watchlist,
+        get_watchlists,
+    )
+
+    if request.method == "GET":
+        lists = get_watchlists(_sync_user())
+        return jsonify({"status": "success", "data": {"lists": lists}})
+
+    payload = request.get_json(silent=True) or {}
+    incoming = payload.get("lists")
+    if not isinstance(incoming, list):
+        return jsonify({"status": "error", "message": "lists must be a list"}), 400
+
+    user = _sync_user()
+    if not user:
+        return jsonify({"status": "error", "message": "Authentication required"}), 401
+    # Replace wholesale: delete every list the device does not carry, then
+    # create/overwrite the ones it does. Watchlists are few, so this is cheap
+    # and keeps desktop and phone trivially identical afterwards.
+    existing = get_watchlists(user)
+    existing_by_name = {l["name"]: l for l in existing}
+    incoming_names = set()
+    for entry in incoming[:20]:
+        if not isinstance(entry, dict):
+            continue
+        name = (entry.get("name") or "").strip()[:64]
+        if not name:
+            continue
+        incoming_names.add(name)
+        items = []
+        for it in (entry.get("items") or [])[:250]:
+            if not isinstance(it, dict):
+                continue
+            sym = (it.get("symbol") or "").strip().upper()
+            exch = (it.get("exchange") or "").strip().upper()
+            if sym and exch:
+                items.append({"symbol": sym, "exchange": exch})
+        target = existing_by_name.get(name)
+        if target is None:
+            created = create_watchlist(user, name, items or None)
+            if created is None:
+                logger.warning("watchlist sync: create failed for %r", name)
+            continue
+        # Exists: rebuild its items (clear, then re-add in order).
+        clear_watchlist(user, target["id"])
+        for it in items:
+            add_item(user, target["id"], it["symbol"], it["exchange"])
+    for lname, lst in existing_by_name.items():
+        if lname not in incoming_names:
+            delete_watchlist(user, lst["id"])
+
+    lists = get_watchlists(user)
+    return jsonify({"status": "success", "data": {"lists": lists}})
