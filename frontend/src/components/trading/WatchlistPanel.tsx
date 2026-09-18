@@ -826,7 +826,7 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
   )
 
   /** A row as it renders — extracted so section headers can interleave. */
-  const itemRow = (item: WatchlistItem, index: number) => {
+  const itemRow = (item: WatchlistItem, _index: number) => {
             const key = `${item.exchange}:${item.symbol}`
             const quote = quotes[key]
             // Three states, not two: no previous close means no direction.
