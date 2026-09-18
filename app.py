@@ -371,14 +371,15 @@ def create_app():
     # tokenless POST, which is exactly what the phone sends. Exempt the
     # blueprint's views the way mobile_api's are: the credential check moves
     # into the view, where it belongs for non-browser clients.
+    #
+    # Filtered by ENDPOINT name, not by the view's defining module: the
+    # blueprint also carries routes defined in blueprints/agent_bridge.py
+    # (the mobile assistant), whose __module__ differs and would silently
+    # miss a module-based filter — its POST would keep CSRF-400ing.
     try:
-        import blueprints.scalper_orderflow as _scalper_mod
-
-        _plugin_views = {
-            name
-            for name, vf in app.view_functions.items()
-            if getattr(vf, "__module__", "") == _scalper_mod.__name__
-        }
+        _plugin_views = [
+            name for name in app.view_functions if name.startswith("scalper_orderflow_bp.")
+        ]
         for name in _plugin_views:
             app.csrf.exempt(app.view_functions[name])
         logger.info(f"plugin CSRF exemption applied to {len(_plugin_views)} views")
