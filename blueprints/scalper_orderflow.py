@@ -485,6 +485,10 @@ def plugin_tools(tool):  # noqa: C901 — dispatch by table
     """Run one of the options-analytics tools. Body mirrors the desktop page's
     request: {underlying, exchange, expiry_date[, interval, days, ...]}.
     Tools with a list field (expiry_dates) accept it as-is."""
+    if tool == "arbitrage":
+        # The mobile app POSTs every tool through /tools/<tool>; arbitrage is
+        # a GET-style universe scan, so delegate to its handler here.
+        return plugin_tool_arbitrage()
     if tool not in _ANALYTICS_CONFIG:
         return jsonify({"status": "error", "message": f"unknown tool {tool}"}), 404
     body = request.get_json(silent=True) or {}
@@ -504,38 +508,48 @@ def plugin_tools(tool):  # noqa: C901 — dispatch by table
         return jsonify({"status": "error", "message": "tool execution failed"}), 500
 
 
-@scalper_orderflow_bp.route("/tools/underlyings", methods=["GET"])
+@scalper_orderflow_bp.route("/tools/underlyings", methods=["GET", "POST"])
 @app_key_required
 def plugin_tool_underlyings():
-    """Optionable underlyings for the tools' pickers (per exchange)."""
+    """Optionable underlyings for the tools' pickers (per exchange).
+    Accepts GET (?exchange=NFO) and POST (JSON body {exchange}), so the
+    mobile app and the desktop page can share one route."""
     from database.symbol import get_distinct_underlyings
 
-    exchange = (request.args.get("exchange") or "NFO").strip().upper()
+    exchange = ((request.args.get("exchange")
+                 or (request.get_json(silent=True) or {}).get("exchange"))
+                or "NFO").strip().upper()
     return jsonify({"status": "success", "data": get_distinct_underlyings(exchange)})
 
 
-@scalper_orderflow_bp.route("/tools/expiries", methods=["GET"])
+@scalper_orderflow_bp.route("/tools/expiries", methods=["GET", "POST"])
 @app_key_required
 def plugin_tool_expiries():
-    """Option expiries for one underlying — the tools' expiry pickers."""
+    """Option expiries for one underlying — the tools' expiry pickers.
+    Accepts GET (?exchange=&underlying=) and POST (JSON body), matching
+    /tools/underlyings."""
     from database.symbol import get_distinct_expiries
 
-    exchange = (request.args.get("exchange") or "NFO").strip().upper()
-    underlying = (request.args.get("underlying") or "").strip().upper()
+    body = request.get_json(silent=True) or {}
+    exchange = ((request.args.get("exchange") or body.get("exchange"))
+                or "NFO").strip().upper()
+    underlying = ((request.args.get("underlying") or body.get("underlying")) or "").strip().upper()
     if not underlying:
         return jsonify({"status": "error", "message": "underlying is required"}), 400
     expiries = get_distinct_expiries(exchange=exchange, underlying=underlying, instrumenttype="options")
     return jsonify({"status": "success", "data": expiries})
 
 
-@scalper_orderflow_bp.route("/tools/arbitrage", methods=["GET"])
+@scalper_orderflow_bp.route("/tools/arbitrage", methods=["GET", "POST"])
 @app_key_required
 def plugin_tool_arbitrage():
-    """Synthetic-future arbitrage universe (GET, like the desktop page)."""
+    """Synthetic-future arbitrage universe (GET like the desktop page, POST
+    so the mobile app's uniform tool dispatcher works too)."""
     from services.arbitrage_service import DEFAULT_EXCHANGES, get_arbitrage_universe
     from database.auth_db import get_first_available_api_key
 
-    raw = (request.args.get("exchanges") or "").strip()
+    body = request.get_json(silent=True) or {}
+    raw = ((request.args.get("exchanges") or body.get("exchanges")) or "").strip()
     exchanges = [e.strip().upper() for e in raw.split(",") if e.strip()] or list(DEFAULT_EXCHANGES)
     success, response, status_code = get_arbitrage_universe(exchanges=exchanges, api_key=get_first_available_api_key())
     return jsonify(response), (status_code or 200)
