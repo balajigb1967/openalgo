@@ -68,7 +68,7 @@ const ACTIVE_LIST_KEY = 'oa-trading-watchlist'
  * catalog here must stay in step with services/global_quotes_service.py.
  */
 const GLOBAL_KEYS = ['USOIL', 'BRENT', 'GOLD', 'SILVER', 'NATGAS', 'GIFTNIFTY'] as const
-const GLOBAL_POLL_MS = 30000
+const GLOBAL_POLL_MS = 5000
 
 /** Created on first open so the panel is never an empty shell with no list. */
 const DEFAULT_LIST_NAME = 'Watchlist'
@@ -1003,11 +1003,9 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
                 <button
                   type="button"
                   onClick={() => {
-                    // A GLOBAL row has no contract to load into a chart pane
-                    // (no Indian master contract carries it), so clicking it
-                    // would only blank the pane. The row still shows live
-                    // dollar prices; it is just not chartable.
-                    if (item.exchange.toUpperCase() === 'GLOBAL') return
+                    // GLOBAL rows are chartable too: the terminal feeds the
+                    // pane from the Yahoo-backed global history plugin, so a
+                    // click loads the international benchmark's dollar chart.
                     onPick({ symbol: item.symbol, exchange: item.exchange })
                   }}
                   onKeyDown={(e) => {
@@ -1020,10 +1018,7 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
                     }
                   }}
                   className={cn(
-                    'absolute inset-0 rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring',
-                    item.exchange.toUpperCase() === 'GLOBAL'
-                      ? 'cursor-default'
-                      : 'cursor-pointer'
+                    'absolute inset-0 rounded-sm cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring'
                   )}
                   aria-label={`Chart ${item.symbol} on ${item.exchange}`}
                   // The charted row said so only in colour. This states it, so

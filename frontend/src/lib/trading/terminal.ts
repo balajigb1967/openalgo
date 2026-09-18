@@ -476,6 +476,14 @@ export function usesLots(exchange: string): boolean {
   return DERIVATIVE_EXCHANGES.has(exchange)
 }
 const QUOTE_ONLY = new Set(['NSE_INDEX', 'BSE_INDEX', 'MCX_INDEX', 'GLOBAL_INDEX'])
+/** Exchange value the watchlist uses for international dollar rows. The
+ * terminal routes these to the Yahoo-backed global history plugin and a
+ * TradingView-polled LTP — no Indian contract exists to subscribe to. */
+const GLOBAL_EXCHANGE = 'GLOBAL'
+/** GLOBAL key -> history-plugin interval (the plugin accepts 1m/5m/15m/1h/D). */
+function globalHistoryInterval(iv: string): string {
+  return ['1m', '5m', '15m', '1h', 'D'].includes(iv) ? iv : '5m'
+}
 
 /**
  * The tick to format an instrument's prices with.
@@ -3303,6 +3311,62 @@ export class TradingTerminal {
     this.replay?.seek(index)
   }
 
+  /* ── GLOBAL (dollar) rows: Yahoo history + TradingView LTP polling ─────── */
+
+  private isGlobal(): boolean {
+    return this.sym?.exchange === GLOBAL_EXCHANGE
+  }
+
+  /** Candles for a GLOBAL row from the plugin (Yahoo OHLCV, server-cached).
+   * Shaped straight into the chart's Bar type; empty on failure. */
+  private async loadGlobalBars(symbol: string, interval: string): Promise<Bar[]> {
+    const res = await fetch(
+      `/plugins/globals/history?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(globalHistoryInterval(interval))}`
+    )
+    const j = (await res.json().catch(() => ({}))) as {
+      status?: string
+      data?: { candles?: Array<{ time: number; open: number; high: number; low: number; close: number; volume: number }> }
+    }
+    const candles = j.data?.candles || []
+    return candles.map((c) => ({
+      time: c.time,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: c.volume || 0,
+    }))
+  }
+
+  private globalPollTimer: ReturnType<typeof setInterval> | null = null
+
+  /** Poll the plugin's global quotes and feed the LTP + forming candle, the
+   * same path a WS tick takes. 5s keeps the dollar chart moving. */
+  private startGlobalPoll() {
+    if (this.globalPollTimer) return
+    this.globalPollTimer = setInterval(async () => {
+      if (!this.isGlobal() || !this.sym) return
+      try {
+        const res = await fetch(`/plugins/globals/quotes?keys=${encodeURIComponent(this.sym.symbol)}`)
+        const j = (await res.json().catch(() => ({}))) as {
+          data?: Record<string, { ltp?: number }>
+        }
+        const ltp = j.data?.[this.sym.symbol]?.ltp
+        if (typeof ltp === 'number' && ltp > 0)
+          this.onTick({ symbol: this.sym.symbol, ltp, timeSec: nowSec() })
+      } catch {
+        /* next cycle */
+      }
+    }, 5000)
+  }
+
+  private stopGlobalPoll() {
+    if (this.globalPollTimer) {
+      clearInterval(this.globalPollTimer)
+      this.globalPollTimer = null
+    }
+  }
+
   /* ── WS-down fallback: poll quotes so LTP + the forming candle stay live ─ */
   private startLtpFallback() {
     if (this.ltpPollTimer) return
@@ -3612,14 +3676,16 @@ export class TradingTerminal {
     }
     // authoritative metadata (lotsize / tick_size / freeze_qty)
     let info: Record<string, unknown> = { ...pick }
-    try {
-      const j = await this.api<{ data?: Record<string, unknown> }>('symbol', {
-        symbol: pick.symbol,
-        exchange: pick.exchange,
-      })
-      info = { ...pick, ...(j.data || {}) }
-    } catch {
-      /* search row already carries the essentials */
+    if (pick.exchange.toUpperCase() !== GLOBAL_EXCHANGE) {
+      try {
+        const j = await this.api<{ data?: Record<string, unknown> }>('symbol', {
+          symbol: pick.symbol,
+          exchange: pick.exchange,
+        })
+        info = { ...pick, ...(j.data || {}) }
+      } catch {
+        /* search row already carries the essentials */
+      }
     }
     // A newer load claimed the pane while this one was waiting.
     if (this.destroyed || ticket !== this.loadTicket) return false
@@ -3655,23 +3721,28 @@ export class TradingTerminal {
     // guard stops this coming straight back at us.
     if (this.link && this.chart) this.link.setSymbol(this.chart, `${exchange}:${this.sym.symbol}`)
 
-    // history
+    // history — GLOBAL rows come from the Yahoo-backed plugin; every other
+    // exchange from the broker history API as before
     const to = this.gridNow()
     this.lastLtp = null
     this.liveBucket = null
     this.noMoreHistory = false
     let bars: readonly Bar[]
     try {
-      const request = {
-        symbol: this.sym.symbol,
-        exchange: this.sym.exchange,
-        interval: this.interval,
-        from: to - lookbackDays(this.interval) * 86400,
-        to,
+      if (this.sym.exchange === GLOBAL_EXCHANGE) {
+        bars = await this.loadGlobalBars(this.sym.symbol, this.interval)
+      } else {
+        const request = {
+          symbol: this.sym.symbol,
+          exchange: this.sym.exchange,
+          interval: this.interval,
+          from: to - lookbackDays(this.interval) * 86400,
+          to,
+        }
+        bars = this.data
+          ? await this.data.load(request)
+          : await (this.cachedBars ?? this.rest).getBars(request)
       }
-      bars = this.data
-        ? await this.data.load(request)
-        : await (this.cachedBars ?? this.rest).getBars(request)
     } catch (e) {
       if (this.destroyed || ticket !== this.loadTicket) return false
       this.rawBars = []
@@ -3709,7 +3780,25 @@ export class TradingTerminal {
     this.cb.onLtp(this.lastLtp)
     this.cb.onSymbolLoaded(this.sym)
 
-    // live subscription (swap the previous symbol's stream)
+    // live subscription (swap the previous symbol's stream). GLOBAL rows
+    // have no broker contract to subscribe to — the TradingView poll above
+    // is their live feed, and pollBook's order calls would just 400.
+    if (this.isGlobal()) {
+      // Same candle-builder setup as connectLive, so polled ticks fold into
+      // the forming bucket instead of only moving the last-price line.
+      const sec = intervalSeconds(this.interval)
+      const sessionAnchorSec = this.rawBars[this.rawBars.length - 1]?.time ?? 0
+      this.builder = sec
+        ? new CandleBuilder({ intervalSec: sec, volumeMode: 'ltq-sum', sessionAnchorSec })
+        : null
+      if (this.builder && this.rawBars.length) {
+        this.builder.seed(this.rawBars[this.rawBars.length - 1])
+      }
+      this.stopLtpFallback()
+      this.startGlobalPoll()
+      return true
+    }
+    this.stopGlobalPoll()
     this.connectLive()
     this.pollBook()
     return true

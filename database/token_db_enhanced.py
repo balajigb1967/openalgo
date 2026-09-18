@@ -952,6 +952,19 @@ def load_cache_for_broker(broker: str) -> bool:
     Load cache for a specific broker
     Called after master contract download completes
     """
+    # Keep bare-root aliases (CRUDEOIL -> CRUDEOIL<DDMMMYY>FUT on MCX) in step
+    # before the cache reads the table, so watchlist roots always resolve to
+    # the near-month contract. Re-runs are safe; it also rolls the alias
+    # forward when contracts expire.
+    try:
+        from database.mcx_root_alias import run as _mcx_alias_run
+
+        from database.engine_factory import create_db_engine
+
+        _mcx_alias_run(create_db_engine())
+    except Exception as e:  # noqa: BLE001 — aliasing must never block boot
+        logger.warning(f"MCX root alias refresh skipped: {e}")
+
     cache = get_cache()
     return cache.load_all_symbols(broker)
 

@@ -43,7 +43,7 @@ CATALOG = {
 
 #: How long a fetched batch is reused. Globals move slowly relative to Indian
 #: ticks, and the scanner is one HTTP call per batch regardless of size.
-CACHE_TTL = 30.0
+CACHE_TTL = 8.0
 
 _cache_lock = threading.Lock()
 _cache: dict = {"ts": 0.0, "rows": {}}
@@ -177,3 +177,97 @@ def get_global_quotes(keys: list | None = None) -> dict:
         _cache["ts"] = now
         _cache["rows"] = rows
     return {k: v for k, v in rows.items() if k in keys}
+
+
+# ---------------------------------------------------------------------------
+# History (candles) for the global rows — this is what makes them chartable.
+# Yahoo serves the OHLCV series for the commodities; GIFT NIFTY has no public
+# OHLC endpoint, so its chart is quote-only and the caller shows the price
+# header with a friendly note.
+# ---------------------------------------------------------------------------
+
+_YAHOO_RESOLUTIONS = {
+    "1m": ("1m", "2d"),
+    "5m": ("5m", "5d"),
+    "15m": ("15m", "10d"),
+    "1h": ("60m", "30d"),
+    "D": ("1d", "2y"),
+}
+
+_hist_cache: dict = {}  # (key, interval) -> {"ts": float, "candles": [...]}
+_hist_lock = threading.Lock()
+
+
+def get_global_history(key: str, interval: str = "5m") -> dict:
+    """OHLCV candles for one global instrument, from Yahoo.
+
+    Returns {symbol, interval, currency: 'USD', candles: [{time, open, high,
+    low, close, volume}]} with `time` in epoch seconds, or {"error": ...}.
+    Cached ~30s per (key, interval) — a phone or desktop chart refreshes
+    slower than that, and the backend call is light.
+    """
+    key = (key or "").upper()
+    interval = interval if interval in _YAHOO_RESOLUTIONS else "5m"
+    meta = CATALOG.get(key)
+    yahoo = (meta or {}).get("yahoo")
+    if not meta:
+        return {"error": f"unknown global symbol {key}"}
+    if not yahoo:
+        return {
+            "error": "history_not_available",
+            "message": f"{key} has no public OHLC source; live price is shown in the watchlist",
+        }
+
+    now = time.time()
+    ck = (key, interval)
+    with _hist_lock:
+        hit = _hist_cache.get(ck)
+        if hit and now - hit["ts"] < 30:
+            return hit["payload"]
+
+    res, rng = _YAHOO_RESOLUTIONS[interval]
+    payload: dict = {"symbol": key, "interval": interval, "currency": "USD", "candles": []}
+    try:
+        resp = requests.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/" + yahoo,
+            params={"interval": res, "range": rng, "includePrePost": "false"},
+            headers={"User-Agent": _UA},
+            timeout=12,
+        )
+        resp.raise_for_status()
+        result = (resp.json().get("chart") or {}).get("result") or []
+        if result:
+            stamps = result[0].get("timestamp") or []
+            quote = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
+            opens = quote.get("open") or []
+            highs = quote.get("high") or []
+            lows = quote.get("low") or []
+            closes = quote.get("close") or []
+            volumes = quote.get("volume") or []
+            dp = meta["decimals"]
+            candles = []
+            for i, ts in enumerate(stamps):
+                o = opens[i] if i < len(opens) else None
+                h = highs[i] if i < len(highs) else None
+                l = lows[i] if i < len(lows) else None
+                c = closes[i] if i < len(closes) else None
+                if o is None or h is None or l is None or c is None:
+                    continue
+                candles.append(
+                    {
+                        "time": int(ts),
+                        "open": round(float(o), dp),
+                        "high": round(float(h), dp),
+                        "low": round(float(l), dp),
+                        "close": round(float(c), dp),
+                        "volume": float(volumes[i]) if i < len(volumes) and volumes[i] else 0.0,
+                    }
+                )
+            payload["candles"] = candles[-1500:]
+    except Exception as e:  # noqa: BLE001 — degraded chart beats a 500
+        logger.debug("global history failed for %s %s: %s", key, interval, e)
+        payload = {"symbol": key, "interval": interval, "currency": "USD", "candles": [], "error": "upstream_unavailable"}
+
+    with _hist_lock:
+        _hist_cache[ck] = {"ts": now, "payload": payload}
+    return payload

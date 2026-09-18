@@ -400,6 +400,139 @@ def plugin_global_quotes():
     return jsonify({"status": "success", "data": rows})
 
 
+# ---- Global (dollar) history: makes GLOBAL rows chartable ----
+
+@scalper_orderflow_bp.route("/globals/history", methods=["GET"])
+@app_key_required
+def plugin_global_history():
+    """OHLCV candles for one global instrument (Yahoo-sourced). GIFT NIFTY
+    returns a friendly error — it has no public OHLC endpoint, its watchlist
+    row still streams the live price."""
+    from services.global_quotes_service import get_global_history
+
+    key = (request.args.get("symbol") or "").strip()
+    interval = (request.args.get("interval") or "5m").strip()
+    if not key:
+        return jsonify({"status": "error", "message": "symbol is required"}), 400
+    payload = get_global_history(key, interval)
+    if payload.get("error"):
+        return jsonify({"status": "error", "message": payload.get("message") or payload["error"]}), 404
+    return jsonify({"status": "success", "data": payload})
+
+
+# ---- Options analytics for the phone: the desktop /tools surface ----
+# The desktop tool pages (OI Tracker, GEX, IV Chart...) are session-only
+# browser views built on the same services/*_service functions. These routes
+# re-serve those services behind app_key_required, so the Flutter app gets
+# the identical numbers with its API key. Same per-view auth model as every
+# other plugin route.
+
+_ANALYTICS_CONFIG = {
+    "oi": ("services.oi_tracker_service", "get_oi_data", ("underlying", "exchange", "expiry_date")),
+    "maxpain": ("services.oi_tracker_service", "calculate_max_pain", ("underlying", "exchange", "expiry_date")),
+    "gex": ("services.gex_service", "get_gex_data", ("underlying", "exchange", "expiry_date")),
+    "gamma": ("services.gamma_density_service", "calculate_gamma_density", ("underlying", "exchange", "expiry_date")),
+    "straddle": ("services.straddle_chart_service", "get_straddle_chart_data", ("underlying", "exchange", "expiry_date", "interval", "days")),
+    "ivchart": ("services.iv_chart_service", "get_iv_chart_data", ("underlying", "exchange", "expiry_date", "interval", "days")),
+    "ivsmile": ("services.iv_smile_service", "get_iv_smile_data", ("underlying", "exchange", "expiry_date")),
+    "oiprofile": ("services.oi_profile_service", "get_oi_profile_data", ("underlying", "exchange", "expiry_date", "interval", "days")),
+    "straddlepnl": ("services.custom_straddle_service", "get_custom_straddle_simulation", ("underlying", "exchange", "expiry_date", "interval", "days", "adjustment_points", "lot_size", "lots")),
+    "volsurface": ("services.vol_surface_service", "get_vol_surface_data", ("underlying", "exchange", "expiry_dates", "strike_count")),
+}
+
+# Defaults the desktop pages use, so a phone request can omit them.
+_ANALYTICS_DEFAULTS = {
+    "interval": "5m", "days": 5, "adjustment_points": 50,
+    "lot_size": 65, "lots": 1, "strike_count": 15,
+}
+
+
+_ANALYTICS_INT_FIELDS = {"days", "strike_count", "adjustment_points", "lot_size", "lots"}
+
+
+def _run_analytics(tool: str, body: dict):
+    module_name, fn_name, fields = _ANALYTICS_CONFIG[tool]
+    mod = __import__(module_name, fromlist=[fn_name])
+    fn = getattr(mod, fn_name)
+    # The service layer self-authenticates to the broker with the instance's
+    # stored key — the same path the desktop tool pages take internally.
+    from database.auth_db import get_first_available_api_key
+
+    kwargs = {}
+    for f in fields:
+        v = body.get(f, _ANALYTICS_DEFAULTS.get(f))
+        if f in _ANALYTICS_INT_FIELDS and v is not None:
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                v = _ANALYTICS_DEFAULTS.get(f)
+        kwargs[f] = v
+    kwargs["api_key"] = get_first_available_api_key()
+    return fn(**kwargs)
+
+
+@scalper_orderflow_bp.route("/tools/<tool>", methods=["POST"])
+@app_key_required
+def plugin_tools(tool):  # noqa: C901 — dispatch by table
+    """Run one of the options-analytics tools. Body mirrors the desktop page's
+    request: {underlying, exchange, expiry_date[, interval, days, ...]}.
+    Tools with a list field (expiry_dates) accept it as-is."""
+    if tool not in _ANALYTICS_CONFIG:
+        return jsonify({"status": "error", "message": f"unknown tool {tool}"}), 404
+    body = request.get_json(silent=True) or {}
+    # The phone sends selections in the query string (its plugin client is
+    # query-first); the browser-shaped JSON body wins where both exist.
+    for k, v in request.args.items():
+        body.setdefault(k, v)
+    underlying = (body.get("underlying") or "").strip().upper()
+    exchange = (body.get("exchange") or "").strip().upper()
+    if not underlying or not exchange:
+        return jsonify({"status": "error", "message": "underlying and exchange are required"}), 400
+    try:
+        success, response, status_code = _run_analytics(tool, body)
+        return jsonify(response), (status_code or 200)
+    except Exception as e:  # noqa: BLE001 — report, never crash the worker
+        logger.exception("plugin tools/%s failed: %s", tool, e)
+        return jsonify({"status": "error", "message": "tool execution failed"}), 500
+
+
+@scalper_orderflow_bp.route("/tools/underlyings", methods=["GET"])
+@app_key_required
+def plugin_tool_underlyings():
+    """Optionable underlyings for the tools' pickers (per exchange)."""
+    from database.symbol import get_distinct_underlyings
+
+    exchange = (request.args.get("exchange") or "NFO").strip().upper()
+    return jsonify({"status": "success", "data": get_distinct_underlyings(exchange)})
+
+
+@scalper_orderflow_bp.route("/tools/expiries", methods=["GET"])
+@app_key_required
+def plugin_tool_expiries():
+    """Option expiries for one underlying — the tools' expiry pickers."""
+    from database.symbol import get_distinct_expiries
+
+    exchange = (request.args.get("exchange") or "NFO").strip().upper()
+    underlying = (request.args.get("underlying") or "").strip().upper()
+    if not underlying:
+        return jsonify({"status": "error", "message": "underlying is required"}), 400
+    expiries = get_distinct_expiries(exchange=exchange, underlying=underlying, instrumenttype="options")
+    return jsonify({"status": "success", "data": expiries})
+
+
+@scalper_orderflow_bp.route("/tools/arbitrage", methods=["GET"])
+@app_key_required
+def plugin_tool_arbitrage():
+    """Synthetic-future arbitrage universe (GET, like the desktop page)."""
+    from services.arbitrage_service import DEFAULT_EXCHANGES, get_arbitrage_universe
+    from database.auth_db import get_first_available_api_key
+
+    raw = (request.args.get("exchanges") or "").strip()
+    exchanges = [e.strip().upper() for e in raw.split(",") if e.strip()] or list(DEFAULT_EXCHANGES)
+    success, response, status_code = get_arbitrage_universe(exchanges=exchanges, api_key=get_first_available_api_key())
+    return jsonify(response), (status_code or 200)
+
+
 # ---- Watchlist sync (the same DB lists the desktop terminal keeps) ----
 
 def _sync_user():
