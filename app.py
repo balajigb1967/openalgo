@@ -110,6 +110,9 @@ from blueprints.tv_json import tv_json_bp
 from blueprints.scalper_orderflow import (
     scalper_orderflow_bp,  # Import the Scalper Advisor + Orderflow plugin blueprint
 )
+from blueprints.agent_bridge import (  # noqa: F401 — import adds its routes to the plugin blueprint
+    agent_bridge_routes,
+)
 from blueprints.mobile_api import (
     mobile_bp,  # Import the mobile app API blueprint
 )
@@ -359,6 +362,28 @@ def create_app():
             app.csrf.exempt(app.view_functions[name])
     except Exception as e:  # noqa: BLE001 — CSRF wiring must never break boot
         logger.warning(f"mobile CSRF exemption failed: {e}")
+
+    # The plugin blueprint serves both the desktop SPA (session cookie) and
+    # the mobile app / programmatic clients (X-API-KEY header). Every route is
+    # behind app_key_required, so a state-changing request is already
+    # authenticated with a bearer-style credential — but Flask-WTF's global
+    # hook runs BEFORE that and answered 400 "CSRF token missing" for every
+    # tokenless POST, which is exactly what the phone sends. Exempt the
+    # blueprint's views the way mobile_api's are: the credential check moves
+    # into the view, where it belongs for non-browser clients.
+    try:
+        import blueprints.scalper_orderflow as _scalper_mod
+
+        _plugin_views = {
+            name
+            for name, vf in app.view_functions.items()
+            if getattr(vf, "__module__", "") == _scalper_mod.__name__
+        }
+        for name in _plugin_views:
+            app.csrf.exempt(app.view_functions[name])
+        logger.info(f"plugin CSRF exemption applied to {len(_plugin_views)} views")
+    except Exception as e:  # noqa: BLE001 — CSRF wiring must never break boot
+        logger.warning(f"plugin CSRF exemption failed: {e}")
     app.register_blueprint(oitracker_bp)  # Register OI tracker blueprint
     app.register_blueprint(gamma_density_bp)  # Register Gamma Density blueprint
     app.register_blueprint(straddle_bp)  # Register straddle chart blueprint

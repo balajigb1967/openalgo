@@ -479,12 +479,16 @@ def _run_analytics(tool: str, body: dict):
     return fn(**kwargs)
 
 
-@scalper_orderflow_bp.route("/tools/<tool>", methods=["POST"])
+@scalper_orderflow_bp.route("/tools/<tool>", methods=["GET", "POST"])
 @app_key_required
 def plugin_tools(tool):  # noqa: C901 — dispatch by table
     """Run one of the options-analytics tools. Body mirrors the desktop page's
     request: {underlying, exchange, expiry_date[, interval, days, ...]}.
-    Tools with a list field (expiry_dates) accept it as-is."""
+    Tools with a list field (expiry_dates) accept it as-is.
+
+    Accepts GET as well as POST: a GET has no CSRF token either, and a client
+    that fetches tool results idempotently (refresh, retry) should not need a
+    state-changing verb to do it."""
     if tool == "arbitrage":
         # The mobile app POSTs every tool through /tools/<tool>; arbitrage is
         # a GET-style universe scan, so delegate to its handler here.
