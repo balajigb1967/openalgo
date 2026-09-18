@@ -261,6 +261,13 @@ def react_trading():
     return serve_react_app()
 
 
+# Scalper terminal popout — the /trading page opens this in a detached OS
+# window (same terminal component, no chrome, fills the window).
+@react_bp.route("/scalper", strict_slashes=False)
+def react_scalper_popout():
+    return serve_react_app()
+
+
 # ============================================================
 # Phase 4 Routes - Charts, WebSocket & Sandbox
 # ============================================================
