@@ -526,9 +526,12 @@ def plugin_tool_underlyings():
 @app_key_required
 def plugin_tool_expiries():
     """Option expiries for one underlying — the tools' expiry pickers.
+    Uses get_expiry_dates (normalized DDMMMYY, the format the analytics
+    services themselves expect) rather than the raw symtoken listing, whose
+    shapes differ per broker and made the tools answer 400.
     Accepts GET (?exchange=&underlying=) and POST (JSON body), matching
     /tools/underlyings."""
-    from database.symbol import get_distinct_expiries
+    from services.expiry_service import get_expiry_dates
 
     body = request.get_json(silent=True) or {}
     exchange = ((request.args.get("exchange") or body.get("exchange"))
@@ -536,8 +539,12 @@ def plugin_tool_expiries():
     underlying = ((request.args.get("underlying") or body.get("underlying")) or "").strip().upper()
     if not underlying:
         return jsonify({"status": "error", "message": "underlying is required"}), 400
-    expiries = get_distinct_expiries(exchange=exchange, underlying=underlying, instrumenttype="options")
-    return jsonify({"status": "success", "data": expiries})
+    _ok, resp, code = get_expiry_dates(underlying, exchange, "options")
+    data = resp.get("data") if isinstance(resp, dict) else None
+    if not _ok or data is None:
+        return jsonify(resp if isinstance(resp, dict)
+                       else {"status": "error", "message": "expiry lookup failed"}), code or 500
+    return jsonify({"status": "success", "data": data})
 
 
 @scalper_orderflow_bp.route("/tools/arbitrage", methods=["GET", "POST"])
