@@ -33,7 +33,35 @@ from services.scalper_advisor_service import (
     scalper_advisor,
 )
 from utils.logging import get_logger
-from utils.session import check_session_validity
+from utils.session import check_session_validity, is_session_valid
+from flask import jsonify as _jsonify, request as _request
+from functools import wraps as _wraps
+
+
+def app_key_required(fn):
+    """Dual auth for the mobile/Flutter app: accept a valid OpenAlgo API key
+    (X-API-KEY header or ?apikey= query) OR a normal browser session.
+
+    Plugin services self-authenticate to the broker via the instance's stored
+    API key, so a valid app key is a sufficient and equivalent credential.
+    """
+    @_wraps(fn)
+    def wrapper(*args, **kwargs):
+        key = _request.headers.get("X-API-KEY") or _request.args.get("apikey")
+        if key:
+            try:
+                from database.auth_db import get_auth_token_broker
+                result = get_auth_token_broker(key)
+                if result and result[0]:
+                    return fn(*args, **kwargs)
+            except Exception:
+                pass
+            return _jsonify({"status": "error", "message": "Invalid or revoked API key"}), 401
+        if is_session_valid():
+            return fn(*args, **kwargs)
+        return _jsonify({"status": "error", "message": "Authentication required"}), 401
+    return wrapper
+
 
 logger = get_logger(__name__)
 
@@ -70,7 +98,7 @@ def _uid() -> str:
 
 
 @scalper_orderflow_bp.route("/scalper/advisor", methods=["GET"])
-@check_session_validity
+@app_key_required
 def scalper_advisor_route():
     """Full advisory payload. Query: refresh=1 forces rebuild."""
     try:
@@ -97,7 +125,7 @@ def scalper_advisor_route():
 
 
 @scalper_orderflow_bp.route("/scalper/close", methods=["POST"])
-@check_session_validity
+@app_key_required
 def scalper_close_route():
     """Close one alert. Body: {alert_id, reason?}"""
     data = request.get_json(silent=True) or {}
@@ -116,7 +144,7 @@ def scalper_close_route():
 
 
 @scalper_orderflow_bp.route("/scalper/chart", methods=["GET"])
-@check_session_validity
+@app_key_required
 def scalper_chart_route():
     """Candles + meta for one alert's chart. Query: alert_id, symbol, tf."""
     alert_id = request.args.get("alert_id") or ""
@@ -161,7 +189,7 @@ def _orderflow_row(inst: dict, tf: str) -> dict:
 
 
 @scalper_orderflow_bp.route("/orderflow/table", methods=["GET"])
-@check_session_validity
+@app_key_required
 def orderflow_table_route():
     """Orderflow rows for the default root set. Query: tf (default 5m), refresh=1.
     Rows are fetched in parallel and cached for 60s."""
@@ -186,7 +214,7 @@ def orderflow_table_route():
 
 
 @scalper_orderflow_bp.route("/orderflow/detail", methods=["GET"])
-@check_session_validity
+@app_key_required
 def orderflow_detail_route():
     """One symbol's timewise orderflow bars. Query: symbol (EXCH:SYM), tf, bars."""
     try:
@@ -215,7 +243,7 @@ def orderflow_detail_route():
 
 
 @scalper_orderflow_bp.route("/orderflow/live", methods=["GET"])
-@check_session_validity
+@app_key_required
 def orderflow_live_route():
     """Live LTP for one orderflow symbol (websocket-companion freshness).
     Query: symbol (EXCH:SYM). Lightweight: quotes only, no candles."""
@@ -229,7 +257,7 @@ def orderflow_live_route():
 
 
 @scalper_orderflow_bp.route("/orderflow/health", methods=["GET"])
-@check_session_validity
+@app_key_required
 def orderflow_health_route():
     """Liveness + DB probes for both plugins."""
     try:
@@ -251,7 +279,7 @@ _BRIEF_RT_LOCK = threading.Lock()
 
 
 @scalper_orderflow_bp.route("/brief", methods=["GET"])
-@check_session_validity
+@app_key_required
 def market_brief_route():
     """Full market brief snapshot (server-cached 30s, stale-while-revalidate).
     Query: refresh=1 forces a rebuild."""
@@ -268,7 +296,7 @@ def market_brief_route():
 # News (RSS + TradingView headlines)
 # ---------------------------------------------------------------------------
 @scalper_orderflow_bp.route("/news", methods=["GET"])
-@check_session_validity
+@app_key_required
 def news_route():
     """Merged RSS headlines (Indian + global). Query: limit, refresh=1."""
     try:
@@ -281,7 +309,7 @@ def news_route():
 
 
 @scalper_orderflow_bp.route("/news/symbol", methods=["GET"])
-@check_session_validity
+@app_key_required
 def news_symbol_route():
     """TradingView headlines + RSS for one symbol. Query: symbol, limit."""
     try:
@@ -297,7 +325,7 @@ def news_symbol_route():
 # Market calendar (economic events + exchange holidays)
 # ---------------------------------------------------------------------------
 @scalper_orderflow_bp.route("/calendar/economic", methods=["GET"])
-@check_session_validity
+@app_key_required
 def calendar_economic_route():
     """This week's macro events, next-up first. Query: refresh=1."""
     try:
@@ -310,7 +338,7 @@ def calendar_economic_route():
 
 
 @scalper_orderflow_bp.route("/calendar/holidays", methods=["GET"])
-@check_session_validity
+@app_key_required
 def calendar_holidays_route():
     """NSE/BSE/MCX holiday lists + today's trading-day status. Query: refresh=1."""
     try:
@@ -320,3 +348,39 @@ def calendar_holidays_route():
     except Exception as e:
         logger.exception(f"holiday calendar failed: {e}")
         return jsonify({"status": "error", "message": f"Calendar failed: {e}"}), 500
+
+
+# ---- Mobile/Flutter option-tools endpoints (dual auth: API key or session) ----
+
+@scalper_orderflow_bp.route("/options/expiries", methods=["GET"])
+@app_key_required
+def plugin_option_expiries():
+    """Expiry list for an underlying - feeds the mobile Option Tools screen."""
+    from services.expiry_service import get_expiry_dates
+    symbol = (request.args.get("underlying") or "NIFTY").upper()
+    exchange = (request.args.get("exchange") or "NFO").upper()
+    _ok, resp, code = get_expiry_dates(symbol, exchange, "options")
+    return jsonify(resp), code
+
+
+@scalper_orderflow_bp.route("/options/chain", methods=["GET"])
+@app_key_required
+def plugin_option_chain():
+    """Option chain with live quotes + Greeks for the mobile Option Tools screen."""
+    from services.option_chain_service import get_option_chain
+    from database.auth_db import get_first_available_api_key
+    underlying = (request.args.get("underlying") or "NIFTY").upper()
+    exchange = (request.args.get("exchange") or "NFO").upper()
+    expiry_date = (request.args.get("expiry") or "").upper().replace("-", "")
+    strike_count = request.args.get("strike_count", type=int) or 20
+    if not expiry_date:
+        return jsonify({"status": "error", "message": "expiry is required"}), 400
+    _ok, resp, code = get_option_chain(
+        underlying=underlying,
+        exchange=exchange,
+        expiry_date=expiry_date,
+        strike_count=strike_count,
+        api_key=get_first_available_api_key(),
+        with_greeks=True,
+    )
+    return jsonify(resp), code
