@@ -1104,7 +1104,11 @@ function DepthTable({
       }
     }
     fetchDepth()
-    timer = window.setInterval(fetchDepth, 3000)
+    // 5s, not 3s: each poll is a broker depth call against a shared
+    // 200/min Fyers budget shared with option chains, quotes and history —
+    // a 3s cadence per column contributed to account-wide 429 storms that
+    // stalled the whole server (see broker/fyers/api/rate_limiter.py).
+    timer = window.setInterval(fetchDepth, 5000)
     return () => {
       alive = false
       if (timer) window.clearInterval(timer)
