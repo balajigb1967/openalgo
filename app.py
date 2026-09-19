@@ -138,6 +138,9 @@ from blueprints.scalper_orderflow import (
 from blueprints.agent_bridge import (  # noqa: F401 — import adds its routes to the plugin blueprint
     agent_bridge_routes,
 )
+from blueprints.fcc_ai import (  # noqa: F401 — import registers its routes on the plugin blueprint
+    fcc_status,
+)
 from blueprints.mobile_api import (
     mobile_bp,  # Import the mobile app API blueprint
 )

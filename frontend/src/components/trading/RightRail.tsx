@@ -8,7 +8,7 @@
  * closes it.
  */
 
-import { Activity, Bot, CalendarDays, Crosshair, List, Newspaper, Shapes, Table2, Database } from 'lucide-react'
+import { Activity, Bot, CalendarDays, Crosshair, List, Newspaper, Shapes, Sparkles, Table2, Database } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { cn } from '@/lib/utils'
 import { RAIL_BTN, RAIL_BTN_ON, RAIL_ICON_STROKE, RailTip } from './railStyles'
@@ -33,6 +33,7 @@ const PANELS = [
   { id: 'news', label: 'News', icon: Newspaper },
   { id: 'calendar', label: 'Calendar', icon: CalendarDays },
   { id: 'agent', label: 'Assistant', icon: Bot },
+  { id: 'fcc', label: 'FCC AI', icon: Sparkles },
 ] as const
 
 /**

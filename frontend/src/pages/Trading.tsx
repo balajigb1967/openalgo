@@ -10,6 +10,9 @@ import { Navbar } from '@/components/layout/Navbar'
 const AgentPanel = lazy(() =>
   import('@/components/trading/AgentPanel').then((m) => ({ default: m.AgentPanel }))
 )
+const FccAiPanel = lazy(() =>
+  import('@/components/trading/FccAiPanel').then((m) => ({ default: m.FccAiPanel }))
+)
 
 // Market depth panel - shows real-time liquidity data
 const MarketDepthPanelContainer = lazy(() =>
@@ -823,6 +826,11 @@ export default function Trading() {
                />
              </Suspense>
            )}
+          {apiKey && wsUrl && panel === 'fcc' && (
+            <Suspense fallback={null}>
+              <FccAiPanel />
+            </Suspense>
+          )}
           {apiKey && wsUrl && panel === 'objects' && (
             <ObjectsPanel model={paneObjects[objectsPaneId] ?? null} paneLabel={objectsPaneLabel} />
           )}
