@@ -61,7 +61,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import type { AgentChartCommand } from '@/lib/agent/stream'
 import { LAYOUTS, LayoutIcon } from '@/lib/chart/layouts'
-import { setSyncSymbol } from '@/lib/scalperSync'
+import { setSyncSymbol, subscribeSyncTarget } from '@/lib/scalperSync'
 import type { DrawStats, SearchRow, TradingTerminal } from '@/lib/trading/terminal'
 import { cn } from '@/lib/utils'
 
@@ -173,6 +173,15 @@ export default function Trading() {
       // Storage refused: the toggle still works for this visit.
     }
   }, [scalperOpen])
+
+  // Advisor/chart sync while the terminal is closed: open it so the target
+  // actually lands — previously the event fired into the void and the toast
+  // still claimed "synced".
+  useEffect(() => {
+    return subscribeSyncTarget(() => {
+      setScalperOpen(true)
+    })
+  }, [])
 
   /* ── one drawing rail for every pane ─────────────────────────────────── */
   const [tool, setTool] = useState<string | null>(null)

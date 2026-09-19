@@ -215,7 +215,10 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose, defaultMaximize
     },
     []
   )
-  const pendingStrike = useRef<{ side: 'CE' | 'PE'; strike: number } | null>(null)
+  const pendingStrike = useRef<{ side: 'CE' | 'PE'; strike: number; underlying: string } | null>(null)
+  /** Bumped on every sync target so the strike effect re-runs even when the
+   * chain does NOT refetch (same-family sync was previously a silent no-op). */
+  const [syncSeq, setSyncSeq] = useState(0)
 
   /* ── sync: chart symbol + advisor alerts ─────────────────────────────── */
   const selRef = useRef({ exchange, underlying, rawSpot: '', rawSpotExch: '' })
@@ -260,7 +263,7 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose, defaultMaximize
       if (!info.underlying) return
       aimAt(exchForChartPrefix(prefix), info.underlying, info.rawSym, prefix.toUpperCase())
       if (info.isOption && info.optionType && info.strike != null) {
-        pendingStrike.current = { side: info.optionType, strike: info.strike }
+        pendingStrike.current = { side: info.optionType, strike: info.strike, underlying: info.underlying.toUpperCase() }
       }
       showFlash(`Following chart: ${s.symbol.split(':')[1] ?? s.symbol}`)
     })
@@ -270,10 +273,13 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose, defaultMaximize
     (t: ScalperTarget) => {
       const und = t.underlying || t.key
       if (!und) return
-      aimAt(exchForMarket(t.exchange), und)
       if (t.side && t.strike != null) {
-        pendingStrike.current = { side: t.side, strike: t.strike }
+        pendingStrike.current = { side: t.side, strike: t.strike, underlying: und.toUpperCase() }
       }
+      aimAt(exchForMarket(t.exchange), und)
+      // Re-run the strike effect even when aimAt short-circuits (same
+      // family): the pending strike must land without a chain refetch.
+      setSyncSeq((s) => s + 1)
       showFlash(`Advisor: ${t.key} BUY ${t.side ?? ''}${t.strike != null ? ` @${t.strike}` : ''} — synced`)
     },
     [showFlash, aimAt]
@@ -318,21 +324,36 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose, defaultMaximize
   }, [chain])
 
   // Default CE/PE to ATM, honouring a pending sync strike when it lands.
+  // The pending strike is consumed only when the loaded chain belongs to the
+  // synced instrument's family — a stale chain from the previous family must
+  // not swallow it before the refetched chain arrives.
   useEffect(() => {
     if (chainResp?.atm_strike == null || chain.length === 0) return
+    const chainUnd = String(chainResp.underlying_symbol ?? underlying ?? '').toUpperCase()
+    const pend = pendingStrike.current
+    if (pend && pend.underlying && chainUnd !== pend.underlying) {
+      // Chain is for a different family — keep the pending strike and wait
+      // for the refetched chain of the synced instrument.
+      return
+    }
     const strikes = new Set(chain.map((r) => String(r.strike)))
     const atm = String(chainResp.atm_strike)
-    const pend = pendingStrike.current
-    pendingStrike.current = null
-    setCeStrike((prev) => {
-      if (pend && pend.side === 'CE' && strikes.has(String(pend.strike))) return String(pend.strike)
-      return prev && strikes.has(prev) ? prev : atm
-    })
-    setPeStrike((prev) => {
-      if (pend && pend.side === 'PE' && strikes.has(String(pend.strike))) return String(pend.strike)
-      return prev && strikes.has(prev) ? prev : atm
-    })
-  }, [chainResp, chain])
+    if (pend) {
+      pendingStrike.current = null
+      const want = String(pend.strike)
+      const has = strikes.has(want)
+      if (pend.side === 'CE') {
+        setCeStrike(has ? want : atm)
+        setPeStrike((prev) => (prev && strikes.has(prev) ? prev : atm))
+      } else {
+        setPeStrike(has ? want : atm)
+        setCeStrike((prev) => (prev && strikes.has(prev) ? prev : atm))
+      }
+      return
+    }
+    setCeStrike((prev) => (prev && strikes.has(prev) ? prev : atm))
+    setPeStrike((prev) => (prev && strikes.has(prev) ? prev : atm))
+  }, [chainResp, chain, syncSeq, underlying])
 
   /* ── futures mode (single instrument) ────────────────────────────────── */
   const { data: futResp } = useQuery({
