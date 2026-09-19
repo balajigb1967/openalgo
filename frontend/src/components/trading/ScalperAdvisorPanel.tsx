@@ -9,6 +9,8 @@ import {
 } from '@/api/scalper-orderflow'
 import { PanelShell } from './panelShell'
 import { cn } from '@/lib/utils'
+import { setSyncTarget, type ScalperTarget } from '@/lib/scalperSync'
+import { showToast } from '@/utils/toast'
 
 /**
  * Scalper Advisor side panel.
@@ -52,6 +54,62 @@ function fmtClock(t: number): string {
   return new Date(t * 1000).toLocaleTimeString('en-IN', {
     hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Kolkata',
   })
+}
+
+/** Advisor market (NSE/BSE/MCX/CDS) -> terminal exchange segment. */
+function exchangeForMarket(m: string | null | undefined): string {
+  return (({ NSE: 'NFO', BSE: 'BFO', MCX: 'MCX', CDS: 'CDS' }) as Record<string, string>)[
+    (m || '').toUpperCase()
+  ] ?? 'NFO'
+}
+
+/** Publish an advisor signal/alert/position as the terminal's trade target:
+ * the embedded ScalperTerminal switches exchange/underlying and pre-selects
+ * the CE/PE strike — the same flow the alert bell already uses. */
+function publishSync(t: { key: string; market?: string | null; side?: string | null; strike?: number | null }): void {
+  if (!t.key) return
+  const target: ScalperTarget = {
+    key: t.key,
+    underlying: t.key,
+    exchange: exchangeForMarket(t.market),
+    side: (t.side === 'PE' ? 'PE' : 'CE'),
+    strike: typeof t.strike === 'number' ? t.strike : 0,
+    source: 'alert',
+  }
+  setSyncTarget(target)
+  showToast.success(
+    `Advisor: ${t.key} BUY ${target.side}${t.strike ? ` @${t.strike}` : ''} — synced`,
+    'orders'
+  )
+}
+
+/** Compact action chip shared by the advice cards and armed cards. */
+function ActionChip({ label, title, tone = 'blue', disabled, onClick }: {
+  label: string
+  title: string
+  tone?: 'blue' | 'emerald' | 'amber' | 'violet' | 'orange' | 'rose'
+  disabled?: boolean
+  onClick: () => void
+}) {
+  const tones: Record<string, string> = {
+    blue: 'border-sky-500/40 bg-sky-500/10 text-sky-600 hover:bg-sky-500/20 dark:text-sky-400',
+    emerald: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 dark:text-emerald-400',
+    amber: 'border-amber-500/40 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20 dark:text-amber-400',
+    violet: 'border-violet-500/40 bg-violet-500/10 text-violet-600 hover:bg-violet-500/20 dark:text-violet-400',
+    orange: 'border-orange-500/40 bg-orange-500/10 text-orange-600 hover:bg-orange-500/20 dark:text-orange-400',
+    rose: 'border-rose-500/40 bg-rose-500/10 text-rose-600 hover:bg-rose-500/20 dark:text-rose-400',
+  }
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      title={title}
+      className={cn('rounded border px-1.5 py-0.5 text-[9px] font-semibold disabled:opacity-50', tones[tone])}
+    >
+      {label}
+    </button>
+  )
 }
 
 /** Small live premium sparkline for an armed position (chronological series). */
@@ -167,31 +225,39 @@ function AdviceCard({
       )}
 
       <div className="mt-1 flex items-center justify-between gap-1">
-        {isBuy ? (
-          adv.armed ? (
-            <button
-              type="button"
-              disabled={isBusy}
-              onClick={() => onDisarm(adv.key)}
-              className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-600 hover:bg-amber-500/20 disabled:opacity-50 dark:text-amber-400"
-              title="Release the position monitor (stops tracking)"
-            >
-              {isBusy ? '…' : '◼ DISARM'}
-            </button>
-          ) : (
-            <button
-              type="button"
-              disabled={isBusy}
-              onClick={() => onArm(adv.key)}
-              className="rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-600 hover:bg-emerald-500/20 disabled:opacity-50 dark:text-emerald-400"
-              title="Arm live monitoring: target/SL hits, trailing, reversal alerts"
-            >
-              {isBusy ? '…' : '▶ ARM'}
-            </button>
-          )
-        ) : (
-          <span className="text-[10px] text-muted-foreground">{adv.note?.slice(0, 44) || '—'}</span>
-        )}
+        <div className="flex items-center gap-1">
+          {/* Sync chart: aim the embedded terminal at this instrument (and
+              pre-select the signal's CE/PE strike) — same as the alert bell. */}
+          <ActionChip
+            label="⟳ SYNC CHART"
+            title="Aim the scalper terminal at this instrument and pre-select the signal's strike"
+            disabled={isBusy || adv.status !== 'LIVE'}
+            onClick={() => publishSync({ key: adv.key, market: adv.market, side: adv.side, strike: adv.strike })}
+          />
+          {isBuy ? (
+            adv.armed ? (
+              <button
+                type="button"
+                disabled={isBusy}
+                onClick={() => onDisarm(adv.key)}
+                className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-600 hover:bg-amber-500/20 disabled:opacity-50 dark:text-amber-400"
+                title="Release the position monitor (stops tracking)"
+              >
+                {isBusy ? '…' : '◼ DISARM'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={isBusy}
+                onClick={() => onArm(adv.key)}
+                className="rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-600 hover:bg-emerald-500/20 disabled:opacity-50 dark:text-emerald-400"
+                title="Arm live monitoring: target/SL hits, trailing, reversal alerts"
+              >
+                {isBusy ? '…' : '▶ ARM'}
+              </button>
+            )
+          ) : null}
+        </div>
         {(adv.basis?.length > 0 || adv.reversal_risk) && (
           <button type="button" onClick={() => setOpen((v) => !v)} className="text-[10px] text-muted-foreground hover:text-foreground underline-offset-1 hover:underline">
             {open ? 'Hide' : 'Details'}
@@ -216,11 +282,13 @@ function AdviceCard({
 }
 
 /** Live monitor tab — armed positions with trail/P&L/revisions + active intraday alerts. */
-function MonitorTab({ armedMap, alerts, onDisarm, onCloseAlert, busy }: {
+function MonitorTab({ armedMap, alerts, onDisarm, onCloseAlert, onSync, onRevise, busy }: {
   armedMap: Record<string, ScalperArmedPos>
   alerts: ScalperAlert[]
   onDisarm: (key: string) => void
-  onCloseAlert: (a: ScalperAlert) => void
+  onCloseAlert: (a: ScalperAlert, reason?: string) => void
+  onSync: (item: { key: string; market?: string | null; side?: string | null; strike?: number | null }) => void
+  onRevise: (p: ScalperArmedPos) => void
   busy: string | null
 }) {
   const entries = Object.entries(armedMap) as Array<[string, ScalperArmedPos]>
@@ -249,7 +317,7 @@ function MonitorTab({ armedMap, alerts, onDisarm, onCloseAlert, busy }: {
               <span className={cn('text-[10px] font-semibold tabular-nums', (a.pnl_pct ?? 0) >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400')}>
                 {fmtPct(a.pnl_pct)}
               </span>
-              <button type="button" onClick={() => onCloseAlert(a)} className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-destructive" title="Close alert">
+              <button type="button" onClick={() => onCloseAlert(a, 'Pre-close square-off')} className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-destructive" title="Close alert">
                 <X className="h-2.5 w-2.5" />
               </button>
             </div>
@@ -275,6 +343,14 @@ function MonitorTab({ armedMap, alerts, onDisarm, onCloseAlert, busy }: {
           <div key={key} className="rounded-md border border-primary/40 bg-card/50 px-2 py-1.5">
             <div className="flex items-center justify-between gap-2">
               <div className="flex min-w-0 items-center gap-1.5">
+                <button
+                  type="button"
+                  className="rounded p-0.5 text-sky-500 hover:bg-accent"
+                  title="Aim the terminal at this position"
+                  onClick={() => onSync({ key, market: p.market, side: p.side, strike: p.strike })}
+                >
+                  ⟳
+                </button>
                 <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-emerald-500" title="Live monitoring" />
                 <span className="truncate text-[11px] font-semibold text-foreground">{p.name || key}</span>
                 {p.side && (
@@ -292,6 +368,29 @@ function MonitorTab({ armedMap, alerts, onDisarm, onCloseAlert, busy }: {
               >
                 {busy === key ? '…' : '◼ DISARM'}
               </button>
+              <div className="ml-1 flex shrink-0 items-center gap-1">
+                {/* Manual revise: set your own target/SL premiums (server
+                    validates target > SL; logs like the auto revisions). */}
+                <ActionChip
+                  label="✎ REVISE"
+                  title="Manually revise target and stoploss premiums"
+                  tone="violet"
+                  disabled={busy === key}
+                  onClick={() => onRevise(p)}
+                />
+                {/* Pre-close: square off now — closes the linked alert and
+                    releases the monitor. */}
+                <ActionChip
+                  label="⏏ PRE-CLOSE"
+                  title="Square off now: close the linked alert and release the monitor"
+                  tone="orange"
+                  disabled={busy === key}
+                  onClick={() => {
+                    if (p.alert_id) onCloseAlert({ id: p.alert_id } as ScalperAlert, 'Pre-close square-off')
+                    else onDisarm(key)
+                  }}
+                />
+              </div>
             </div>
             <div className="mt-0.5 truncate text-[9px] text-muted-foreground" title={p.option_symbol}>
               {p.option_symbol} · armed {p.armed_at ?? '—'} · trail {trail}
@@ -345,7 +444,14 @@ export function ScalperAdvisorPanel({ activeSymbol }: { apiKey: string; activeSy
 
   const load = async (
     refresh = false,
-    action?: { arm?: string; disarm?: string; armAlertId?: string }
+    action?: {
+      arm?: string
+      disarm?: string
+      armAlertId?: string
+      reviseKey?: string
+      reviseTarget?: number
+      reviseSl?: number
+    }
   ) => {
     try {
       setError(null)
@@ -365,12 +471,42 @@ export function ScalperAdvisorPanel({ activeSymbol }: { apiKey: string; activeSy
     await load(true)
   }
 
-  const closeAlert = async (a: ScalperAlert) => {
+  const closeAlert = async (a: ScalperAlert, reason = 'Manual close from sidebar') => {
     try {
-      await scalperApi.closeAlert(a.id, 'Manual close from sidebar')
+      await scalperApi.closeAlert(a.id, reason)
       await load(true)
     } catch {
       /* the next poll re-syncs state anyway */
+    }
+  }
+
+  /** Manual target/SL revision — dialog mirrors the fno-trader revise flow:
+   * both levels against entry, target must exceed SL, server re-validates. */
+  const handleRevise = async (p: ScalperArmedPos) => {
+    const key = p.key
+    const tgt = window.prompt(
+      `Revise TARGET premium for ${p.option_symbol || key}\n(entry ₹${p.entry_premium?.toFixed(2) ?? '—'}, current ₹${p.current_premium?.toFixed(2) ?? '—'})`,
+      String(p.target_premium ?? '')
+    )
+    if (tgt === null) return
+    const sl = window.prompt(
+      `Revise STOPLOSS premium for ${p.option_symbol || key}`, String(p.sl_premium ?? '')
+    )
+    if (sl === null) return
+    const target = parseFloat(tgt)
+    const stop = parseFloat(sl)
+    if (!Number.isFinite(target) || !Number.isFinite(stop) || target <= stop) {
+      showToast.error('Invalid levels: target must exceed stoploss', 'orders')
+      return
+    }
+    setBusy(key)
+    try {
+      await load(true, { reviseKey: key, reviseTarget: target, reviseSl: stop })
+      showToast.success(`Revised ${key}: T ₹${target.toFixed(2)} · SL ₹${stop.toFixed(2)}`, 'orders')
+    } catch {
+      showToast.error('Revision failed — retry', 'orders')
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -467,6 +603,8 @@ export function ScalperAdvisorPanel({ activeSymbol }: { apiKey: string; activeSy
             alerts={alerts}
             onDisarm={handleDisarm}
             onCloseAlert={closeAlert}
+            onSync={publishSync}
+            onRevise={handleRevise}
             busy={busy}
           />
         )}

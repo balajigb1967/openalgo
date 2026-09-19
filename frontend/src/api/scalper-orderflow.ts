@@ -145,7 +145,15 @@ export interface ScalperAdvisorResponse {
 export const scalperApi = {
   getAdvisor: async (
     refresh = false,
-    action?: { arm?: string; disarm?: string; armAlertId?: string },
+    action?: {
+      arm?: string
+      disarm?: string
+      armAlertId?: string
+      /** Manual target/SL revision on an armed position (advisor key). */
+      reviseKey?: string
+      reviseTarget?: number
+      reviseSl?: number
+    },
     autoArm = false,
     focus?: string | null
   ): Promise<ScalperAdvisorResponse> => {
@@ -154,6 +162,11 @@ export const scalperApi = {
     if (action?.arm) params.arm = action.arm
     if (action?.disarm) params.disarm = action.disarm
     if (action?.armAlertId) params.arm_alert_id = action.armAlertId
+    if (action?.reviseKey) {
+      params.revise_key = action.reviseKey
+      if (typeof action.reviseTarget === 'number') params.revise_target = String(action.reviseTarget)
+      if (typeof action.reviseSl === 'number') params.revise_sl = String(action.reviseSl)
+    }
     if (autoArm) params.auto_arm = '1'
     if (focus) params.focus = focus
     const response = await webClient.get('/plugins/scalper/advisor', { params })
