@@ -279,12 +279,34 @@ def build_project_context(focus: str | None = None, api_key: str | None = None) 
 
 # ------------------------------------------------------------------------ chat
 
+_KNOWN_ROOTS = [
+    "NIFTY50", "NIFTYBANK", "BANKNIFTY", "NIFTY", "FINNIFTY", "MIDCPNIFTY",
+    "SENSEX", "BANKEX", "CRUDEOIL", "NATURALGAS", "NATGASMINI", "GOLDMINI",
+    "GOLD", "SILVER", "COPPER", "ZINC",
+]
+
+# English words that uppercase to a symbol-shaped token (WHAT, ARE, THE…).
+# A bare caps match that lands here is ignored rather than chased as a chain.
+_STOP_TOKENS = {
+    "WHAT", "WHATS", "WHY", "HOW", "THE", "AND", "FOR", "ARE", "YOU",
+    "YOUR", "NOW", "TODAY", "SEE", "CAN", "GET", "GIVE", "TELL", "SHOW",
+    "WITH", "FROM", "ABOUT", "PLEASE", "ANALYSE", "ANALYZE", "CHART",
+    "PRICE", "LEVEL", "LEVELS", "DATA", "TREND", "VIEW", "NEWS", "OM",
+}
+
+
 def resolve_focus(text: str) -> str | None:
-    """Best-effort focus symbol from the user's message."""
-    m = re.search(r"\b(NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX|"
-                  r"CRUDEOIL|NATURALGAS|GOLD|SILVER|COPPER|ZINC|"
-                  r"[A-Z][A-Z&-]{2,14})\b", (text or "").upper())
-    return m.group(1) if m else None
+    """Best-effort focus symbol from the user's message: a known instrument
+    root mentioned anywhere wins; a bare symbol-shaped token is accepted only
+    when it is not a common English word."""
+    up = (text or "").upper()
+    for root in _KNOWN_ROOTS:
+        if re.search(rf"\b{root}\b", up):
+            return "NIFTY" if root == "NIFTY50" else ("BANKNIFTY" if root == "NIFTYBANK" else root)
+    m = re.search(r"\b([A-Z][A-Z&-]{2,14})\b", up)
+    if m and m.group(1) not in _STOP_TOKENS:
+        return m.group(1)
+    return None
 
 
 def chat(messages: list[dict], model: str | None = None,
