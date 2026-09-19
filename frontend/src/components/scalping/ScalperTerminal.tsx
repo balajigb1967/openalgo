@@ -51,7 +51,7 @@ const DEFAULT_UNDERLYING: Record<TermExchange, string> = {
   CDS: 'USDINR',
 }
 function exchForMarket(m: string | null | undefined): TermExchange {
-  return ({ NSE: 'NFO', BSE: 'BFO', MCX: 'MCX', CDS: 'CDS' } as Record<string, TermExchange>)[
+  return ({ NSE: 'NFO', BSE: 'BFO', MCX: 'MCX', CDS: 'CDS', NFO: 'NFO', BFO: 'BFO' } as Record<string, TermExchange>)[
     (m || '').toUpperCase()
   ] ?? 'NFO'
 }

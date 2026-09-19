@@ -66,11 +66,22 @@ function exchangeForMarket(m: string | null | undefined): string {
 /** Publish an advisor signal/alert/position as the terminal's trade target:
  * the embedded ScalperTerminal switches exchange/underlying and pre-selects
  * the CE/PE strike — the same flow the alert bell already uses. */
+/** Advisor display keys for the MCX minis are not the chartable roots —
+ * master contracts (and the advisor's own chain lookups) use the short
+ * forms, so sync must rewrite the underlying or the terminal's chain
+ * lookup fails. */
+const CHARTABLE_KEY: Record<string, string> = {
+  CRUDEOILMINI: 'CRUDEOILM',
+  GOLDMINI: 'GOLDM',
+  SILVERMINI: 'SILVERM',
+}
+
 function publishSync(t: { key: string; market?: string | null; side?: string | null; strike?: number | null }): void {
   if (!t.key) return
+  const chartable = CHARTABLE_KEY[t.key.toUpperCase()] ?? t.key
   const target: ScalperTarget = {
     key: t.key,
-    underlying: t.key,
+    underlying: chartable,
     exchange: exchangeForMarket(t.market),
     side: (t.side === 'PE' ? 'PE' : 'CE'),
     strike: typeof t.strike === 'number' ? t.strike : 0,
@@ -231,7 +242,10 @@ function AdviceCard({
           <ActionChip
             label="⟳ SYNC CHART"
             title="Aim the scalper terminal at this instrument and pre-select the signal's strike"
-            disabled={isBusy || adv.status !== 'LIVE'}
+            // Sync needs an instrument, not a live signal — keep it enabled for
+            // WAIT/NO_DATA advisories too (weekend/off-market rows were greyed
+            // out and the button looked dead).
+            disabled={isBusy || !adv.key}
             onClick={() => publishSync({ key: adv.key, market: adv.market, side: adv.side, strike: adv.strike })}
           />
           {isBuy ? (
