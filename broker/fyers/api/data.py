@@ -7,7 +7,7 @@ from datetime import datetime
 import httpx
 import pandas as pd
 
-from broker.fyers.api.rate_limiter import MAX_RETRIES, apply_rate_limit, retry_delay_from_headers
+from broker.fyers.api.rate_limiter import MAX_RETRIES, RateLimitShed, apply_rate_limit, retry_delay_from_headers
 from database.token_db import get_br_symbol, get_oa_symbol
 from utils.constants import FNO_EXCHANGES
 from utils.httpx_client import get_httpx_client
@@ -45,9 +45,14 @@ def get_api_response(endpoint, auth, method="GET", payload="", _retry_count=0):
         url = f"https://api-t1.fyers.in{endpoint}"
         headers = {"Authorization": f"{api_key}:{AUTH_TOKEN}", "Content-Type": "application/json"}
 
-        apply_rate_limit()
-
-        logger.debug(f"Making {method} request to Fyers API: {url}")
+        # Market data sheds when the minute budget is saturated: waiting longer
+        # would only stack request threads (and their DB handles) with no extra
+        # capacity. Callers see a normal error dict and the next poll succeeds.
+        try:
+            apply_rate_limit()
+        except RateLimitShed as shed:
+            logger.warning(f"Fyers market-data call shed (budget exhausted): {endpoint}")
+            return {"s": "error", "message": str(shed)}
 
         # Make the request
         if method == "GET":

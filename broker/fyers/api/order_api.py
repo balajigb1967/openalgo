@@ -48,7 +48,9 @@ def get_api_response(endpoint, auth, method="GET", payload="", _retry_count=0):
         url = f"https://api-t1.fyers.in{endpoint}"
         headers = {"Authorization": f"{api_key}:{AUTH_TOKEN}", "Content-Type": "application/json"}
 
-        apply_rate_limit()
+        # Order calls must not be load-shed: wait longer than market data
+        # would before giving up (a dropped order is worse than a delayed one).
+        apply_rate_limit(critical=True)
 
         logger.debug(f"Making {method} request to Fyers API: {url}")
 

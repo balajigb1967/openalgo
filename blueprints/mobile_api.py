@@ -87,54 +87,71 @@ def watchlist_quotes_route():
     if not isinstance(symbols, list) or not symbols:
         return jsonify({"status": "error", "message": "symbols required"}), 400
 
-    from database.auth_db import get_auth_token
-    from database.settings_db import get_analyze_mode
-    from services.quotes_service import get_quotes
-
-    user = _user()
-    try:
-        analyzer = bool(get_analyze_mode())
-    except Exception:  # noqa: BLE001
-        analyzer = False
+    from services.quotes_service import get_multiquotes
 
     rows = []
-    for item in symbols[:50]:  # hard cap: a phone list is not a screener
+    # Batch path: one broker multiquotes call for the whole list instead of a
+    # get_quotes loop. The loop version burned one Fyers request per symbol
+    # (up to 50 per poll), which alone saturated the process-wide 200/min
+    # Fyers budget and starved every other panel of the API.
+    capped = symbols[:50]  # hard cap: a phone list is not a screener
+    cleaned = []
+    for item in capped:
         symbol = (item.get("symbol") or "").strip()
         exchange = (item.get("exchange") or "").strip().upper()
-        row = {"symbol": symbol, "exchange": exchange, "ltp": None, "chp": None,
-               "open": None, "high": None, "low": None, "prev_close": None,
-               "volume": None, "oi": None}
-        if not symbol or not exchange:
-            rows.append(row)
-            continue
+        if symbol and exchange:
+            cleaned.append({"symbol": symbol, "exchange": exchange})
+
+    if cleaned:
         try:
             _analyzer, auth_token, _broker, api_key = _resolve_data_auth()
             if auth_token:
-                success, res, _code = get_quotes(
-                    symbol=symbol, exchange=exchange, auth_token=auth_token,
+                success, res, _code = get_multiquotes(
+                    cleaned,
+                    auth_token=auth_token,
                     broker=flask_session_broker(),
                 )
             else:
                 # No live broker session (fresh login, token rollover) — the
                 # API-key path still serves market data, like the desktop panels.
-                success, res, _code = get_quotes(symbol=symbol, exchange=exchange, api_key=api_key)
+                success, res, _code = get_multiquotes(cleaned, api_key=api_key)
+
+            by_key = {}
             if success and isinstance(res, dict):
-                data = res.get("data") or {}
-                ltp = data.get("ltp")
-                prev = data.get("prev_close")
-                row.update(
-                    ltp=ltp,
-                    chp=round(((ltp - prev) / prev) * 100, 2) if (ltp and prev) else None,
-                    open=data.get("open"),
-                    high=data.get("high"),
-                    low=data.get("low"),
-                    prev_close=prev,
-                    volume=data.get("volume"),
-                    oi=data.get("oi"),
-                )
-        except Exception as e:  # noqa: BLE001 — one dead symbol must not kill the list
-            logger.debug(f"mobile quote failed for {exchange}:{symbol}: {e}")
-        rows.append(row)
+                for r in res.get("results") or []:
+                    if isinstance(r, dict) and r.get("symbol") and not r.get("error"):
+                        by_key[(r.get("symbol"), (r.get("exchange") or "").upper())] = r.get("data") or {}
+
+            for item in capped:
+                symbol = (item.get("symbol") or "").strip()
+                exchange = (item.get("exchange") or "").strip().upper()
+                row = {"symbol": symbol, "exchange": exchange, "ltp": None, "chp": None,
+                       "open": None, "high": None, "low": None, "prev_close": None,
+                       "volume": None, "oi": None}
+                data = by_key.get((symbol, exchange))
+                if data:
+                    ltp = data.get("ltp")
+                    prev = data.get("prev_close")
+                    row.update(
+                        ltp=ltp,
+                        chp=round(((ltp - prev) / prev) * 100, 2) if (ltp and prev) else None,
+                        open=data.get("open"),
+                        high=data.get("high"),
+                        low=data.get("low"),
+                        prev_close=prev,
+                        volume=data.get("volume"),
+                        oi=data.get("oi"),
+                    )
+                rows.append(row)
+        except Exception as e:  # noqa: BLE001 — a dead batch must not 500 the list
+            logger.warning(f"mobile multiquotes failed, serving empty rows: {e}")
+            rows = [
+                {"symbol": (i.get("symbol") or "").strip(),
+                 "exchange": (i.get("exchange") or "").strip().upper(),
+                 "ltp": None, "chp": None, "open": None, "high": None, "low": None,
+                 "prev_close": None, "volume": None, "oi": None}
+                for i in capped
+            ]
 
     return jsonify({"status": "success", "data": rows})
 

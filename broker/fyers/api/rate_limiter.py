@@ -49,6 +49,30 @@ _minute_calls: deque[float] = deque()
 MAX_RETRIES = 3
 BASE_BACKOFF = 1.0  # seconds; exponential fallback when no Retry-After header: 1, 2, 4
 
+# Load-shedding caps. When the minute budget is exhausted, waiting does not
+# create capacity -- it stacks request threads (each holding per-thread DB
+# sessions, i.e. SQLite file handles) until the process hits its descriptor
+# limit and every DB open starts failing ("unable to open database file"),
+# which takes down auth and quotes for the whole app. So:
+#   - market-data callers shed after SHED_AFTER seconds (raise RateLimitShed;
+#     the API gateway turns it into a normal error response),
+#   - order-critical callers never shed before CRITICAL_WAIT_CAP seconds --
+#     a dropped order is worse than a delayed one.
+SHED_AFTER = 2.0
+CRITICAL_WAIT_CAP = 15.0
+
+
+class RateLimitShed(Exception):
+    """Raised when a non-critical caller is shed due to an exhausted budget."""
+
+    def __init__(self, wait: float, budget: int):
+        self.wait = wait
+        self.budget = budget
+        super().__init__(
+            f"Fyers rate budget ({budget}/min) exhausted; "
+            f"call shed after {wait:.1f}s wait"
+        )
+
 
 def retry_delay_from_headers(headers, attempt):
     """Compute how long to wait before retrying a 429.
@@ -72,7 +96,7 @@ def retry_delay_from_headers(headers, attempt):
     return BASE_BACKOFF * (2**attempt)
 
 
-def apply_rate_limit():
+def apply_rate_limit(critical: bool = False):
     """Block the calling thread until it is safe to make another Fyers API call.
 
     Shared process-wide (module-level lock + timestamp) so every caller
@@ -85,6 +109,14 @@ def apply_rate_limit():
          MINUTE_WINDOW). The sleep happens outside the lock, so a caller
          waiting on the minute budget does not serialise callers that are
          inside the budget.
+
+    When the minute budget is exhausted the caller's required wait is capped:
+    market-data callers (critical=False) raise RateLimitShed after SHED_AFTER
+    seconds; order-critical callers (critical=True) wait up to
+    CRITICAL_WAIT_CAP seconds, then proceed anyway -- an order is never failed
+    locally, the broker's own 429/Retry-After handling remains the backstop.
+    Raises must happen before the slot is reserved so shed callers consume no
+    budget.
     """
     global _last_call_time
 
@@ -98,8 +130,13 @@ def apply_rate_limit():
         if len(_minute_calls) >= MINUTE_BUDGET:
             # Oldest call in the window must age past MINUTE_WINDOW before
             # budget frees up for this one.
-            minute_wait = MINUTE_WINDOW - (now - _minute_calls[0])
-            minute_wait = max(minute_wait, 0.05)
+            raw_wait = MINUTE_WINDOW - (now - _minute_calls[0])
+            raw_wait = max(raw_wait, 0.05)
+            if not critical and raw_wait > SHED_AFTER:
+                raise RateLimitShed(raw_wait, MINUTE_BUDGET)
+            # Critical callers are clamped, never shed: beyond the cap they
+            # proceed over budget rather than fail an order locally.
+            minute_wait = min(raw_wait, CRITICAL_WAIT_CAP)
 
         # --- per-second spacing (computed as of the post-minute-wait time) ---
         effective_now = now + minute_wait

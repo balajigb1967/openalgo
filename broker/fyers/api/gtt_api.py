@@ -85,7 +85,8 @@ def _request(method, path, auth, payload=None, _retry_count=0):
     client = get_httpx_client()
     url = f"{_BASE}{path}"
 
-    apply_rate_limit()
+    # GTT placement/management is order-critical: never load-shed early.
+    apply_rate_limit(critical=True)
 
     if method == "GET":
         response = client.request("GET", url, headers=_headers(auth))

@@ -28,6 +28,31 @@ def _ensure_db_directory() -> None:
 
 _ensure_db_directory()
 
+
+def _raise_fd_limit() -> None:
+    """Raise the soft file-descriptor limit at startup.
+
+    Production runs as one long-lived threaded process; when descriptors leak
+    under load (e.g. threads stacked on a saturated broker rate limiter, each
+    holding open SQLite handles), the 1024 soft limit turns a single leak into
+    total failure: every new DB open dies with "unable to open database file",
+    which breaks auth and quotes app-wide. Raising the soft limit towards the
+    hard limit gives headroom so a transient pile-up degrades instead of
+    cascading. Best-effort: never blocks startup if the platform refuses.
+    """
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = min(8192, hard)
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except Exception:  # noqa: BLE001 — defensive; platforms without resource
+        pass
+
+
+_raise_fd_limit()
+
 # Show loading indicator early (before heavy imports) so user sees immediate feedback.
 # The full banner with "Ready" status prints later, right before the server accepts connections.
 if __name__ == "__main__":
