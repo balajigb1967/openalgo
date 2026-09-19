@@ -52,6 +52,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
+import time as _time
+
 from database import agent_db
 from database.engine_factory import create_db_engine
 from services.agent import chatgpt_oauth, prompts, settings
@@ -65,6 +67,80 @@ from services.agent.providers import (
     vision_capable,
 )
 from services.agent.tools import ToolContext
+from utils.logging import get_logger as _get_logger_for_probe
+
+_probe_logger = _get_logger_for_probe("services.agent.builder.probe")
+
+# Free-tier models (OpenRouter `:free` suffix and friends) throttle hard:
+# they answer RateLimitError instantly or sit queuing past a minute. The
+# mobile assistant surfaces every such stall as "Assistant error", so a
+# turn must never be staked on a model that is not currently serving.
+_LLM_TIMEOUT_SECONDS = 30
+_LLM_MAX_RETRIES = 1
+
+# Fallback chain for tool-capable models verified live on this deployment.
+# First entry that answers wins; the result is cached briefly so at most one
+# probe burst happens per window even with many concurrent turns.
+_FALLBACK_LITELLM_IDS = [
+    "openrouter/poolside/laguna-s-2.1:free",
+    "openrouter/openrouter/free",
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+]
+_probe_cache: dict[str, tuple[float, list[str]]] = {}
+_PROBE_TTL = 120.0
+
+
+def _probe_litellm_model(litellm_id: str) -> bool:
+    """One tiny non-streaming completion: does this model answer right now?"""
+    try:
+        import litellm as _litellm
+
+        from database.auth_db import safe_decrypt_token
+
+        kind = litellm_id.partition("/")[0]
+        # The provider secret is stored as `provider:<kind>` and decrypted the
+        # same way build_model does.
+        session = agent_db.db_session()
+        try:
+            secret = (
+                session.query(agent_db.AgSecret)
+                .filter(agent_db.AgSecret.name == f"provider:{kind}")
+                .one_or_none()
+            )
+            api_key = safe_decrypt_token(secret.ciphertext) if secret else None
+        finally:
+            session.close()
+        if not api_key:
+            return False
+        _litellm.suppress_debug_info = True
+        r = _litellm.completion(
+            model=litellm_id,
+            messages=[{"role": "user", "content": "ping"}],
+            api_key=api_key,
+            timeout=10,
+            num_retries=0,
+        )
+        _ = r.choices[0].message.content
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _probe_logger.warning("probe %s failed: %s", litellm_id, str(exc)[:120])
+        return False
+
+
+def _usable_fallback_ids() -> list[str]:
+    """Fallback models that answered a tiny probe recently, in order."""
+    now = _time.monotonic()
+    cached = _probe_cache.get("fallbacks")
+    if cached and now - cached[0] < _PROBE_TTL:
+        return cached[1]
+    usable = [m for m in _FALLBACK_LITELLM_IDS if _probe_litellm_model(m)]
+    _probe_cache["fallbacks"] = (now, usable)
+    return usable
+
+
+def _model_is_stalling(litellm_id: str) -> bool:
+    """True when a quick probe shows the model throttled/dead right now."""
+    return not _probe_litellm_model(litellm_id)
 from utils.logging import get_logger
 from utils.real_threading import Lock
 
@@ -576,6 +652,11 @@ def build_model(resolved: ResolvedModel, *, reasoning_effort: str | None = None)
     effort = _reasoning_effort(resolved, reasoning_effort)
     if effort:
         kwargs["request_params"] = {"reasoning_effort": effort}
+    # Bounded waits: litellm defaults retry 2x with growing waits and no
+    # timeout — a throttled provider then hangs the whole assistant turn.
+    kwargs.setdefault("request_params", {})
+    kwargs["request_params"].setdefault("timeout", _LLM_TIMEOUT_SECONDS)
+    kwargs["request_params"].setdefault("num_retries", _LLM_MAX_RETRIES)
 
     kwargs["name"] = resolved.display_name
 
@@ -882,6 +963,41 @@ def build_agent(
 
     requested = model_id if model_id is not None else context.extras.get("model_id")
     resolved = resolve_model(requested)
+
+    # Stall guard: when the chosen model is a free-tier route that is
+    # currently rate-limited or queuing forever, reroute to the first
+    # fallback that answers. The probe is one ~10s-capped completion and is
+    # cached, so healthy models pay nothing and broken ones cost a couple of
+    # seconds instead of a hung turn.
+    if ":free" in resolved.litellm_id or "openrouter" in resolved.litellm_id:
+        if _model_is_stalling(resolved.litellm_id):
+            for fb in _usable_fallback_ids():
+                if fb == resolved.litellm_id:
+                    continue
+                # Fallbacks are litellm model ids; resolve_model wants a row,
+                # so look the row up by its model_name.
+                fb_session = agent_db.db_session()
+                try:
+                    fb_row = (
+                        fb_session.query(agent_db.AgProviderModel)
+                        .filter(agent_db.AgProviderModel.model_name == fb)
+                        .one_or_none()
+                    )
+                finally:
+                    fb_session.close()
+                if fb_row is None or not fb_row.enabled:
+                    continue
+                try:
+                    rerouted = resolve_model(int(fb_row.id))
+                except Exception:  # noqa: BLE001 — try the next candidate
+                    continue
+                logger.warning(
+                    "Agent model %s is throttled; rerouting to fallback %s",
+                    resolved.litellm_id,
+                    fb,
+                )
+                resolved = rerouted
+                break
 
     # Before the model is constructed, so an image on a text-only model costs
     # nothing and the operator gets a clean 400 rather than a stream that dies
