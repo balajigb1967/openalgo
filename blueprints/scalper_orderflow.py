@@ -109,6 +109,17 @@ def scalper_advisor_route():
         close_alert_id = request.args.get("close_alert_id") or None
         close_reason = request.args.get("close_reason") or "Manual close"
         auto_arm = (request.args.get("auto_arm") in ("1", "true", "yes"))
+        # Manual target/SL revision on an armed monitor position.
+        revise_key = request.args.get("revise_key") or None
+        revise_tgt = None
+        revise_sl = None
+        try:
+            if request.args.get("revise_target"):
+                revise_tgt = float(request.args["revise_target"])
+            if request.args.get("revise_sl"):
+                revise_sl = float(request.args["revise_sl"])
+        except ValueError:
+            return jsonify({"status": "error", "message": "revise_target/revise_sl must be numbers"}), 400
         # Symbol sync: "NSE:NIFTY 50" / "MCX:GOLD" -> the advisor's instrument key.
         raw_focus = (request.args.get("focus") or "").upper()
         focus_key = raw_focus.split(":")[-1].strip() if raw_focus else None
@@ -121,6 +132,9 @@ def scalper_advisor_route():
             close_reason=close_reason,
             auto_arm=auto_arm,
             focus_key=focus_key,
+            revise_key=revise_key,
+            revise_tgt=revise_tgt,
+            revise_sl=revise_sl,
         )
         return jsonify(data)
     except Exception as e:

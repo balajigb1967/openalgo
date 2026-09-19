@@ -1320,6 +1320,44 @@ def disarm(key: str = None) -> None:
             _MONITOR["armed"].clear()
 
 
+def revise_target(key: str, target: float = None, sl: float = None) -> dict | None:
+    """Manually revise an armed position's target and/or stoploss premium.
+
+    The advisor keeps revising automatically (extend-on-momentum, SL to
+    breakeven); this applies a trader's own levels on top. Premium values are
+    validated against the entry so an impossible level (target below SL) is
+    rejected rather than silently arming a losing exit plan.
+    """
+    with _MONITOR_LOCK:
+        pos = _MONITOR["armed"].get(key)
+        if not pos:
+            return None
+        entry = float(pos.get("entry_premium") or 0)
+        now_iso = datetime.now(_IST).strftime("%d %b %H:%M:%S")
+        try:
+            new_tgt = float(target) if target is not None else float(pos.get("target_premium") or 0)
+            new_sl = float(sl) if sl is not None else float(pos.get("sl_premium") or 0)
+        except (TypeError, ValueError):
+            return None
+        if entry <= 0 or new_tgt <= 0 or new_sl <= 0 or new_tgt <= new_sl:
+            return None
+        pos["target_premium"] = round(new_tgt, 2)
+        pos["sl_premium"] = round(new_sl, 2)
+        pos["target_pct"] = round((new_tgt / entry - 1) * 100, 1)
+        pos["sl_pct"] = round((new_sl / entry - 1) * 100, 1)
+        notes = []
+        if target is not None:
+            notes.append(f"target → ₹{new_tgt} ({pos['target_pct']:+.1f}%)")
+        if sl is not None:
+            notes.append(f"SL → ₹{new_sl} ({pos['sl_pct']:+.1f}%)")
+        msg = f"{key} {pos.get('option_symbol')}: ✏️ Revised {' · '.join(notes)} (manual)."
+        pos.setdefault("revision_log", []).append({"ts": now_iso, "msg": msg})
+        _MONITOR["events"].insert(0, {"ts": now_iso, "key": key,
+                                      "severity": "INFO", "msg": msg})
+        _MONITOR["events"] = _MONITOR["events"][:_MAX_EVENTS]
+        return dict(pos)
+
+
 def get_monitor() -> dict:
     with _MONITOR_LOCK:
         return {"armed": dict(_MONITOR["armed"]), "events": list(_MONITOR["events"]), "since": _MONITOR["since"]}
@@ -1353,7 +1391,8 @@ def alert_chart_data(alert_id: str, symbol: str, timeframe: str = "5m", n_bars: 
 def scalper_advisor(refresh: bool = False, arm_key: str = None, disarm_key: str = None,
                     arm_alert_id: str = None, close_alert_id: str = None,
                     close_reason: str = "Manual close", auto_arm: bool = False,
-                    focus_key: str = None) -> dict:
+                    focus_key: str = None, revise_key: str = None,
+                    revise_tgt: float = None, revise_sl: float = None) -> dict:
     """Full advisory payload for all instruments + monitor state + intraday alerts.
 
     auto_arm=True live-monitors every fresh BUY signal without a manual arm:
@@ -1452,6 +1491,8 @@ def scalper_advisor(refresh: bool = False, arm_key: str = None, disarm_key: str 
         arm(arm_key, advice_by_key[arm_key], alert_id=arm_alert_id)
     if disarm_key:
         disarm(disarm_key)
+    if revise_key and (revise_tgt is not None or revise_sl is not None):
+        revise_target(revise_key, target=revise_tgt, sl=revise_sl)
     if close_alert_id:
         closed = close_alert(close_alert_id, close_reason)
         if closed:
