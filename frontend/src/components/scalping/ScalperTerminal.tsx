@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { tradingApi, type QuotesData, type DepthData } from '@/api/trading'
 import { scalpingApi as termApi } from '@/api/scalping'
-import { type ScalperTarget, subscribeSync, subscribeSyncTarget } from '@/lib/scalperSync'
+import { type ScalperTarget, getSyncTarget, subscribeSync, subscribeSyncTarget } from '@/lib/scalperSync'
 import { priceDecimals } from '@/lib/scalpingPrice'
 import { mergeTick, type TickView } from '@/lib/scalpingTick'
 import { cn } from '@/lib/utils'
@@ -284,13 +284,15 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose, defaultMaximize
     },
     [showFlash, aimAt]
   )
-  useEffect(
-    () =>
-      subscribeSyncTarget((t) => {
-        if (t) applyTarget(t)
-      }),
-    [applyTarget]
-  )
+  useEffect(() => {
+    // The terminal mounts after Trading auto-opens it on a sync while it was
+    // closed — replay the stored target so that first sync isn't lost.
+    const stored = getSyncTarget()
+    if (stored) applyTarget(stored)
+    return subscribeSyncTarget((t) => {
+      if (t) applyTarget(t)
+    })
+  }, [applyTarget])
 
   /* ── underlyings / expiry / chain ────────────────────────────────────── */
   const optionsMode = segment === 'OPTIONS'
