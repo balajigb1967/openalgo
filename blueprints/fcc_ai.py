@@ -72,11 +72,12 @@ def fcc_chat():
         if len(messages) > 40:
             messages = messages[-40:]
         api_key = _resolve_api_key()
+        focus = body.get("focus") or body.get("symbol") or None
         result = fcc.chat(
             messages,
             model=(body.get("model") or None) or None,
             use_project_context=body.get("context", True) is not False,
-            focus=body.get("focus"),
+            focus=focus,
             api_key=api_key,
         )
         return jsonify({"status": "success", **result})
@@ -115,9 +116,16 @@ def fcc_agent():
     timeout?, model?}"""
     try:
         body = request.get_json(silent=True) or {}
+        prompt = str(body.get("prompt") or "")
+        symbol = (body.get("symbol") or body.get("focus") or "").strip()
+        if symbol:
+            # Map the operator's active chart onto the agent: it starts every
+            # run already pointed at the instrument being analysed.
+            prompt = (f"The operator's active chart is {symbol.split(':')[-1]}. "
+                      f"Analyse that instrument unless the task says otherwise.\n\n{prompt}")
         run = fcc.run_agent(
             agent=str(body.get("agent") or "claude"),
-            prompt=str(body.get("prompt") or ""),
+            prompt=prompt,
             cwd=body.get("cwd"), timeout=body.get("timeout"),
             model=body.get("model"),
         )

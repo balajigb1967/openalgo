@@ -181,19 +181,54 @@ def _global_lines() -> list[str]:
         return []
 
 
-def _chain_lines(symbol: str, api_key: str | None) -> list[str]:
-    """Option-chain analytics for the focus symbol: PCR, max pain, OI walls."""
-    out = []
+def _fmt_oi(val: float) -> str:
+    """Indian-market OI formatting: Cr / L abbreviations like the terminal."""
+    try:
+        val = float(val)
+    except (TypeError, ValueError):
+        return "0"
+    sign = "+" if val > 0 else ""
+    abs_v = abs(val)
+    if abs_v >= 10000000:
+        return f"{sign}{val / 10000000:.2f}Cr"
+    if abs_v >= 100000:
+        return f"{sign}{val / 100000:.1f}L"
+    return f"{sign}{val:,.0f}"
+
+
+def _classify_buildup(oi_chg: float, price_chg: float) -> str:
+    """Classic F&O buildup taxonomy from OI and premium direction."""
+    if oi_chg > 0:
+        return "Long Buildup" if price_chg >= 0 else "Short Buildup"
+    if oi_chg < 0:
+        return "Short Covering" if price_chg >= 0 else "Long Unwinding"
+    return "Neutral"
+
+
+def _fo_exchange(symbol: str) -> str:
+    up = symbol.upper()
+    if up in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
+        return "NSE_INDEX"
+    if up in ("SENSEX", "BANKEX"):
+        return "BSE_INDEX"
+    if up in ("CRUDEOIL", "GOLD", "SILVER", "NATURALGAS", "COPPER", "ZINC"):
+        return "MCX"
+    try:
+        from services.symbol_service import get_exchange
+        return get_exchange(symbol) or "NSE"
+    except Exception:
+        return "NSE"
+
+
+def _chain_analytics(symbol: str, ltp: float, api_key: str | None) -> dict:
+    """Deep option-chain telemetry for the focus symbol, fno-trader style:
+    PCR(oi), max pain, top call/put OI walls with buildup classification,
+    ATM IV and an OI-flow bias sentence. Tolerates thin broker payloads."""
+    out: dict = {"has_options": False}
     try:
         from services.option_chain_service import get_option_chain
         from services.expiry_service import get_expiry_dates
-        exch = "NSE_INDEX" if symbol.upper() in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY") else None
-        if exch is None:
-            try:
-                from services.symbol_service import get_exchange
-                exch = get_exchange(symbol) or "NSE_INDEX"
-            except Exception:
-                exch = "NSE_INDEX"
+        exch = _fo_exchange(symbol)
         fo_exch = {"NSE_INDEX": "NFO", "BSE_INDEX": "BFO"}.get(exch, exch)
         try:
             ok, resp, _ = get_expiry_dates(symbol=symbol, exchange=fo_exch,
@@ -204,33 +239,177 @@ def _chain_lines(symbol: str, api_key: str | None) -> list[str]:
         except Exception:
             exp = None
         if not exp:
-            return []
+            return out
         ok, resp, _ = get_option_chain(underlying=symbol, exchange=exch, expiry_date=exp,
-                                       strike_count=5, api_key=api_key or "")
+                                       strike_count=10, api_key=api_key or "")
         if not ok:
-            return []
+            return out
         data = resp.get("data") if isinstance(resp, dict) else resp
         chain = (data or {}).get("chain") or []
-        atm = (data or {}).get("atm_strike")
-        tot_ce = tot_pe = chg_ce = chg_pe = 0
-        top_ce = top_pe = None
+        if not chain:
+            return out
+        out["has_options"] = True
+        rows = []
+        tot_ce = tot_pe = chg_ce = chg_pe = 0.0
         for row in chain:
+            strike = row.get("strike")
             ce, pe = row.get("ce") or {}, row.get("pe") or {}
-            tot_ce += ce.get("oi") or 0
-            tot_pe += pe.get("oi") or 0
-            chg_ce += ce.get("oi_chg") or ce.get("changein_oi") or 0
-            chg_pe += pe.get("oi_chg") or pe.get("changein_oi") or 0
-            if top_ce is None or (ce.get("oi") or 0) > (top_ce[1] or 0):
-                top_ce = (row.get("strike"), ce.get("oi"))
-            if top_pe is None or (pe.get("oi") or 0) > (top_pe[1] or 0):
-                top_pe = (row.get("strike"), pe.get("oi"))
-        if tot_ce or tot_pe:
-            pcr = round(tot_pe / tot_ce, 2) if tot_ce else 0
-            out.append(f"{symbol} chain: ATM {_fmt(atm, 0)}, PCR(oi) {pcr}, "
-                       f"Call wall {top_ce[0] if top_ce else 'N/A'}, Put wall {top_pe[0] if top_pe else 'N/A'}, "
-                       f"OI dCE {_fmt(chg_ce, 0)} vs dPE {_fmt(chg_pe, 0)}")
+            ce_oi = float(ce.get("oi") or 0)
+            pe_oi = float(pe.get("oi") or 0)
+            ce_chg = float(ce.get("oi_chg") or ce.get("changein_oi") or 0)
+            pe_chg = float(pe.get("oi_chg") or pe.get("changein_oi") or 0)
+            tot_ce += ce_oi
+            tot_pe += pe_oi
+            chg_ce += ce_chg
+            chg_pe += pe_chg
+            rows.append({"strike": strike, "ce": ce, "pe": pe,
+                         "ce_oi": ce_oi, "pe_oi": pe_oi, "ce_chg": ce_chg, "pe_chg": pe_chg})
+        out["pcr_oi"] = round(tot_pe / tot_ce, 2) if tot_ce else None
+        out["tot_ce_chg"], out["tot_pe_chg"] = chg_ce, chg_pe
+
+        # Max pain: the strike where option writers lose the least.
+        if rows and ltp:
+            try:
+                pains = []
+                for r in rows:
+                    k = float(r["strike"] or 0)
+                    pain = sum(float(x["ce_oi"]) * max(0.0, k - float(x["strike"] or 0))
+                               + float(x["pe_oi"]) * max(0.0, float(x["strike"] or 0) - k)
+                               for x in rows)
+                    pains.append((pain, k))
+                out["max_pain"] = min(pains)[1] if pains else None
+            except Exception:
+                out["max_pain"] = None
+
+        # Top OI walls by absolute change, with buildup classification.
+        def _top(rows_, side):
+            cands = [r for r in rows_ if (r[f"{side}_chg"] or 0) != 0]
+            if not cands:
+                return None
+            top = max(cands, key=lambda r: abs(r[f"{side}_chg"]))
+            leg = top[side]
+            chg = top[f"{side}_chg"]
+            price_chg = float(leg.get("chp") or leg.get("pchg") or 0)
+            kind = _classify_buildup(chg, price_chg)
+            return {"strike": top["strike"], "chg": chg, "type": kind,
+                    "label": f"{top['strike']} {side.upper()} ({_fmt_oi(chg)}, {kind})"}
+        out["top_ce_buildup"] = _top(rows, "ce")
+        out["top_pe_buildup"] = _top(rows, "pe")
+
+        # ATM IV: average of the call/put IV at the strike nearest spot.
+        if ltp and rows:
+            atm_row = min(rows, key=lambda r: abs(float(r["strike"] or 0) - ltp))
+            c_iv = float((atm_row["ce"] or {}).get("iv") or 0)
+            p_iv = float((atm_row["pe"] or {}).get("iv") or 0)
+            ivs = [v for v in (c_iv, p_iv) if v]
+            out["atm_iv"] = round(sum(ivs) / len(ivs), 1) if ivs else None
+            out["atm_strike"] = atm_row["strike"]
+
+        # OI-flow bias sentence, fno-trader taxonomy.
+        if chg_pe > 0 and chg_ce <= 0:
+            out["oi_bias"] = f"Put Writing & Call Unwinding (Bullish Squeeze {_fmt_oi(chg_pe)} PE)"
+        elif chg_ce > 0 and chg_pe <= 0:
+            out["oi_bias"] = f"Call Writing & Put Unwinding (Bearish Supply {_fmt_oi(chg_ce)} CE)"
+        elif chg_pe > chg_ce * 1.3:
+            out["oi_bias"] = f"Put Writing Dominance ({_fmt_oi(chg_pe)} PE vs {_fmt_oi(chg_ce)} CE)"
+        elif chg_ce > chg_pe * 1.3:
+            out["oi_bias"] = f"Call Writing Dominance ({_fmt_oi(chg_ce)} CE vs {_fmt_oi(chg_pe)} PE)"
+        elif chg_ce or chg_pe:
+            out["oi_bias"] = f"Balanced OI Flow ({_fmt_oi(chg_pe)} PE vs {_fmt_oi(chg_ce)} CE)"
+        out["strike_count"] = len(rows)
+    except Exception as e:
+        logger.debug("fcc chain analytics %s: %s", symbol, e)
+    return out
+
+
+def _chain_lines(symbol: str, api_key: str | None) -> list[str]:
+    """Compact chain summary line for the grounded chat context."""
+    try:
+        from services.quotes_service import get_quotes
+        exch = _fo_exchange(symbol)
+        ltp = 0.0
+        try:
+            ok, resp, _ = get_quotes(symbol=symbol, exchange=exch, api_key=api_key or "")
+            data = resp.get("data") if ok and isinstance(resp, dict) else None
+            ltp = float((data or {}).get("ltp") or 0)
+        except Exception:
+            pass
+        a = _chain_analytics(symbol, ltp, api_key)
+        if not a.get("has_options"):
+            return []
+        bits = [f"{symbol} chain:"]
+        if a.get("atm_strike") is not None:
+            bits.append(f"ATM {_fmt(a['atm_strike'], 0)}")
+        if a.get("pcr_oi") is not None:
+            bits.append(f"PCR(oi) {a['pcr_oi']}")
+        if a.get("max_pain") is not None:
+            bits.append(f"max pain {_fmt(a['max_pain'], 0)}")
+        if a.get("top_ce_buildup"):
+            bits.append(f"call wall {a['top_ce_buildup']['label']}")
+        if a.get("top_pe_buildup"):
+            bits.append(f"put wall {a['top_pe_buildup']['label']}")
+        if a.get("atm_iv"):
+            bits.append(f"ATM IV {a['atm_iv']}%")
+        return [" ".join(bits)]
     except Exception as e:
         logger.debug("fcc chain lines %s: %s", symbol, e)
+    return []
+
+
+def _daily_candles(symbol: str, api_key: str | None, days: int = 40) -> list[tuple]:
+    """Daily OHLC rows (t, o, h, l, c) via the scalper advisor's broker-aware
+    candle helper — the same source the terminal's own analytics trust."""
+    try:
+        from services.scalper_advisor_service import _candles as advisor_candles
+        exch = _fo_exchange(symbol)
+        rows = advisor_candles(symbol, exch, api_key or "", interval="D", days=days)
+        out = []
+        for r in rows or []:
+            try:
+                out.append((float(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        return out
+    except Exception as e:
+        logger.debug("fcc daily candles %s: %s", symbol, e)
+    return []
+
+
+def _chart_lines(symbol: str, ltp: float, api_key: str | None) -> list[str]:
+    """Daily chart snapshot for the focus symbol: trend, RSI, week/month range
+    and classic floor pivots — the grounding behind 'analyse the chart'."""
+    out: list[str] = []
+    try:
+        daily = _daily_candles(symbol, api_key)
+        if not daily:
+            return out
+        closes = [c[4] for c in daily]
+        last = closes[-1] if closes else 0.0
+        ref = ltp or last
+        # Trend: 20-EMA position plus short-slope.
+        ema = last
+        k = 2 / (20 + 1)
+        for c in closes:
+            ema = c * k + ema * (1 - k)
+        slope5 = (closes[-1] - closes[-6]) / closes[-6] * 100 if len(closes) >= 6 and closes[-6] else 0.0
+        trend = "up" if ref > ema * 1.002 and slope5 > 0 else ("down" if ref < ema * 0.998 and slope5 < 0 else "range")
+        rsi = _rsi(closes[-60:]) if closes else None
+        week_hi = max(c[2] for c in daily[-5:])
+        week_lo = min(c[3] for c in daily[-5:])
+        month_hi = max(c[2] for c in daily[-22:])
+        month_lo = min(c[3] for c in daily[-22:])
+        bits = [f"{symbol} daily chart: trend {trend} (close {'above' if ref > ema else 'below'} 20-EMA, "
+                f"5-day {slope5:+.1f}%)"]
+        if rsi is not None:
+            bits.append(f"RSI {rsi}")
+        bits.append(f"week {_fmt(week_lo)}–{_fmt(week_hi)}, month {_fmt(month_lo)}–{_fmt(month_hi)}")
+        if len(daily) >= 2:
+            _, po, ph, pl, pc = daily[-2]
+            pp = (ph + pl + pc) / 3
+            bits.append(f"pivots PP {_fmt(pp)}, R1 {_fmt(2 * pp - pl)}, S1 {_fmt(2 * pp - ph)}")
+        out.append(" ".join(bits))
+    except Exception as e:
+        logger.debug("fcc chart lines %s: %s", symbol, e)
     return out
 
 
@@ -256,13 +435,26 @@ def _scalper_lines() -> list[str]:
         return []
 
 
+def _focus_ltp(symbol: str, api_key: str | None) -> float:
+    try:
+        from services.quotes_service import get_quotes
+        ok, resp, _ = get_quotes(symbol=symbol, exchange=_fo_exchange(symbol), api_key=api_key or "")
+        data = resp.get("data") if ok and isinstance(resp, dict) else None
+        return float((data or {}).get("ltp") or 0)
+    except Exception:
+        return 0.0
+
+
 def build_project_context(focus: str | None = None, api_key: str | None = None) -> str:
     """Live OpenAlgo snapshot injected as the FCC system prompt."""
+    if focus:
+        focus = focus.split(":")[-1].strip().upper() or None
     lines = [
         "You are the FCC AI analyst embedded in OpenAlgo, an open-source algo trading "
         "platform for Indian markets (NSE/BSE/MCX) with broker-neutral execution.",
         "Answer crisply. When numbers are provided below, reason from them and say when "
-        "data is unavailable instead of inventing it.",
+        "data is unavailable instead of inventing it. When the operator asks to analyse "
+        "the chart or the market, analyse the focus symbol from the telemetry below.",
         "",
         "Live quotes: " + "; ".join(_live_quote_lines(api_key)),
     ]
@@ -270,10 +462,12 @@ def build_project_context(focus: str | None = None, api_key: str | None = None) 
     if glob:
         lines.append("Global (dollar) references: " + "; ".join(glob))
     if focus:
+        ltp = _focus_ltp(focus, api_key)
+        lines.extend(_chart_lines(focus, ltp, api_key))
         lines.extend(_chain_lines(focus, api_key))
     lines.extend(_scalper_lines())
     if focus:
-        lines.append(f"User focus symbol: {focus}")
+        lines.append(f"User focus symbol: {focus} (the operator's active chart)")
     return "\n".join(lines)
 
 
@@ -349,6 +543,7 @@ def chat(messages: list[dict], model: str | None = None,
 
 _commentary_history: list[dict] = []
 _commentary_lock = threading.Lock()
+_last_commentary_snapshots: dict[str, dict] = {}
 
 
 def get_commentary_history(limit: int = 30) -> list[dict]:
@@ -387,8 +582,7 @@ def generate_commentary(symbol: str | None = None, model: str | None = None,
                         api_key: str | None = None) -> dict:
     """Institutional squawk bullet for a symbol — telemetry first, LLM polish."""
     clean = (symbol or "NIFTY").upper().split(":")[-1]
-    is_index = clean in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
-    exch = "NSE_INDEX" if is_index and clean != "SENSEX" else ("BSE_INDEX" if clean in ("SENSEX", "BANKEX") else ("MCX" if clean in ("CRUDEOIL", "GOLD", "SILVER", "NATURALGAS", "COPPER", "ZINC") else "NSE"))
+    exch = _fo_exchange(clean)
 
     ltp = high = low = open_ = 0.0
     chp = 0.0
@@ -410,46 +604,136 @@ def generate_commentary(symbol: str | None = None, model: str | None = None,
         ltp = closes[-1]
     rsi = _rsi(closes[-60:]) if closes else None
 
-    chain = _chain_lines(clean, api_key)
-    pcr_txt = next((l for l in chain if "PCR" in l), "")
-    month_low = min(closes[-6 * 75:]) if len(closes) >= 75 else None
-    month_high = max(closes[-6 * 75:]) if len(closes) >= 75 else None
+    # Deep telemetry — chain analytics, daily chart snapshot, scalper state.
+    opts = _chain_analytics(clean, ltp, api_key)
+    chart_bits = _chart_lines(clean, ltp, api_key)
+    pcr = opts.get("pcr_oi")
+    max_pain = opts.get("max_pain")
+    tcb, tpb = opts.get("top_ce_buildup"), opts.get("top_pe_buildup")
+
+    daily = _daily_candles(clean, api_key)
+    week_hi = max(c[2] for c in daily[-5:]) if daily else None
+    week_lo = min(c[3] for c in daily[-5:]) if daily else None
+    month_hi = max(c[2] for c in daily[-22:]) if daily else (max(closes[-6 * 75:]) if len(closes) >= 75 else None)
+    month_lo = min(c[3] for c in daily[-22:]) if daily else (min(closes[-6 * 75:]) if len(closes) >= 75 else None)
+
+    # Technical signal list, fno-trader taxonomy.
+    signals: list[str] = []
+    if rsi is not None:
+        if rsi <= 25:
+            signals.append(f"Deeply oversold territory (RSI {rsi})")
+        elif rsi <= 35:
+            signals.append(f"Approaching oversold territory (RSI {rsi})")
+        elif rsi >= 75:
+            signals.append(f"Deeply overbought territory (RSI {rsi})")
+        elif rsi >= 65:
+            signals.append(f"Approaching overbought territory (RSI {rsi})")
+    if month_lo and ltp:
+        pct_lo = (ltp - month_lo) / ltp * 100
+        if ltp <= month_lo:
+            signals.append(f"Breaching monthly low (₹{_fmt(month_lo, 0)})")
+        elif pct_lo <= 1.2:
+            signals.append(f"Nearing monthly low (₹{_fmt(month_lo, 0)}, {pct_lo:.1f}% away)")
+    if month_hi and ltp:
+        pct_hi = (month_hi - ltp) / ltp * 100
+        if ltp >= month_hi:
+            signals.append(f"Breaching monthly high (₹{_fmt(month_hi, 0)})")
+        elif pct_hi <= 1.2:
+            signals.append(f"Nearing monthly high (₹{_fmt(month_hi, 0)}, {pct_hi:.1f}% away)")
+    if week_hi and ltp and ltp >= week_hi * 0.998:
+        signals.append(f"Pinning weekly high (₹{_fmt(week_hi)})")
+    if week_lo and ltp and ltp <= week_lo * 1.002:
+        signals.append(f"Testing weekly low (₹{_fmt(week_lo)})")
+    if tpb:
+        signals.append(f"OI Buildup: Put support at {tpb['label']}")
+    if tcb:
+        signals.append(f"OI Buildup: Call supply wall at {tcb['label']}")
+    if opts.get("oi_bias"):
+        signals.append(f"OI Flow: {opts['oi_bias']}")
+    if opts.get("atm_iv"):
+        signals.append(f"ATM IV: {opts['atm_iv']}%")
+    if max_pain and ltp:
+        signals.append(f"Max pain {_fmt(max_pain, 0)} ({'above' if ltp > max_pain else 'below'} spot)")
+    if pcr is not None:
+        if pcr >= 1.25:
+            signals.append(f"PCR {pcr} — bullish options bias")
+        elif pcr <= 0.85:
+            signals.append(f"PCR {pcr} — bearish options bias")
+
+    # Delta vs the previous bullet for the same symbol.
+    prev = _last_commentary_snapshots.get(clean) or {}
+    delta_notes: list[str] = []
+    if prev.get("ltp"):
+        diff = round(ltp - prev["ltp"], 2)
+        if abs(diff) >= 0.05:
+            delta_notes.append(f"Price moved {diff:+.2f} since last update")
+        p_pcr = prev.get("pcr")
+        if pcr and p_pcr:
+            d = round(pcr - p_pcr, 2)
+            if abs(d) >= 0.02:
+                delta_notes.append(f"PCR shifted {d:+.2f} ({p_pcr} → {pcr})")
+    _last_commentary_snapshots[clean] = {"ltp": ltp, "pcr": pcr}
+    scalper_lines = _scalper_lines()
 
     bias = "NEUTRAL"
     if chp >= 0.25:
         bias = "BULLISH"
     elif chp <= -0.25:
         bias = "BEARISH"
-
-    pos_phrase = []
-    if month_high and ltp >= month_high * 0.995:
-        pos_phrase.append("nearing monthly high")
-    if month_low and ltp <= month_low * 1.005:
-        pos_phrase.append("nearing monthly low")
-    if rsi is not None:
-        pos_phrase.append("RSI " + ("overbought" if rsi > 70 else "oversold" if rsi < 30 else f"{rsi}"))
+    if bias == "NEUTRAL" and pcr is not None:
+        if pcr >= 1.25:
+            bias = "BULLISH"
+        elif pcr <= 0.85:
+            bias = "BEARISH"
 
     time_str = datetime.now().strftime("%d %b %H:%M")
     headline = f"{clean} at ₹{_fmt(ltp)} ({chp:+.2f}%) · {bias.title()}"
-    algo = (f"{clean} is trading at ₹{_fmt(ltp)} ({chp:+.2f}%). "
-            + (pcr_txt + ". " if pcr_txt else "")
-            + (f"Technicals: {', '.join(pos_phrase)}. " if pos_phrase else ""))
+    parts = [f"{clean} trading at ₹{_fmt(ltp)} ({chp:+.2f}%), day range ₹{_fmt(low)}–₹{_fmt(high)}."]
+    if delta_notes:
+        parts.append(" ".join(delta_notes) + ".")
+    if opts.get("oi_bias"):
+        parts.append(f"Options flow: {opts['oi_bias']}.")
+    if tpb:
+        parts.append(f"Put support {tpb['label']}.")
+    if tcb:
+        parts.append(f"Call wall {tcb['label']}.")
+    if rsi is not None:
+        parts.append(f"5m RSI {rsi}.")
+    if chart_bits:
+        parts.append(chart_bits[0].split(": ", 1)[-1] + ".")
+    for s in scalper_lines[:2]:
+        parts.append(s + ".")
+    algo = " ".join(parts)
 
-    # LLM polish — short, spoken-style; falls back to the algorithmic bullet.
+    # LLM polish — detailed institutional squawk; falls back to the
+    # algorithmic bullet when the proxy or the parse fails.
     if FCC_ENABLED:
         try:
             sys_p = ("You are an institutional floor trading squawk analyst for Indian "
-                     "markets (NSE/BSE/MCX). Punchy, factual, broadcast spoken style, "
-                     "under 40 words. Output strictly valid JSON with keys: "
+                     "markets (NSE/BSE/MCX). Write 90-140 words of broadcast spoken style: "
+                     "first the price action and day range, then options/OI flow with the "
+                     "key walls, then technicals and notable levels (pivots, month/week "
+                     "extremes), then a one-line tactical takeaway. Factual, no hedging "
+                     "filler. Output strictly valid JSON with keys: "
                      "headline, commentary, bias, tag.")
-            user_p = (f"Asset: {clean} ({exch})\nQuote: LTP=₹{_fmt(ltp)} ({chp:+.2f}%), "
-                      f"H=₹{_fmt(high)}, L=₹{_fmt(low)}, O=₹{_fmt(open_)}\n"
-                      f"RSI: {rsi if rsi is not None else 'N/A'}\n"
-                      f"Month range: {_fmt(month_low)}–{_fmt(month_high)}\n"
-                      f"Chain: {pcr_txt or 'N/A'}\nProduce the JSON.")
-            raw = _fcc_request("POST", "/v1/messages", timeout=15.0, body={
+            user_p = (f"Asset: {clean} ({exch})\n"
+                      f"Quote: LTP=₹{_fmt(ltp)} ({chp:+.2f}%), H=₹{_fmt(high)}, "
+                      f"L=₹{_fmt(low)}, O=₹{_fmt(open_)}\n"
+                      + (f"5m RSI: {rsi}\n" if rsi is not None else "")
+                      + (f"Daily chart: {chart_bits[0].split(': ', 1)[-1]}\n" if chart_bits else "")
+                      + (f"Options: PCR(oi) {pcr}" if pcr is not None else "Options: N/A")
+                      + (f", max pain {_fmt(max_pain, 0)}" if max_pain else "")
+                      + (f", ATM IV {opts['atm_iv']}%" if opts.get("atm_iv") else "")
+                      + (f"\nCall wall: {tcb['label']}" if tcb else "")
+                      + (f"\nPut wall: {tpb['label']}" if tpb else "")
+                      + (f"\nOI flow: {opts['oi_bias']}" if opts.get("oi_bias") else "")
+                      + ("\nSignals: " + "; ".join(signals) if signals else "")
+                      + ("\nDelta: " + "; ".join(delta_notes) if delta_notes else "")
+                      + ("\nScalper: " + " | ".join(scalper_lines[:3]) if scalper_lines else "")
+                      + "\nProduce the JSON.")
+            raw = _fcc_request("POST", "/v1/messages", timeout=60.0, body={
                 "model": model or _default_model() or "claude-haiku-4-20250514",
-                "max_tokens": 250, "system": sys_p, "stream": False,
+                "max_tokens": 800, "system": sys_p, "stream": False,
                 "messages": [{"role": "user", "content": user_p}]})
             text = "".join(b.get("text", "") for b in (raw.get("content") or [])
                            if b.get("type") == "text").strip()
@@ -463,7 +747,8 @@ def generate_commentary(symbol: str | None = None, model: str | None = None,
                     "bias": (parsed.get("bias") or bias).upper(),
                     "tag": parsed.get("tag") or "Live Squawk",
                     "is_trigger": False, "triggers": [],
-                    "metrics": {"ltp": ltp, "chp": chp, "rsi": rsi},
+                    "signals": signals,
+                    "metrics": {"ltp": ltp, "chp": chp, "rsi": rsi, "pcr": pcr},
                 })
         except Exception as e:
             logger.info("FCC commentary LLM failed (%s); using algorithmic bullet", e)
@@ -471,8 +756,8 @@ def generate_commentary(symbol: str | None = None, model: str | None = None,
     return _store_commentary({
         "timestamp": time_str, "symbol": clean, "headline": headline,
         "commentary": algo.strip(), "bias": bias, "tag": "Live Squawk",
-        "is_trigger": False, "triggers": [],
-        "metrics": {"ltp": ltp, "chp": chp, "rsi": rsi},
+        "is_trigger": False, "triggers": [], "signals": signals,
+        "metrics": {"ltp": ltp, "chp": chp, "rsi": rsi, "pcr": pcr},
     })
 
 

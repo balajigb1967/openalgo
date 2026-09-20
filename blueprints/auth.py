@@ -123,8 +123,9 @@ def get_broker_config():
     """
     REDIRECT_URL = os.getenv("REDIRECT_URL")
 
-    # Extract broker name from redirect URL
-    match = re.search(r"/([^/]+)/callback$", REDIRECT_URL)
+    # Extract broker name from redirect URL (tolerate a query suffix — the
+    # broker-credentials UI can persist REDIRECT_URL as .../callback?).
+    match = re.search(r"/([^/]+)/callback$", (REDIRECT_URL or "").split("?", 1)[0].strip())
     broker_name = match.group(1) if match else None
 
     if not broker_name:

@@ -828,7 +828,7 @@ export default function Trading() {
            )}
           {apiKey && wsUrl && panel === 'fcc' && (
             <Suspense fallback={null}>
-              <FccAiPanel />
+              <FccAiPanel activeSymbol={paneSymbols[focusedPane] ?? null} />
             </Suspense>
           )}
           {apiKey && wsUrl && panel === 'objects' && (
