@@ -487,6 +487,42 @@ def _store_commentary(item: dict) -> dict:
 
 # ---------------------------------------------------------------- agent runner
 
+def _child_env() -> dict[str, str]:
+    """Env for spawned fcc-* agent processes so they can find the CLIs they wrap
+    (claude, codex, ...) in ~/.local/bin or nvm dirs even when the app runs with
+    a minimal service PATH. Also scrubs the app's own PORT/HOST — the fcc-*
+    launchers fall back to a generic PORT and would otherwise probe OpenAlgo's
+    port instead of the FCC proxy."""
+    env = dict(os.environ)
+    home = os.path.expanduser("~")
+    extra = [os.path.expanduser("~/.local/bin")]
+    nvm_bins = os.path.join(home, ".nvm", "versions", "node")
+    if os.path.isdir(nvm_bins):
+        for v in sorted(os.listdir(nvm_bins)):
+            extra.append(os.path.join(nvm_bins, v, "bin"))
+    seen: set[str] = set()
+    parts: list[str] = []
+    for p in extra + env.get("PATH", os.defpath).split(os.pathsep):
+        if p and p not in seen:
+            seen.add(p)
+            parts.append(p)
+    env["PATH"] = os.pathsep.join(parts)
+    env.setdefault("NO_COLOR", "1")
+    env.pop("PORT", None)
+    env.pop("HOST", None)
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(FCC_BASE_URL)
+        if parsed.port:
+            env["FCC_PORT"] = str(parsed.port)
+        if parsed.hostname:
+            env.setdefault("FCC_HOST", parsed.hostname)
+    except Exception:
+        pass
+    env.setdefault("FCC_BASE_URL", FCC_BASE_URL)
+    return env
+
+
 def _launcher_path(agent: str) -> str | None:
     name = "freebuff" if agent == "freebuff" else f"fcc-{agent}"
     for d in (os.path.expanduser("~/.local/bin"), "/usr/local/bin", "/usr/bin"):
@@ -495,7 +531,7 @@ def _launcher_path(agent: str) -> str | None:
             return p
     try:
         w = subprocess.run(["which", name], capture_output=True, text=True,
-                           timeout=5).stdout.strip()
+                           timeout=5, env=_child_env()).stdout.strip()
         return w or None
     except Exception:
         return None
@@ -539,6 +575,9 @@ def stop_agent(run_id: str) -> None:
 def run_agent(agent: str, prompt: str, cwd: str | None = None,
               timeout: float | None = None, model: str | None = None) -> dict:
     """Launch an FCC coding agent against this project, non-interactive."""
+    agent = (agent or "").strip()
+    if agent.startswith("fcc-"):  # accept the full launcher name too
+        agent = agent[4:]
     launcher = _launcher_path(agent)
     if not launcher:
         raise FileNotFoundError(f"fcc-{agent} launcher not found on this machine")
@@ -564,9 +603,9 @@ def run_agent(agent: str, prompt: str, cwd: str | None = None,
     def _worker():
         try:
             proc = subprocess.Popen(
-                cmd, cwd=cwd or PROJECT_ROOT,
+                cmd, cwd=cwd or PROJECT_ROOT, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, env={**os.environ, "NO_COLOR": "1"},
+                text=True, env=_child_env(),
             )
             with _run_lock:
                 _runs[run_id]["_proc"] = proc
@@ -575,7 +614,18 @@ def run_agent(agent: str, prompt: str, cwd: str | None = None,
                 buf.append(line)
                 with _run_lock:
                     _runs[run_id]["output"] = "".join(buf)[-40_000:]
-            rc = proc.wait(timeout=timeout or FCC_AGENT_TIMEOUT)
+            try:
+                rc = proc.wait(timeout=timeout or FCC_AGENT_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except Exception:
+                    proc.kill()
+                with _run_lock:
+                    _runs[run_id].update(status="failed", ended_ts=time.time(),
+                                         error="timeout")
+                return
             with _run_lock:
                 _runs[run_id].update(status="done" if rc == 0 else "failed",
                                      ended_ts=time.time(),
