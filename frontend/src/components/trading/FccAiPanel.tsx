@@ -1,7 +1,9 @@
 /**
  * FCC AI panel — the fno-trader AI feature set on OpenAlgo's data.
  *
- * Three tabs, no overlap with the Assistant beside it in the rail:
+ * Uniform fno-trader layout in every tab (Chat / Live / Agent):
+ *   one toolbar row -> scrollable middle -> bottom dock.
+ *
  * - **Chat** is grounded with a live market snapshot the server builds from
  *   the platform's own quote / option-chain / candle services at send time,
  *   focused on the operator's active chart symbol.
@@ -181,6 +183,54 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
     </datalist>
   )
 
+  // The fno-trader skeleton: one toolbar row per tab, then the scrollable
+  // middle, then a fixed dock. Every tab follows the same three tiers.
+  const toolbar = tab === 'chat' ? (
+    <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-1.5">
+      <Input
+        value={model}
+        onChange={(e) => setModel(e.target.value)}
+        list="fcc-models"
+        placeholder="model (server default)"
+        className="h-7 text-[11px]"
+      />
+      {modelDatalist}
+    </div>
+  ) : tab === 'live' ? (
+    <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-1.5">
+      <Input
+        value={symbol}
+        onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+        className="h-7 flex-1 text-[12px]"
+        placeholder="Symbol"
+      />
+      {focus && symbol.trim() !== focus && (
+        <Button size="sm" variant="ghost" className="h-7 shrink-0 px-2 text-[10px]" onClick={() => setSymbol(focus)}>
+          use {focus}
+        </Button>
+      )}
+    </div>
+  ) : (
+    <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-1.5">
+      <select
+        value={agent || agents[0]}
+        onChange={(e) => setAgent(e.target.value)}
+        className="h-7 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-[11px]"
+        aria-label="Coding agent"
+      >
+        {agents.length === 0 && <option value="">no agents installed</option>}
+        {agents.map((a) => <option key={a} value={a}>fcc-{a}</option>)}
+      </select>
+      <Input
+        value={agentModel}
+        onChange={(e) => setAgentModel(e.target.value)}
+        list="fcc-models"
+        placeholder="model (default)"
+        className="h-7 min-w-0 flex-1 text-[11px]"
+      />
+    </div>
+  )
+
   return (
     <PanelShell id="oa-panel-fcc" label="FCC AI" storageKey="oa-trading-fcc-width" defaultWidth={400}>
       <div className={PANEL_HEADER}>
@@ -213,6 +263,9 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
         </div>
       </div>
 
+      {toolbar}
+
+      {/* ------------------------------------------------ middle: chat */}
       {tab === 'chat' && (
         <div ref={threadRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
           {turns.length === 0 && (
@@ -238,21 +291,9 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
         </div>
       )}
 
+      {/* ------------------------------------------------ middle: live */}
       {tab === 'live' && (
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-          <div className="mb-3 flex items-center gap-1.5">
-            <Input
-              value={symbol}
-              onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-              className="h-8 flex-1 text-[12px]"
-              placeholder="Symbol"
-            />
-            <Button size="sm" variant="secondary" className="h-8" disabled={liveBusy || !symbol.trim()}
-              onClick={() => generateCommentary(symbol.trim())}>
-              {liveBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Radio className="h-3.5 w-3.5" />}
-              Squawk
-            </Button>
-          </div>
           {items.length === 0 && (
             <p className="px-1 text-xs text-muted-foreground">
               Deep squawk bullets: price action, OI buildup walls, ATM IV, pivots and scalper
@@ -282,6 +323,7 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
         </div>
       )}
 
+      {/* ------------------------------------------------ middle: agent */}
       {tab === 'agent' && (
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
           {status && !status.connected ? (
@@ -293,41 +335,14 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
               No FCC agents installed on the server. Install with{' '}
               <code className="rounded bg-accent px-1">npm i -g free-claude-code</code>.
             </p>
-          ) : (
-            <div className="space-y-2">
-              <div className="flex items-center gap-1.5">
-                <select
-                  value={agent || agents[0]}
-                  onChange={(e) => setAgent(e.target.value)}
-                  className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-[12px]"
-                  aria-label="Coding agent"
-                >
-                  {agents.map((a) => <option key={a} value={a}>fcc-{a}</option>)}
-                </select>
-                <Input
-                  value={agentModel}
-                  onChange={(e) => setAgentModel(e.target.value)}
-                  list="fcc-models"
-                  placeholder="model (default)"
-                  className="h-8 min-w-0 flex-1 text-[11px]"
-                />
-              </div>
-              <div className="flex items-center gap-1.5">
-                <Input
-                  value={agentTask}
-                  onChange={(e) => setAgentTask(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && runAgent()}
-                  placeholder={focus ? `Task for fcc-${agent || agents[0]} (maps to ${focus})…` : `Task for fcc-${agent || agents[0]}…`}
-                  className="h-8 flex-1 text-[12px]"
-                />
-                <Button size="sm" className="h-8" disabled={!agentTask.trim() || agentRun?.status === 'running'} onClick={runAgent}>
-                  Run
-                </Button>
-              </div>
-            </div>
-          )}
+          ) : !agentRun ? (
+            <p className="text-xs text-muted-foreground">
+              Give fcc-{agent || agents[0]} a task in the dock below
+              {focus ? <> — it starts from <b>{focus}</b>.</> : '.'} Output streams here.
+            </p>
+          ) : null}
           {agentRun && (
-            <div className="mt-3">
+            <div>
               <div className="mb-1 flex items-center gap-2 text-[11px] text-muted-foreground">
                 <span className={cn('h-1.5 w-1.5 rounded-full',
                   agentRun.status === 'running' ? 'animate-pulse bg-primary' : 'bg-muted-foreground')} />
@@ -338,7 +353,7 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
                   </button>
                 )}
               </div>
-              <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap rounded-md bg-accent/30 p-2 text-[11px] leading-relaxed">
+              <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-md bg-accent/30 p-2 text-[11px] leading-relaxed">
                 {agentOutput || '…'}
               </pre>
             </div>
@@ -346,18 +361,9 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
         </div>
       )}
 
+      {/* ------------------------------------------------ dock */}
       {tab === 'chat' && (
         <div className="shrink-0 border-t border-border px-3 py-2.5">
-          <div className="mb-1.5 flex items-center gap-1.5">
-            <Input
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              list="fcc-models"
-              placeholder="model (server default)"
-              className="h-7 flex-1 text-[11px]"
-            />
-          </div>
-          {modelDatalist}
           <div className="flex items-center gap-2">
             <Input
               value={input}
@@ -369,6 +375,30 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
             />
             <Button size="icon" className="h-9 w-9 shrink-0" disabled={busy || !input.trim()} onClick={send}>
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+            </Button>
+          </div>
+        </div>
+      )}
+      {tab === 'live' && (
+        <div className="shrink-0 border-t border-border px-3 py-2.5">
+          <Button className="h-9 w-full" disabled={liveBusy || !symbol.trim()} onClick={() => generateCommentary(symbol.trim())}>
+            {liveBusy ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Radio className="mr-1.5 h-4 w-4" />}
+            Generate squawk for {symbol.trim() || 'symbol'}
+          </Button>
+        </div>
+      )}
+      {tab === 'agent' && (
+        <div className="shrink-0 border-t border-border px-3 py-2.5">
+          <div className="flex items-center gap-2">
+            <Input
+              value={agentTask}
+              onChange={(e) => setAgentTask(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && runAgent()}
+              placeholder={focus ? `Task for fcc-${agent || agents[0]} (maps to ${focus})…` : `Task for fcc-${agent || agents[0]}…`}
+              className="h-9 flex-1 text-[12px]"
+            />
+            <Button size="sm" className="h-9 shrink-0" disabled={!agentTask.trim() || agentRun?.status === 'running'} onClick={runAgent}>
+              Run
             </Button>
           </div>
         </div>
