@@ -605,6 +605,7 @@ def get_commentary_history(limit: int = 30) -> list[dict]:
 # ------------------------------------------------------------ auto squawk loop
 
 _auto_lock = threading.Lock()
+_AUTO_STATE_PATH = os.path.join(PROJECT_ROOT, ".fcc_squawk_state.json")
 _auto_state: dict[str, Any] = {"enabled": False, "symbol": "NIFTY", "interval": 60,
                                "last_error": "", "last_ts": 0.0, "thread": None,
                                "expires_ts": 0.0, "stopped_reason": ""}
@@ -656,6 +657,7 @@ def _auto_loop() -> None:
                 _auto_state["enabled"] = False
                 _auto_state["thread"] = None
                 _auto_state["stopped_reason"] = "auto-off after duration"
+                _persist_auto_state()
                 return
         err = ""
         if _market_open_ist():
@@ -681,6 +683,7 @@ def _auto_loop() -> None:
             with _auto_lock:
                 if not _auto_state["enabled"]:
                     _auto_state["thread"] = None
+                    _persist_auto_state()
                     return
             time.sleep(0.25)
 
@@ -709,10 +712,63 @@ def set_auto_squawk(enabled: bool, symbol: str | None = None,
             t = threading.Thread(target=_auto_loop, name="fcc-auto-squawk", daemon=True)
             _auto_state["thread"] = t
             t.start()
+        _persist_auto_state()
     return auto_squawk_status()
 
 
+def _persist_auto_state() -> None:
+    """Checkpoint the session so a restart can resume it (caller holds _auto_lock).
+    Best effort — a dead disk never blocks the toggle."""
+    try:
+        snap = {k: v for k, v in _auto_state.items() if k in
+                ("enabled", "symbol", "interval", "expires_ts")}
+        with open(_AUTO_STATE_PATH, "w") as f:
+            json.dump(snap, f)
+    except Exception as e:
+        logger.debug("squawk state persist failed: %s", e)
+
+
+def _resume_on_boot() -> None:
+    """Re-arm a squawk session persisted by a previous process generation.
+
+    Loop state lives in memory, so every restart (deploy, crash, reboot)
+    silently killed a running squawk — it always died "before the timer
+    ended". The persisted expires_ts lets a fresh process pick the session
+    back up with its remaining time instead. Idempotent: only fires when the
+    current generation has no session yet."""
+    try:
+        with open(_AUTO_STATE_PATH, "r") as f:
+            saved = json.load(f)
+    except Exception:
+        return
+    if not isinstance(saved, dict) or not saved.get("enabled"):
+        return
+    exp = float(saved.get("expires_ts") or 0.0)
+    if time.time() >= exp:
+        try:
+            os.remove(_AUTO_STATE_PATH)
+        except Exception:
+            pass
+        return
+    with _auto_lock:
+        if _auto_state.get("enabled") or _auto_state.get("thread"):
+            return  # this generation already runs a session; disk copy is stale
+        _auto_state.update({
+            "enabled": True,
+            "symbol": str(saved.get("symbol") or "NIFTY"),
+            "interval": max(30, int(saved.get("interval") or 60)),
+            "expires_ts": exp,
+            "stopped_reason": "",
+        })
+        t = threading.Thread(target=_auto_loop, name="fcc-auto-squawk", daemon=True)
+        _auto_state["thread"] = t
+        t.start()
+    logger.info("resumed auto-squawk for %s (expires in %ds)",
+                saved.get("symbol"), int(exp - time.time()))
+
+
 def auto_squawk_status() -> dict:
+    _resume_on_boot()
     with _auto_lock:
         out = {k: v for k, v in _auto_state.items() if k != "thread"}
         out["running"] = bool(_auto_state.get("thread"))
