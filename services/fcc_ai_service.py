@@ -906,7 +906,9 @@ def generate_commentary(symbol: str | None = None, model: str | None = None,
 
     scalper_lines = _scalper_lines()
 
-    time_str = datetime.now().strftime("%d %b %H:%M")
+    # Bullets are stamped in IST (the market's clock) — the VM runs UTC, so a
+    # naive datetime.now() showed times 5.5h behind.
+    time_str = (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime("%d %b %H:%M")
     bias = "NEUTRAL"
     if chp >= 0.25:
         bias = "BULLISH"
