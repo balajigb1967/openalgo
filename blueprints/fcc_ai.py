@@ -89,13 +89,18 @@ def fcc_chat():
 @scalper_orderflow_bp.route("/fcc/commentary", methods=["POST"])
 @app_key_required
 def fcc_commentary():
-    """Fresh squawk bullet for a symbol. Body: {symbol?, model?}"""
+    """Fresh squawk bullet for a symbol. Body: {symbol?, model?}
+
+    Event-driven: returns 204 (no content) when nothing new happened since
+    the last read — silence means no new trading event, not a failure."""
     try:
         body = request.get_json(silent=True) or {}
         item = fcc.generate_commentary(
             symbol=body.get("symbol"), model=body.get("model"),
             api_key=_resolve_api_key(),
         )
+        if not item:
+            return "", 204
         return jsonify({"status": "success", "item": item})
     except Exception as e:
         logger.exception("fcc commentary failed")

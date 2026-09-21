@@ -545,6 +545,57 @@ _commentary_history: list[dict] = []
 _commentary_lock = threading.Lock()
 _last_commentary_snapshots: dict[str, dict] = {}
 
+# -------- event-driven commentary state (per symbol) ------------------------
+# Each entry: {"events": [str,...], "sig": {"rsi": float, "above": bool,
+# "trend": str, "ltp": float, "pcr": float}, "ts": float}
+_event_state: dict[str, dict] = {}
+
+# Cooldowns (seconds) so the same alert family cannot spam within a window.
+_COOLDOWN_EVENT = 900       # same event text: 15 min
+_COOLDOWN_HEARTBEAT = 900   # status heartbeat: at most every 15 min
+
+
+def _mark_event(sym: str, text: str, sig: dict, *, heartbeat: bool = False,
+                cooldown: int | None = None) -> str | None:
+    """Record an event for a symbol; return the display text only when it is
+    NEW (never seen, or past its cooldown). Status heartbeats additionally
+    require a real change vs the recorded signature."""
+    st = _event_state.setdefault(sym, {"events": {}, "sig": {}, "ts": 0.0})
+    now = time.time()
+    cd = _COOLDOWN_HEARTBEAT if heartbeat else (cooldown if cooldown is not None else _COOLDOWN_EVENT)
+    key = text.lower()
+    last = st["events"].get(key, 0.0)
+    if now - last < cd:
+        return None
+    if heartbeat:
+        prev = st.get("sig", {})
+        watched = ("rsi_zone", "trend", "above")
+        if prev and all(prev.get(k) == sig.get(k) for k in watched):
+            return None
+        # merge — never clobber sibling keys (oi walls, pcr, …)
+        st["sig"] = {**st.get("sig", {}), **sig}
+    st["events"][key] = now
+    # prune stale entries (2 h) so the dict cannot grow unbounded
+    if len(st["events"]) > 40:
+        st["events"] = {k: t for k, t in st["events"].items() if now - t < 7200}
+    return text
+
+
+def _zone(rsi: float) -> str:
+    if rsi <= 25:
+        return "deep oversold"
+    if rsi <= 35:
+        return "oversold"
+    if rsi >= 75:
+        return "deep overbought"
+    if rsi >= 65:
+        return "overbought"
+    if rsi >= 55:
+        return "bullish zone"
+    if rsi <= 45:
+        return "bearish zone"
+    return "neutral zone"
+
 
 def get_commentary_history(limit: int = 30) -> list[dict]:
     with _commentary_lock:
@@ -697,64 +748,124 @@ def generate_commentary(symbol: str | None = None, model: str | None = None,
     month_hi = max(c[2] for c in daily[-22:]) if daily else (max(closes[-6 * 75:]) if len(closes) >= 75 else None)
     month_lo = min(c[3] for c in daily[-22:]) if daily else (min(closes[-6 * 75:]) if len(closes) >= 75 else None)
 
-    # Technical signal list, fno-trader taxonomy.
-    signals: list[str] = []
-    if rsi is not None:
-        if rsi <= 25:
-            signals.append(f"Deeply oversold territory (RSI {rsi})")
-        elif rsi <= 35:
-            signals.append(f"Approaching oversold territory (RSI {rsi})")
-        elif rsi >= 75:
-            signals.append(f"Deeply overbought territory (RSI {rsi})")
-        elif rsi >= 65:
-            signals.append(f"Approaching overbought territory (RSI {rsi})")
-    if month_lo and ltp:
-        pct_lo = (ltp - month_lo) / ltp * 100
-        if ltp <= month_lo:
-            signals.append(f"Breaching monthly low (₹{_fmt(month_lo, 0)})")
-        elif pct_lo <= 1.2:
-            signals.append(f"Nearing monthly low (₹{_fmt(month_lo, 0)}, {pct_lo:.1f}% away)")
-    if month_hi and ltp:
-        pct_hi = (month_hi - ltp) / ltp * 100
-        if ltp >= month_hi:
-            signals.append(f"Breaching monthly high (₹{_fmt(month_hi, 0)})")
-        elif pct_hi <= 1.2:
-            signals.append(f"Nearing monthly high (₹{_fmt(month_hi, 0)}, {pct_hi:.1f}% away)")
-    if week_hi and ltp and ltp >= week_hi * 0.998:
-        signals.append(f"Pinning weekly high (₹{_fmt(week_hi)})")
-    if week_lo and ltp and ltp <= week_lo * 1.002:
-        signals.append(f"Testing weekly low (₹{_fmt(week_lo)})")
-    if tpb:
-        signals.append(f"OI Buildup: Put support at {tpb['label']}")
-    if tcb:
-        signals.append(f"OI Buildup: Call supply wall at {tcb['label']}")
-    if opts.get("oi_bias"):
-        signals.append(f"OI Flow: {opts['oi_bias']}")
-    if opts.get("atm_iv"):
-        signals.append(f"ATM IV: {opts['atm_iv']}%")
-    if max_pain and ltp:
-        signals.append(f"Max pain {_fmt(max_pain, 0)} ({'above' if ltp > max_pain else 'below'} spot)")
-    if pcr is not None:
-        if pcr >= 1.25:
-            signals.append(f"PCR {pcr} — bullish options bias")
-        elif pcr <= 0.85:
-            signals.append(f"PCR {pcr} — bearish options bias")
+    # ------------------------------------------------------------------
+    # Event-driven signals: only NEW events make bullets; repeated reads
+    # stay silent. Levels need TWO consecutive reads confirming.
+    # ------------------------------------------------------------------
+    st = _event_state.setdefault(clean, {"events": {}, "sig": {}, "ts": 0.0})
+    prev = st.get("sig", {})
+    level_hits: dict[str, dict] = st.setdefault("levels", {})  # name -> streak info
+    prev_5m = prev.get("ltp") or ltp
 
-    # Delta vs the previous bullet for the same symbol.
-    prev = _last_commentary_snapshots.get(clean) or {}
-    delta_notes: list[str] = []
-    if prev.get("ltp"):
-        diff = round(ltp - prev["ltp"], 2)
-        if abs(diff) >= 0.05:
-            delta_notes.append(f"Price moved {diff:+.2f} since last update")
+    daily_hi = month_hi
+    daily_lo = month_lo
+    ev: list[str] = []
+
+    def _evt(text: str, *, heartbeat: bool = False, cooldown: int | None = None) -> None:
+        out = _mark_event(clean, text, {"rsi_zone": _zone(rsi) if rsi is not None else None,
+                                        "trend": ("up" if closes and ltp and closes[-1] > (sum(closes[-20:]) / min(20, len(closes))) else "down") if closes else None,
+                                        "above": bool(ltp and daily_hi and ltp >= daily_hi * 0.998)},
+                          heartbeat=heartbeat, cooldown=cooldown)
+        if out:
+            ev.append(out)
+
+    # --- RSI zone transitions -------------------------------------------
+    if rsi is not None:
+        z = _zone(rsi)
+        pz = prev.get("rsi_zone")
+        if z != pz:
+            if z in ("deep oversold", "oversold"):
+                _evt(f"RSI {rsi} → {z.upper()} — watch for a relief bounce; "
+                     f"longs only above ₹{_fmt(ltp)}")
+            elif z in ("deep overbought", "overbought"):
+                _evt(f"RSI {rsi} → {z.upper()} — momentum stretched; "
+                     f"book partials into strength")
+            elif z == "bullish zone":
+                _evt(f"RSI {rsi} — momentum turning UP into bullish zone")
+            elif z == "bearish zone":
+                _evt(f"RSI {rsi} — momentum rolling over into bearish zone")
+        st["sig"]["rsi_zone"] = z
+
+    # --- Support / resistance: nearing (warn once), then breach ----------
+    for name, lvl, lo in (("monthly high", month_hi, False), ("monthly low", month_lo, True),
+                          ("weekly high", week_hi, False), ("weekly low", week_lo, True),
+                          ("day high", high or None, False), ("day low", low or None, True)):
+        if not lvl or not ltp:
+            continue
+        near_pct = 0.25 if name.startswith("day") else 0.6
+        dist = (lvl - ltp) / ltp * 100
+        key = name.replace(" ", "_")
+        lk = level_hits.setdefault(key, {"streak": 0, "near": False, "brk": False})
+        near = abs(dist) <= near_pct
+        brk = (ltp >= lvl) if not lo else (ltp <= lvl)
+        lk["streak"] = lk["streak"] + 1 if near else 0
+        if brk and not lk["brk"]:
+            _evt(f"BREAKOUT: {name.capitalize()} ₹{_fmt(lvl, 0)} breached — "
+                 f"{'breakout continuation' if not lo else 'breakdown'} watch")
+            lk["brk"] = True
+            lk["near"] = False
+        elif lk["streak"] >= 2 and not lk["near"] and not brk:
+            _evt(f"Nearing {name} ₹{_fmt(lvl, 0)} ({abs(dist):.1f}% away) — "
+                 f"{'breakout' if not lo else 'breakdown'} alert zone")
+            lk["near"] = True
+        if not near and not brk and lk["brk"] and abs(dist) > near_pct:
+            lk["brk"] = False  # fully reclaimed/lost again — re-arm
+
+    # --- Trend: MA20 slope + higher-high structure ------------------------
+    if len(closes) >= 25:
+        ma20 = sum(closes[-20:]) / 20
+        ma20_prev = sum(closes[-25:-5]) / 20
+        trend = "UP" if ma20 > ma20_prev else "DOWN"
+        p_trend = prev.get("trend")
+        if trend != p_trend and p_trend is not None:
+            _evt(f"TREND REVERSAL EXPECTED: 20-period MA slope flipped {p_trend}→{trend} "
+                 f"— position accordingly")
+        st["sig"]["trend"] = trend
+
+    # --- OI / options flow events (only on change) -----------------------
+    if opts.get("oi_bias") and opts.get("oi_bias") != prev.get("oi_bias"):
+        _evt(f"OI FLOW SHIFT: {opts['oi_bias']}")
+        st["sig"]["oi_bias"] = opts.get("oi_bias")
+    if tcb and tcb.get("label") != prev.get("call_wall"):
+        _evt(f"New CALL supply wall forming at {tcb['label']} — upside capped there")
+        st["sig"]["call_wall"] = tcb.get("label")
+    if tpb and tpb.get("label") != prev.get("put_wall"):
+        _evt(f"New PUT support wall at {tpb['label']} — dips likely bought")
+        st["sig"]["put_wall"] = tpb.get("label")
+    if pcr is not None:
         p_pcr = prev.get("pcr")
-        if pcr and p_pcr:
-            d = round(pcr - p_pcr, 2)
-            if abs(d) >= 0.02:
-                delta_notes.append(f"PCR shifted {d:+.2f} ({p_pcr} → {pcr})")
-    _last_commentary_snapshots[clean] = {"ltp": ltp, "pcr": pcr}
+        if p_pcr and abs(pcr - p_pcr) >= 0.1:
+            d = pcr - p_pcr
+            _evt(f"PCR swing {p_pcr} → {pcr} ({'bullish' if d > 0 else 'bearish'} tilt)")
+        st["sig"]["pcr"] = pcr
+
+    # --- Chart-pattern heuristics on 5m closes ---------------------------
+    if len(closes) >= 40:
+        seg = closes[-40:]
+        hi, lo_ = max(seg), min(seg)
+        rng = hi - lo_
+        if rng > 0:
+            pos = (seg[-1] - lo_) / rng
+            if 0.45 <= pos <= 0.55 and rng / seg[-1] < 0.006:
+                _evt("PATTERN: tight coil forming — compression breakout likely "
+                     "(trade the direction of the pop)", cooldown=3600)
+            elif pos >= 0.97:
+                _evt("PATTERN: riding range top — strong momentum continuation "
+                     "setup, trail stops", cooldown=3600)
+            elif pos <= 0.03:
+                _evt("PATTERN: at range bottom — oversold bounce setup, "
+                     "wait for a green candle to enter", cooldown=3600)
+
+    # --- Status heartbeat: only when something material changed ----------
+    if not ev:
+        _evt(f"{clean} steady at ₹{_fmt(ltp)} ({chp:+.2f}%) · RSI {rsi if rsi is not None else '-'} · "
+             f"trend {st.get('sig', {}).get('trend', 'n/a')}", heartbeat=True)
+
+    signals = ev
+
     scalper_lines = _scalper_lines()
 
+    time_str = datetime.now().strftime("%d %b %H:%M")
     bias = "NEUTRAL"
     if chp >= 0.25:
         bias = "BULLISH"
@@ -766,76 +877,56 @@ def generate_commentary(symbol: str | None = None, model: str | None = None,
         elif pcr <= 0.85:
             bias = "BEARISH"
 
-    time_str = datetime.now().strftime("%d %b %H:%M")
-    headline = f"{clean} at ₹{_fmt(ltp)} ({chp:+.2f}%) · {bias.title()}"
-    parts = [f"{clean} trading at ₹{_fmt(ltp)} ({chp:+.2f}%), day range ₹{_fmt(low)}–₹{_fmt(high)}."]
-    if delta_notes:
-        parts.append(" ".join(delta_notes) + ".")
-    if opts.get("oi_bias"):
-        parts.append(f"Options flow: {opts['oi_bias']}.")
-    if tpb:
-        parts.append(f"Put support {tpb['label']}.")
-    if tcb:
-        parts.append(f"Call wall {tcb['label']}.")
-    if rsi is not None:
-        parts.append(f"5m RSI {rsi}.")
-    if chart_bits:
-        parts.append(chart_bits[0].split(": ", 1)[-1] + ".")
-    for s in scalper_lines[:2]:
-        parts.append(s + ".")
-    algo = " ".join(parts)
+    headline = f"{clean} ₹{_fmt(ltp)} ({chp:+.2f}%) · {bias.title()}"
 
-    # LLM polish — detailed institutional squawk; falls back to the
-    # algorithmic bullet when the proxy or the parse fails.
+    # Nothing new? Stay SILENT — no bullet at all (the whole point of the
+    # event engine; callers must handle item=None).
+    if not signals:
+        return None
+    # Algorithmic tips: one bullet per NEW event, always actionable.
+    tips = list(signals)
+
+    # LLM tip polish — turns the raw events into crisp actionable bullets.
+    # Falls back to the raw event bullets on any failure.
     if FCC_ENABLED:
         try:
-            sys_p = ("You are an institutional floor trading squawk analyst for Indian "
-                     "markets (NSE/BSE/MCX). Write 90-140 words of broadcast spoken style: "
-                     "first the price action and day range, then options/OI flow with the "
-                     "key walls, then technicals and notable levels (pivots, month/week "
-                     "extremes), then a one-line tactical takeaway. Factual, no hedging "
-                     "filler. Output strictly valid JSON with keys: "
-                     "headline, commentary, bias, tag.")
-            user_p = (f"Asset: {clean} ({exch})\n"
-                      f"Quote: LTP=₹{_fmt(ltp)} ({chp:+.2f}%), H=₹{_fmt(high)}, "
-                      f"L=₹{_fmt(low)}, O=₹{_fmt(open_)}\n"
-                      + (f"5m RSI: {rsi}\n" if rsi is not None else "")
-                      + (f"Daily chart: {chart_bits[0].split(': ', 1)[-1]}\n" if chart_bits else "")
-                      + (f"Options: PCR(oi) {pcr}" if pcr is not None else "Options: N/A")
-                      + (f", max pain {_fmt(max_pain, 0)}" if max_pain else "")
-                      + (f", ATM IV {opts['atm_iv']}%" if opts.get("atm_iv") else "")
-                      + (f"\nCall wall: {tcb['label']}" if tcb else "")
-                      + (f"\nPut wall: {tpb['label']}" if tpb else "")
-                      + (f"\nOI flow: {opts['oi_bias']}" if opts.get("oi_bias") else "")
-                      + ("\nSignals: " + "; ".join(signals) if signals else "")
-                      + ("\nDelta: " + "; ".join(delta_notes) if delta_notes else "")
-                      + ("\nScalper: " + " | ".join(scalper_lines[:3]) if scalper_lines else "")
-                      + "\nProduce the JSON.")
+            sys_p = ("You are a trading desk tip generator for Indian F&O markets. "
+                     "You receive ONLY the NEW events for a symbol plus current "
+                     "telemetry. Output 2-6 short trading-tip bullets (max 18 words "
+                     "each) with concrete ₹ levels where possible: entry/avoid/exit "
+                     "hints, what to watch next, risk note. Do NOT restate events "
+                     "that are not in the list; no disclaimers, no filler. Output "
+                     "strictly valid JSON: {\"headline\": str, \"tips\": [str], "
+                     "\"bias\": \"BULLISH\"|\"BEARISH\"|\"NEUTRAL\", \"tag\": str}.")
+            user_p = (f"Symbol: {clean} ({exch})\n"
+                      + (f"Now: LTP ₹{_fmt(ltp)} ({chp:+.2f}%), day H ₹{_fmt(high)} L ₹{_fmt(low)}\n" if ltp
+                         else "Quote feed unavailable right now — do NOT invent or mention ₹ price levels; keep tips qualitative.\n")
+                      + (f"5m RSI {rsi} ({_zone(rsi)})\n" if rsi is not None else "")
+                      + (f"PCR(oi) {pcr}" + (f", max pain {_fmt(max_pain, 0)}" if max_pain else "") + "\n" if pcr is not None else "")
+                      + (f"ATM IV {opts['atm_iv']}%\n" if opts.get("atm_iv") else "")
+                      + "NEW EVENTS:\n" + "\n".join(f"- {s}" for s in signals)
+                      + ("\nScalper context: " + " | ".join(scalper_lines[:2]) if scalper_lines else "")
+                      + "\nTips JSON:")
             raw = _fcc_request("POST", "/v1/messages", timeout=60.0, body={
                 "model": model or _default_model() or "claude-haiku-4-20250514",
-                "max_tokens": 800, "system": sys_p, "stream": False,
+                "max_tokens": 700, "system": sys_p, "stream": False,
                 "messages": [{"role": "user", "content": user_p}]})
             text = "".join(b.get("text", "") for b in (raw.get("content") or [])
                            if b.get("type") == "text").strip()
             text = re.sub(r"^```(json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
             parsed = json.loads(text)
-            if isinstance(parsed, dict) and parsed.get("commentary"):
-                return _store_commentary({
-                    "timestamp": time_str, "symbol": clean,
-                    "headline": parsed.get("headline") or headline,
-                    "commentary": parsed["commentary"],
-                    "bias": (parsed.get("bias") or bias).upper(),
-                    "tag": parsed.get("tag") or "Live Squawk",
-                    "is_trigger": False, "triggers": [],
-                    "signals": signals,
-                    "metrics": {"ltp": ltp, "chp": chp, "rsi": rsi, "pcr": pcr},
-                })
+            if isinstance(parsed, dict) and parsed.get("tips"):
+                tips = [str(t) for t in parsed["tips"]][:6]
+                headline = parsed.get("headline") or headline
+                bias = (parsed.get("bias") or bias).upper()
         except Exception as e:
-            logger.info("FCC commentary LLM failed (%s); using algorithmic bullet", e)
+            logger.info("FCC tips LLM failed (%s); using raw event bullets", e)
+
+    commentary = "\n".join("• " + t for t in tips)
 
     return _store_commentary({
         "timestamp": time_str, "symbol": clean, "headline": headline,
-        "commentary": algo.strip(), "bias": bias, "tag": "Live Squawk",
+        "commentary": commentary, "bias": bias, "tag": "Trading Tips",
         "is_trigger": False, "triggers": [], "signals": signals,
         "metrics": {"ltp": ltp, "chp": chp, "rsi": rsi, "pcr": pcr},
     })

@@ -74,6 +74,7 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
   const [symbol, setSymbol] = useState('NIFTY')
   const [items, setItems] = useState<CommentaryItem[]>([])
   const [liveBusy, setLiveBusy] = useState(false)
+  const [liveNote, setLiveNote] = useState('')
   const [auto, setAuto] = useState(false)
 
   // load-balancer visibility (node health + last-served routes)
@@ -157,14 +158,23 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
 
   const generateCommentary = useCallback(async (sym: string) => {
     setLiveBusy(true)
+    setLiveNote('')
     try {
-      const d = await fccFetch<{ item: CommentaryItem }>('/commentary', {
+      const res = await fetch(`${API}/commentary`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol: sym }),
       })
-      setItems((prev) => [d.item, ...prev])
+      if (res.status === 204) {
+        // event engine stayed silent — nothing new happened
+        setLiveNote(`No new events for ${sym} since the last alert`)
+        return
+      }
+      if (!res.ok) throw new Error(`FCC ${res.status}`)
+      const d = await res.json() as { item: CommentaryItem }
+      if (d.item) setItems((prev) => [d.item, ...prev])
     } catch {
-      /* surfaced by the empty list */
+      setLiveNote('Squawk failed — check the FCC proxy')
     } finally {
       setLiveBusy(false)
     }
@@ -212,27 +222,29 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
     } catch { /* surfaced by the toggle not flipping */ }
   }, [auto, symbol])
 
-  const agents = status ? Object.entries(status.agents_available).filter(([, ok]) => ok).map(([a]) => a) : []
+  const agents = status ? Object.entries(status.agents_available).filter(([, ok]) => ok).map(([a]) => a).sort() : []
   const models = status?.models ?? []
 
-  const modelDatalist = (
-    <datalist id="fcc-models">
-      {models.slice(0, 400).map((m) => <option key={m} value={m} />)}
-    </datalist>
+  // A native <select> is the only dropdown that behaves identically in every
+  // browser and embedded webview — the old datalist input never opened its
+  // list on an empty value, which read as "only the default model exists".
+  const modelSelect = (value: string, onValue: (m: string) => void, label: string) => (
+    <select
+      value={value}
+      onChange={(e) => onValue(e.target.value)}
+      className="h-7 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-[11px]"
+      aria-label={label}
+    >
+      <option value="">model: server default</option>
+      {models.slice(0, 400).map((m) => <option key={m} value={m}>{m}</option>)}
+    </select>
   )
 
   // The fno-trader skeleton: one toolbar row per tab, then the scrollable
   // middle, then a fixed dock. Every tab follows the same three tiers.
   const toolbar = tab === 'chat' ? (
     <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-1.5">
-      <Input
-        value={model}
-        onChange={(e) => setModel(e.target.value)}
-        list="fcc-models"
-        placeholder="model (server default)"
-        className="h-7 text-[11px]"
-      />
-      {modelDatalist}
+      {modelSelect(model, setModel, 'Chat model')}
     </div>
   ) : tab === 'live' ? (
     <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-1.5">
@@ -268,13 +280,7 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
         {agents.length === 0 && <option value="">no agents installed</option>}
         {agents.map((a) => <option key={a} value={a}>fcc-{a}</option>)}
       </select>
-      <Input
-        value={agentModel}
-        onChange={(e) => setAgentModel(e.target.value)}
-        list="fcc-models"
-        placeholder="model (default)"
-        className="h-7 min-w-0 flex-1 text-[11px]"
-      />
+      {modelSelect(agentModel, setAgentModel, 'Agent model')}
     </div>
   )
 
@@ -353,10 +359,15 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
       {/* ------------------------------------------------ middle: live */}
       {tab === 'live' && (
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-          {items.length === 0 && (
+          {liveNote && (
+            <p className="mb-2 rounded-md border border-border bg-accent/30 px-2 py-1.5 text-[11px] text-muted-foreground">{liveNote}</p>
+          )}
+          {items.length === 0 && !liveNote && (
             <p className="px-1 text-xs text-muted-foreground">
-              Deep squawk bullets: price action, OI buildup walls, ATM IV, pivots and scalper
-              state — generated for any symbol; history builds up below.
+              Event-driven trading tips: RSI zones, trend flips, nearing & breached
+              supports/resistances, breakout alerts, OI walls and chart patterns.
+              A bullet appears ONLY when a new event fires — silence means nothing
+              has changed.
             </p>
           )}
           <div className="space-y-2">
