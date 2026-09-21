@@ -551,6 +551,86 @@ def get_commentary_history(limit: int = 30) -> list[dict]:
         return list(_commentary_history[:limit])
 
 
+# ------------------------------------------------------------ auto squawk loop
+
+_auto_lock = threading.Lock()
+_auto_state: dict[str, Any] = {"enabled": False, "symbol": "NIFTY", "interval": 60,
+                               "last_error": "", "last_ts": 0.0, "thread": None}
+
+
+def _stored_api_key() -> str | None:
+    """A usable OpenAlgo API key for background data calls (no request context)."""
+    try:
+        from database.auth_db import get_first_available_api_key
+        k = get_first_available_api_key()
+        if k:
+            return k
+    except Exception:
+        pass
+    return None
+
+
+def _market_open_ist() -> bool:
+    """NSE window 09:15–15:30 IST, Mon–Fri — no LLM spend outside it."""
+    ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    if ist.weekday() >= 5:
+        return False
+    minutes = ist.hour * 60 + ist.minute
+    return 9 * 60 + 15 <= minutes <= 15 * 60 + 30
+
+
+def _auto_loop() -> None:
+    while True:
+        with _auto_lock:
+            if not _auto_state["enabled"]:
+                _auto_state["thread"] = None
+                return
+            symbol = str(_auto_state["symbol"])
+            interval = max(30, int(_auto_state["interval"] or 60))
+        err = ""
+        if _market_open_ist():
+            try:
+                generate_commentary(symbol=symbol, api_key=_stored_api_key())
+            except Exception as e:  # noqa: BLE001
+                err = str(e)[:200]
+                logger.warning("auto squawk %s: %s", symbol, err)
+        with _auto_lock:
+            _auto_state["last_error"] = err
+            if not err:
+                _auto_state["last_ts"] = time.time()
+        # sleep in short slices so a disable is honoured quickly
+        deadline = time.time() + interval
+        while time.time() < deadline:
+            with _auto_lock:
+                if not _auto_state["enabled"]:
+                    _auto_state["thread"] = None
+                    return
+            time.sleep(1.0)
+
+
+def set_auto_squawk(enabled: bool, symbol: str | None = None,
+                    interval: int | None = None) -> dict:
+    """Start/stop the 60s auto-squawk loop for a symbol."""
+    with _auto_lock:
+        _auto_state["enabled"] = bool(enabled)
+        if symbol:
+            _auto_state["symbol"] = str(symbol).upper().split(":")[-1]
+        if interval:
+            _auto_state["interval"] = max(30, int(interval))
+        if enabled and not _auto_state["thread"]:
+            t = threading.Thread(target=_auto_loop, name="fcc-auto-squawk", daemon=True)
+            _auto_state["thread"] = t
+            t.start()
+    return auto_squawk_status()
+
+
+def auto_squawk_status() -> dict:
+    with _auto_lock:
+        out = {k: v for k, v in _auto_state.items() if k != "thread"}
+        out["running"] = bool(_auto_state.get("thread"))
+        return out
+
+
 def _rsi(closes: list[float], period: int = 14) -> float | None:
     if len(closes) < period + 1:
         return None

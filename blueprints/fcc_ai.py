@@ -109,6 +109,44 @@ def fcc_commentary_history():
     return jsonify({"status": "success", "history": fcc.get_commentary_history(limit)})
 
 
+@scalper_orderflow_bp.route("/fcc/commentary/auto", methods=["POST"])
+@app_key_required
+def fcc_commentary_auto():
+    """Start/stop the auto-squawk loop. Body: {enabled, symbol?, interval?}"""
+    try:
+        body = request.get_json(silent=True) or {}
+        st = fcc.set_auto_squawk(
+            enabled=bool(body.get("enabled")),
+            symbol=body.get("symbol"),
+            interval=body.get("interval"),
+        )
+        return jsonify({"status": "success", "auto": st})
+    except Exception as e:
+        logger.exception("fcc auto squawk toggle failed")
+        return jsonify({"status": "error", "message": str(e)[:300]}), 500
+
+
+@scalper_orderflow_bp.route("/fcc/commentary/auto", methods=["GET"])
+@app_key_required
+def fcc_commentary_auto_status():
+    return jsonify({"status": "success", "auto": fcc.auto_squawk_status()})
+
+
+@scalper_orderflow_bp.route("/fcc/lb-status", methods=["GET"])
+@app_key_required
+def fcc_lb_status():
+    """OpenAlgo load-balancer node health + which node served each route.
+    The LB lives in the terminal process, so proxy its status endpoint."""
+    try:
+        import os
+        import urllib.request
+        term = (os.getenv("FNO_TERMINAL_URL") or "http://127.0.0.1:8000").rstrip("/")
+        with urllib.request.urlopen(f"{term}/api/lb-status", timeout=4) as r:
+            return jsonify({"status": "success", "lb": json.loads(r.read().decode())})
+    except Exception as e:
+        return jsonify({"status": "success", "lb": {"error": str(e)[:120], "nodes": {}, "last_served": {}}})
+
+
 @scalper_orderflow_bp.route("/fcc/agent", methods=["POST"])
 @app_key_required
 def fcc_agent():

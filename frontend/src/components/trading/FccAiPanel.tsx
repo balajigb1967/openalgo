@@ -74,6 +74,10 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
   const [symbol, setSymbol] = useState('NIFTY')
   const [items, setItems] = useState<CommentaryItem[]>([])
   const [liveBusy, setLiveBusy] = useState(false)
+  const [auto, setAuto] = useState(false)
+
+  // load-balancer visibility (node health + last-served routes)
+  const [lb, setLb] = useState<{ nodes: Record<string, { ok: boolean; err?: string }>; last_served: Record<string, { node: string; ts: number }> } | null>(null)
 
   // agent
   const [agent, setAgent] = useState('')
@@ -92,7 +96,30 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
     fccFetch<{ connected: boolean; models: string[]; agents_available: Record<string, boolean> }>('/status')
       .then((d) => setStatus({ ...d, error: null }))
       .catch((e) => setStatus({ connected: false, models: [], agents_available: {}, error: String(e) }))
+    fccFetch<{ auto?: { enabled?: boolean } }>('/commentary/auto')
+      .then((d) => setAuto(!!d.auto?.enabled))
+      .catch(() => { /* auto optional */ })
   }, [])
+
+  // LB health strip refresh
+  useEffect(() => {
+    const load = () => fccFetch<{ nodes: Record<string, { ok: boolean; err?: string }>; last_served: Record<string, { node: string; ts: number }> }>('/lb-status')
+      .then((d) => setLb(d)).catch(() => setLb(null))
+    load()
+    const t = setInterval(load, 30_000)
+    return () => clearInterval(t)
+  }, [])
+
+  // auto-squawk: pull the server-generated bullets while the loop runs
+  useEffect(() => {
+    if (!auto) return
+    const t = setInterval(() => {
+      fccFetch<{ history: CommentaryItem[] }>('/commentary/history?limit=30')
+        .then((d) => setItems(d.history || []))
+        .catch(() => { /* next tick */ })
+    }, 20_000)
+    return () => clearInterval(t)
+  }, [auto])
 
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight })
@@ -174,6 +201,17 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
     } catch { /* best effort */ }
   }, [agentRun])
 
+  const toggleAuto = useCallback(async () => {
+    const next = !auto
+    try {
+      const d = await fccFetch<{ auto: { enabled?: boolean } }>('/commentary/auto', {
+        method: 'POST',
+        body: JSON.stringify({ enabled: next, symbol: symbol.trim() || undefined, interval: 60 }),
+      })
+      setAuto(!!d.auto?.enabled)
+    } catch { /* surfaced by the toggle not flipping */ }
+  }, [auto, symbol])
+
   const agents = status ? Object.entries(status.agents_available).filter(([, ok]) => ok).map(([a]) => a) : []
   const models = status?.models ?? []
 
@@ -204,6 +242,15 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
         className="h-7 flex-1 text-[12px]"
         placeholder="Symbol"
       />
+      <Button
+        size="sm"
+        variant={auto ? 'default' : 'secondary'}
+        className={cn('h-7 shrink-0 px-2 text-[10px]', auto && 'bg-emerald-600 hover:bg-emerald-600 text-white')}
+        onClick={toggleAuto}
+        title="Generate a squawk bullet every 60s (server-side, market hours only)"
+      >
+        {auto ? '● AUTO 60s' : 'AUTO 60s'}
+      </Button>
       {focus && symbol.trim() !== focus && (
         <Button size="sm" variant="ghost" className="h-7 shrink-0 px-2 text-[10px]" onClick={() => setSymbol(focus)}>
           use {focus}
@@ -244,6 +291,18 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
         {status && !status.connected && (
           <span className="shrink-0 text-[10px] font-medium text-destructive" title={status.error ?? ''}>
             offline
+          </span>
+        )}
+        {lb?.nodes && Object.keys(lb.nodes).length > 0 && (
+          <span className="flex shrink-0 items-center gap-1" title={Object.entries(lb.nodes)
+            .map(([n, h]) => `${n}: ${h.ok ? 'healthy' : `down (${h.err ?? '?'})`}`)
+            .join(' · ') + (lb.last_served && Object.keys(lb.last_served).length
+              ? '\n' + Object.entries(lb.last_served).map(([r, v]) => `${r} → ${v.node}`).join('\n')
+              : '')}>
+            {Object.entries(lb.nodes).map(([name, h]) => (
+              <span key={name} className={cn('h-1.5 w-1.5 rounded-full', h.ok ? 'bg-emerald-500' : 'bg-destructive animate-pulse')} />
+            ))}
+            <span className="text-[9.5px] text-muted-foreground">LB</span>
           </span>
         )}
         <div className="flex shrink-0 rounded-md border border-border text-[11px]">
