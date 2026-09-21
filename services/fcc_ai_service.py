@@ -606,7 +606,18 @@ def get_commentary_history(limit: int = 30) -> list[dict]:
 
 _auto_lock = threading.Lock()
 _auto_state: dict[str, Any] = {"enabled": False, "symbol": "NIFTY", "interval": 60,
-                               "last_error": "", "last_ts": 0.0, "thread": None}
+                               "last_error": "", "last_ts": 0.0, "thread": None,
+                               "expires_ts": 0.0, "stopped_reason": ""}
+
+# Squawk sessions self-expire so a forgotten toggle can't burn LLM tokens all
+# day; the UI shows the countdown and the server flips itself off.
+DEFAULT_SQUAWK_DURATION_MIN = 30
+MAX_SQUAWK_DURATION_MIN = 240
+
+# Event detection runs on a fast fixed cadence so bullets land as events
+# happen; the event engine inside generate_commentary keeps LLM spend gated
+# (silent when nothing new, per-family cooldowns otherwise).
+SQUAWK_SCAN_CADENCE_S = 20
 
 
 def _stored_api_key() -> str | None:
@@ -631,6 +642,7 @@ def _market_open_ist() -> bool:
 
 
 def _auto_loop() -> None:
+    last_poll = 0.0
     while True:
         with _auto_lock:
             if not _auto_state["enabled"]:
@@ -638,36 +650,61 @@ def _auto_loop() -> None:
                 return
             symbol = str(_auto_state["symbol"])
             interval = max(30, int(_auto_state["interval"] or 60))
+            # Session expiry: flip off once the requested duration is spent.
+            exp = float(_auto_state.get("expires_ts") or 0.0)
+            if exp and time.time() >= exp:
+                _auto_state["enabled"] = False
+                _auto_state["thread"] = None
+                _auto_state["stopped_reason"] = "auto-off after duration"
+                return
         err = ""
         if _market_open_ist():
-            try:
-                generate_commentary(symbol=symbol, api_key=_stored_api_key())
-            except Exception as e:  # noqa: BLE001
-                err = str(e)[:200]
-                logger.warning("auto squawk %s: %s", symbol, err)
-        with _auto_lock:
-            _auto_state["last_error"] = err
-            if not err:
-                _auto_state["last_ts"] = time.time()
-        # sleep in short slices so a disable is honoured quickly
-        deadline = time.time() + interval
+            # Fast event scan: check for events every SQUAWK_SCAN_CADENCE_S
+            # independent of the LLM interval. The event engine inside
+            # generate_commentary gates LLM spend (silent when nothing new,
+            # per-family cooldowns otherwise), so bullets land as events happen.
+            now = time.time()
+            if now - last_poll >= SQUAWK_SCAN_CADENCE_S:
+                last_poll = now
+                try:
+                    generate_commentary(symbol=symbol, api_key=_stored_api_key())
+                except Exception as e:  # noqa: BLE001
+                    err = str(e)[:200]
+                    logger.warning("auto squawk %s: %s", symbol, err)
+                with _auto_lock:
+                    _auto_state["last_error"] = err
+                    if not err:
+                        _auto_state["last_ts"] = time.time()
+        # sleep in short slices so a disable/expiry is honoured quickly
+        deadline = time.time() + 1.0
         while time.time() < deadline:
             with _auto_lock:
                 if not _auto_state["enabled"]:
                     _auto_state["thread"] = None
                     return
-            time.sleep(1.0)
+            time.sleep(0.25)
 
 
 def set_auto_squawk(enabled: bool, symbol: str | None = None,
-                    interval: int | None = None) -> dict:
-    """Start/stop the 60s auto-squawk loop for a symbol."""
+                    interval: int | None = None,
+                    duration_min: int | None = None) -> dict:
+    """Start/stop the auto-squawk loop for a symbol.
+
+    Sessions auto-expire after ``duration_min`` minutes (default 30, cap 240)
+    so a forgotten toggle cannot burn LLM tokens all day; status carries the
+    countdown (``expires_in``) and ``stopped_reason`` when it flips off."""
     with _auto_lock:
         _auto_state["enabled"] = bool(enabled)
         if symbol:
             _auto_state["symbol"] = str(symbol).upper().split(":")[-1]
         if interval:
             _auto_state["interval"] = max(30, int(interval))
+        if enabled:
+            mins = int(duration_min or DEFAULT_SQUAWK_DURATION_MIN)
+            _auto_state["expires_ts"] = time.time() + max(1, min(mins, MAX_SQUAWK_DURATION_MIN)) * 60
+            _auto_state["stopped_reason"] = ""
+        else:
+            _auto_state["expires_ts"] = 0.0
         if enabled and not _auto_state["thread"]:
             t = threading.Thread(target=_auto_loop, name="fcc-auto-squawk", daemon=True)
             _auto_state["thread"] = t
@@ -679,6 +716,10 @@ def auto_squawk_status() -> dict:
     with _auto_lock:
         out = {k: v for k, v in _auto_state.items() if k != "thread"}
         out["running"] = bool(_auto_state.get("thread"))
+        exp = float(out.get("expires_ts") or 0.0)
+        out["expires_in"] = max(0, int(exp - time.time())) if (out.get("enabled") and exp) else 0
+        if not out.get("enabled"):
+            out["expires_ts"] = 0.0
         return out
 
 
