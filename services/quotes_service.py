@@ -1,5 +1,10 @@
 import importlib
+import os
+import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+import httpx
 
 from database.auth_db import get_auth_token_broker
 from database.token_db import get_token
@@ -8,6 +13,123 @@ from utils.logging import get_logger
 
 # Initialize logger
 logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Peer-instance failover
+#
+# When the local broker's data plane is unavailable (dead/expired token, API
+# outage), transparently retry quotes against a sibling OpenAlgo instance on
+# the same host carrying a different broker (e.g. the Fyers instance failing
+# over to the Flattrade instance). Opt-in via PEER_OPENALGO_URL and
+# PEER_OPENALGO_API_KEY. A thread-local guard stops failover chains from
+# recursing (A -> B -> A -> ...), and a cooldown keeps every quote poll from
+# paying the peer latency penalty while the peer is known-down.
+# ---------------------------------------------------------------------------
+
+def _peer_config() -> tuple[str, str, float, float]:
+    """Read peer settings lazily so .env load order never matters."""
+    return (
+        os.getenv("PEER_OPENALGO_URL", "").strip(),
+        os.getenv("PEER_OPENALGO_API_KEY", "").strip(),
+        float(os.getenv("PEER_OPENALGO_TIMEOUT", "6")),
+        float(os.getenv("PEER_OPENALGO_COOLDOWN", "300")),
+    )
+
+
+_peer_lock = threading.Lock()
+_peer_down_until = 0.0
+_peer_inflight = threading.local()
+
+
+def _peer_available() -> bool:
+    url, key, _, _ = _peer_config()
+    return bool(url and key) and time.monotonic() >= _peer_down_until
+
+
+def _mark_peer_down(seconds: float | None = None) -> None:
+    global _peer_down_until
+    _, _, _, cooldown = _peer_config()
+    with _peer_lock:
+        _peer_down_until = time.monotonic() + (seconds if seconds is not None else cooldown)
+
+
+def _peer_post(path: str, payload: dict) -> dict | None:
+    """POST to the peer instance; None on any failure (cooldown armed)."""
+    if getattr(_peer_inflight, "active", False):
+        return None  # already inside a peer call on this thread - never recurse
+    url_base, key, timeout, _ = _peer_config()
+    if not (url_base and key):
+        return None
+    _peer_inflight.active = True
+    try:
+        url = url_base.rstrip("/") + path
+        try:
+            resp = httpx.post(url, json={**payload, "apikey": key}, timeout=timeout)
+            if resp.status_code == 429:
+                # Peer alive but rate-limited - retry again soon.
+                _mark_peer_down(30.0)
+                return None
+            if resp.status_code == 200:
+                return resp.json()
+            logger.debug(f"Peer {url} -> HTTP {resp.status_code}")
+            if resp.status_code >= 500 or resp.status_code in (401, 403):
+                # Peer down or misconfigured - back off for the whole cooldown.
+                _mark_peer_down()
+            # 4xx (e.g. symbol absent on the peer's master contracts) is
+            # request-specific: return None without arming the cooldown.
+            return None
+        except Exception as exc:
+            logger.debug(f"Peer {url} failed: {exc}")
+            _mark_peer_down()
+            return None
+    finally:
+        _peer_inflight.active = False
+
+
+def _response_has_data(response: Any) -> bool:
+    """True when a quotes/multiquotes response carries at least one usable LTP."""
+    if not isinstance(response, dict) or response.get("status") != "success":
+        return False
+    data = response.get("data")
+    if isinstance(data, dict):
+        return bool(data.get("ltp"))
+    results = response.get("results")
+    if isinstance(results, list):
+        return any(
+            isinstance(r, dict) and isinstance(r.get("data"), dict) and r["data"].get("ltp")
+            for r in results
+        )
+    return False
+
+
+def _try_peer_quotes(symbol: str, exchange: str, local_broker: str) -> dict | None:
+    """Fetch a single quote from the peer instance; None if unavailable."""
+    if not _peer_available():
+        return None
+    peer = _peer_post(
+        "/api/v1/quotes",
+        {"symbol": symbol, "exchange": exchange},
+    )
+    if peer is not None and _response_has_data(peer):
+        logger.info(
+            f"Quote {exchange}:{symbol} served by peer instance (local broker '{local_broker}' unusable)"
+        )
+        return peer
+    return None
+
+
+def _try_peer_multiquotes(symbols: list, local_broker: str) -> dict | None:
+    """Fetch multiquotes from the peer instance; None if unavailable."""
+    if not _peer_available():
+        return None
+    peer = _peer_post("/api/v1/multiquotes", {"symbols": symbols})
+    if peer is not None and _response_has_data(peer):
+        logger.info(
+            f"Multiquotes ({len(symbols)} symbols) served by peer instance (local broker '{local_broker}' unusable)"
+        )
+        return peer
+    return None
 
 
 def validate_symbol_exchange(symbol: str, exchange: str) -> tuple[bool, str | None]:
@@ -187,7 +309,13 @@ def get_quotes(
         )
         if AUTH_TOKEN is None:
             return False, {"status": "error", "message": "Invalid openalgo apikey"}, 403
-        return get_quotes_with_auth(AUTH_TOKEN, FEED_TOKEN, broker_name, symbol, exchange)
+        result = get_quotes_with_auth(AUTH_TOKEN, FEED_TOKEN, broker_name, symbol, exchange)
+        # Peer-instance failover: local broker data plane unusable -> sibling
+        if not _response_has_data(result[1]):
+            peer = _try_peer_quotes(symbol, exchange, broker_name)
+            if peer is not None:
+                return True, peer, 200
+        return result
 
     # Case 2: Direct internal call with auth_token and broker
     elif auth_token and broker:
@@ -355,7 +483,13 @@ def get_multiquotes(
         )
         if AUTH_TOKEN is None:
             return False, {"status": "error", "message": "Invalid openalgo apikey"}, 403
-        return get_multiquotes_with_auth(AUTH_TOKEN, FEED_TOKEN, broker_name, symbols)
+        result = get_multiquotes_with_auth(AUTH_TOKEN, FEED_TOKEN, broker_name, symbols)
+        # Peer-instance failover: every result entry missing usable data -> sibling
+        if not _response_has_data(result[1]):
+            peer = _try_peer_multiquotes(symbols, broker_name)
+            if peer is not None:
+                return True, peer, 200
+        return result
 
     # Case 2: Direct internal call with auth_token and broker
     elif auth_token and broker:
