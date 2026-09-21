@@ -72,7 +72,6 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
 
   // live
   const [symbol, setSymbol] = useState('NIFTY')
-  const [expiresIn, setExpiresIn] = useState(0)
   const [items, setItems] = useState<CommentaryItem[]>([])
   const [liveBusy, setLiveBusy] = useState(false)
   const [liveNote, setLiveNote] = useState('')
@@ -98,10 +97,9 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
     fccFetch<{ connected: boolean; models: string[]; agents_available: Record<string, boolean> }>('/status')
       .then((d) => setStatus({ ...d, error: null }))
       .catch((e) => setStatus({ connected: false, models: [], agents_available: {}, error: String(e) }))
-    fccFetch<{ auto?: { enabled?: boolean; expires_in?: number } }>('/commentary/auto')
+    fccFetch<{ auto?: { enabled?: boolean } }>('/commentary/auto')
       .then((d) => {
         setAuto(!!d.auto?.enabled)
-        setExpiresIn(d.auto?.expires_in ?? 0)
       })
       .catch(() => { /* auto optional */ })
   }, [])
@@ -124,11 +122,10 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
       fccFetch<{ history: CommentaryItem[] }>('/commentary/history?limit=30')
         .then((d) => setItems(d.history || []))
         .catch(() => { /* next tick */ })
-      fccFetch<{ auto?: { enabled?: boolean; expires_in?: number } }>('/commentary/auto')
+      fccFetch<{ auto?: { enabled?: boolean } }>('/commentary/auto')
         .then((d) => {
           const on = !!d.auto?.enabled
           setAuto(on)
-          setExpiresIn(d.auto?.expires_in ?? 0)
           if (!on) clearInterval(t)
         })
         .catch(() => { /* next tick */ })
@@ -136,12 +133,7 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
     return () => clearInterval(t)
   }, [auto])
 
-  // smooth 1s countdown between server status polls
-  useEffect(() => {
-    if (!auto || expiresIn <= 0) return
-    const t = setInterval(() => setExpiresIn((s) => Math.max(0, s - 1)), 1000)
-    return () => clearInterval(t)
-  }, [auto, expiresIn > 0])
+
 
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight })
@@ -237,7 +229,7 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
     try {
       const d = await fccFetch<{ auto: { enabled?: boolean } }>('/commentary/auto', {
         method: 'POST',
-        body: JSON.stringify({ enabled: next, symbol: symbol.trim() || undefined, interval: 60, duration_min: 30 }),
+        body: JSON.stringify({ enabled: next, symbol: symbol.trim() || undefined, interval: 60 }),
       })
       setAuto(!!d.auto?.enabled)
     } catch { /* surfaced by the toggle not flipping */ }
@@ -280,9 +272,9 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
         variant={auto ? 'default' : 'secondary'}
         className={cn('h-7 shrink-0 px-2 text-[10px]', auto && 'bg-emerald-600 hover:bg-emerald-600 text-white')}
         onClick={toggleAuto}
-        title="Squawks fire as live events happen; the session auto-offs after 30 min (market hours only)"
+        title="Live feed on/off — bullets fire as events happen, market hours only; runs until switched off"
       >
-        {auto ? `● AUTO ${expiresIn > 0 ? `${Math.max(1, Math.ceil(expiresIn / 60))}m` : 'ON'}` : 'AUTO 30m'}
+        {auto ? '● LIVE' : 'LIVE OFF'}
       </Button>
       {focus && symbol.trim() !== focus && (
         <Button size="sm" variant="ghost" className="h-7 shrink-0 px-2 text-[10px]" onClick={() => setSymbol(focus)}>

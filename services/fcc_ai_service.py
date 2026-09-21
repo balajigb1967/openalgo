@@ -608,12 +608,11 @@ _auto_lock = threading.Lock()
 _AUTO_STATE_PATH = os.path.join(PROJECT_ROOT, ".fcc_squawk_state.json")
 _auto_state: dict[str, Any] = {"enabled": False, "symbol": "NIFTY", "interval": 60,
                                "last_error": "", "last_ts": 0.0, "thread": None,
-                               "expires_ts": 0.0, "stopped_reason": ""}
+                               "stopped_reason": ""}
 
-# Squawk sessions self-expire so a forgotten toggle can't burn LLM tokens all
-# day; the UI shows the countdown and the server flips itself off.
-DEFAULT_SQUAWK_DURATION_MIN = 30
-MAX_SQUAWK_DURATION_MIN = 240
+# Squawk runs until the operator switches it off — no session timer. The
+# event engine keeps LLM spend gated (silent when nothing new, per-family
+# cooldowns), and the market-hours guard pauses scans outside NSE hours.
 
 # Event detection runs on a fast fixed cadence so bullets land as events
 # happen; the event engine inside generate_commentary keeps LLM spend gated
@@ -651,14 +650,6 @@ def _auto_loop() -> None:
                 return
             symbol = str(_auto_state["symbol"])
             interval = max(30, int(_auto_state["interval"] or 60))
-            # Session expiry: flip off once the requested duration is spent.
-            exp = float(_auto_state.get("expires_ts") or 0.0)
-            if exp and time.time() >= exp:
-                _auto_state["enabled"] = False
-                _auto_state["thread"] = None
-                _auto_state["stopped_reason"] = "auto-off after duration"
-                _persist_auto_state()
-                return
         err = ""
         if _market_open_ist():
             # Fast event scan: check for events every SQUAWK_SCAN_CADENCE_S
@@ -677,7 +668,7 @@ def _auto_loop() -> None:
                     _auto_state["last_error"] = err
                     if not err:
                         _auto_state["last_ts"] = time.time()
-        # sleep in short slices so a disable/expiry is honoured quickly
+        # sleep in short slices so a disable is honoured quickly
         deadline = time.time() + 1.0
         while time.time() < deadline:
             with _auto_lock:
@@ -689,13 +680,11 @@ def _auto_loop() -> None:
 
 
 def set_auto_squawk(enabled: bool, symbol: str | None = None,
-                    interval: int | None = None,
-                    duration_min: int | None = None) -> dict:
+                    interval: int | None = None) -> dict:
     """Start/stop the auto-squawk loop for a symbol.
 
-    Sessions auto-expire after ``duration_min`` minutes (default 30, cap 240)
-    so a forgotten toggle cannot burn LLM tokens all day; status carries the
-    countdown (``expires_in``) and ``stopped_reason`` when it flips off."""
+    No session timer: the loop runs until switched off (it pauses itself
+    outside market hours and survives restarts via the persisted state)."""
     with _auto_lock:
         _auto_state["enabled"] = bool(enabled)
         if symbol:
@@ -703,11 +692,7 @@ def set_auto_squawk(enabled: bool, symbol: str | None = None,
         if interval:
             _auto_state["interval"] = max(30, int(interval))
         if enabled:
-            mins = int(duration_min or DEFAULT_SQUAWK_DURATION_MIN)
-            _auto_state["expires_ts"] = time.time() + max(1, min(mins, MAX_SQUAWK_DURATION_MIN)) * 60
             _auto_state["stopped_reason"] = ""
-        else:
-            _auto_state["expires_ts"] = 0.0
         if enabled and not _auto_state["thread"]:
             t = threading.Thread(target=_auto_loop, name="fcc-auto-squawk", daemon=True)
             _auto_state["thread"] = t
@@ -721,7 +706,7 @@ def _persist_auto_state() -> None:
     Best effort — a dead disk never blocks the toggle."""
     try:
         snap = {k: v for k, v in _auto_state.items() if k in
-                ("enabled", "symbol", "interval", "expires_ts")}
+                ("enabled", "symbol", "interval")}
         with open(_AUTO_STATE_PATH, "w") as f:
             json.dump(snap, f)
     except Exception as e:
@@ -732,23 +717,15 @@ def _resume_on_boot() -> None:
     """Re-arm a squawk session persisted by a previous process generation.
 
     Loop state lives in memory, so every restart (deploy, crash, reboot)
-    silently killed a running squawk — it always died "before the timer
-    ended". The persisted expires_ts lets a fresh process pick the session
-    back up with its remaining time instead. Idempotent: only fires when the
-    current generation has no session yet."""
+    silently killed a running squawk. The persisted flag lets a fresh process
+    pick the session back up and run until switched off. Idempotent: only
+    fires when the current generation has no session yet."""
     try:
         with open(_AUTO_STATE_PATH, "r") as f:
             saved = json.load(f)
     except Exception:
         return
     if not isinstance(saved, dict) or not saved.get("enabled"):
-        return
-    exp = float(saved.get("expires_ts") or 0.0)
-    if time.time() >= exp:
-        try:
-            os.remove(_AUTO_STATE_PATH)
-        except Exception:
-            pass
         return
     with _auto_lock:
         if _auto_state.get("enabled") or _auto_state.get("thread"):
@@ -757,14 +734,12 @@ def _resume_on_boot() -> None:
             "enabled": True,
             "symbol": str(saved.get("symbol") or "NIFTY"),
             "interval": max(30, int(saved.get("interval") or 60)),
-            "expires_ts": exp,
             "stopped_reason": "",
         })
         t = threading.Thread(target=_auto_loop, name="fcc-auto-squawk", daemon=True)
         _auto_state["thread"] = t
         t.start()
-    logger.info("resumed auto-squawk for %s (expires in %ds)",
-                saved.get("symbol"), int(exp - time.time()))
+    logger.info("resumed auto-squawk for %s", saved.get("symbol"))
 
 
 def auto_squawk_status() -> dict:
@@ -772,10 +747,6 @@ def auto_squawk_status() -> dict:
     with _auto_lock:
         out = {k: v for k, v in _auto_state.items() if k != "thread"}
         out["running"] = bool(_auto_state.get("thread"))
-        exp = float(out.get("expires_ts") or 0.0)
-        out["expires_in"] = max(0, int(exp - time.time())) if (out.get("enabled") and exp) else 0
-        if not out.get("enabled"):
-            out["expires_ts"] = 0.0
         return out
 
 

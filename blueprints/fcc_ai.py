@@ -117,17 +117,16 @@ def fcc_commentary_history():
 @scalper_orderflow_bp.route("/fcc/commentary/auto", methods=["POST"])
 @app_key_required
 def fcc_commentary_auto():
-    """Start/stop the auto-squawk loop. Body: {enabled, symbol?, interval?, duration_min?}
+    """Start/stop the auto-squawk loop. Body: {enabled, symbol?, interval?}
 
-    Sessions self-expire after duration_min (default 30 min) — the loop flips
-    itself off and status carries expires_in / stopped_reason."""
+    No session timer — the loop runs until switched off (it pauses itself
+    outside market hours and survives restarts via persisted state)."""
     try:
         body = request.get_json(silent=True) or {}
         st = fcc.set_auto_squawk(
             enabled=bool(body.get("enabled")),
             symbol=body.get("symbol"),
             interval=body.get("interval"),
-            duration_min=body.get("duration_min"),
         )
         return jsonify({"status": "success", "auto": st})
     except Exception as e:
