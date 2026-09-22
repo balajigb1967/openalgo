@@ -9,7 +9,7 @@ import {
 } from '@/api/scalper-orderflow'
 import { PanelShell } from './panelShell'
 import { cn } from '@/lib/utils'
-import { setSyncTarget, type ScalperTarget } from '@/lib/scalperSync'
+import { setSyncTarget, setSyncSymbol, type ScalperTarget } from '@/lib/scalperSync'
 import { showToast } from '@/utils/toast'
 
 /**
@@ -79,15 +79,25 @@ const CHARTABLE_KEY: Record<string, string> = {
 function publishSync(t: { key: string; market?: string | null; side?: string | null; strike?: number | null }): void {
   if (!t.key) return
   const chartable = CHARTABLE_KEY[t.key.toUpperCase()] ?? t.key
+  const exch = exchangeForMarket(t.market)
   const target: ScalperTarget = {
     key: t.key,
     underlying: chartable,
-    exchange: exchangeForMarket(t.market),
+    exchange: exch,
     side: (t.side === 'PE' ? 'PE' : 'CE'),
     strike: typeof t.strike === 'number' ? t.strike : 0,
     source: 'alert',
   }
   setSyncTarget(target)
+  setSyncSymbol(`${exch}:${chartable}`)
+
+  // Trigger squawk automatically for the synced symbol
+  fetch('/plugins/fcc/commentary/auto', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: true, symbol: chartable }),
+  }).catch(() => {})
+
   showToast.success(
     `Advisor: ${t.key} BUY ${target.side}${t.strike ? ` @${t.strike}` : ''} — synced`,
     'orders'
@@ -162,21 +172,40 @@ function AdviceCard({
   adv,
   onArm,
   onDisarm,
+  onSync,
+  activeSymbol,
   busy,
 }: {
   adv: ScalperAdvice
   onArm: (key: string) => void
   onDisarm: (key: string) => void
+  onSync: (item: { key: string; market?: string | null; side?: string | null; strike?: number | null }) => void
+  activeSymbol?: string | null
   busy: string | null
 }) {
   const [open, setOpen] = useState(false)
   const isBuy = adv.signal === 'BUY CE' || adv.signal === 'BUY PE'
   const pnl = adv.armed_pnl_pct
   const isBusy = busy === adv.key
+  const isActive = Boolean(
+    activeSymbol && (
+      activeSymbol.toUpperCase().includes(adv.key.toUpperCase()) ||
+      adv.key.toUpperCase().includes((activeSymbol.split(':')[1] || activeSymbol).toUpperCase())
+    )
+  )
   return (
-    <div className={cn('rounded-md border bg-card/50 px-2 py-1.5', adv.armed ? 'border-primary/50' : 'border-border')}>
+    <div
+      className={cn(
+        'rounded-md border bg-card/50 px-2 py-1.5 transition-colors',
+        isActive ? 'ring-1 ring-primary bg-primary/10' : adv.armed ? 'border-primary/50' : 'border-border'
+      )}
+    >
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 min-w-0">
+        <div
+          className="flex items-center gap-1.5 min-w-0 cursor-pointer"
+          onClick={() => onSync({ key: adv.key, market: adv.market, side: adv.side, strike: adv.strike })}
+          title="Click to sync chart & squawk"
+        >
           {adv.armed && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-emerald-500" title="Monitor armed" />}
           <span className="text-[11px] font-semibold text-foreground truncate">{adv.name}</span>
           {adv.spot !== null && (
@@ -246,7 +275,7 @@ function AdviceCard({
             // WAIT/NO_DATA advisories too (weekend/off-market rows were greyed
             // out and the button looked dead).
             disabled={isBusy || !adv.key}
-            onClick={() => publishSync({ key: adv.key, market: adv.market, side: adv.side, strike: adv.strike })}
+            onClick={() => onSync({ key: adv.key, market: adv.market, side: adv.side, strike: adv.strike })}
           />
           {isBuy ? (
             adv.armed ? (
@@ -448,13 +477,28 @@ function MonitorTab({ armedMap, alerts, onDisarm, onCloseAlert, onSync, onRevise
   )
 }
 
-export function ScalperAdvisorPanel({ activeSymbol }: { apiKey: string; activeSymbol?: string | null }) {
+export function ScalperAdvisorPanel({
+  activeSymbol,
+  onPick,
+}: {
+  apiKey: string
+  activeSymbol?: string | null
+  onPick?: (row: { symbol: string; exchange: string }) => void
+}) {
   const [data, setData] = useState<ScalperAdvisorResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<'signals' | 'monitor' | 'events'>('signals')
   const [busy, setBusy] = useState<string | null>(null)
   const [autoArm, setAutoArm] = useState<boolean>(() => localStorage.getItem('oa-scalper-autoarm') === '1')
+
+  const handleSync = (t: { key: string; market?: string | null; side?: string | null; strike?: number | null }) => {
+    publishSync(t)
+    if (onPick && t.key) {
+      const chartable = CHARTABLE_KEY[t.key.toUpperCase()] ?? t.key
+      onPick({ symbol: chartable, exchange: exchangeForMarket(t.market) })
+    }
+  }
 
   const load = async (
     refresh = false,
@@ -608,7 +652,15 @@ export function ScalperAdvisorPanel({ activeSymbol }: { apiKey: string; activeSy
 
         {tab === 'signals' &&
           (data?.instruments ?? []).map((adv) => (
-            <AdviceCard key={adv.key} adv={adv} onArm={handleArm} onDisarm={handleDisarm} busy={busy} />
+            <AdviceCard
+              key={adv.key}
+              adv={adv}
+              onArm={handleArm}
+              onDisarm={handleDisarm}
+              onSync={handleSync}
+              activeSymbol={activeSymbol}
+              busy={busy}
+            />
           ))}
 
         {tab === 'monitor' && (
@@ -617,7 +669,7 @@ export function ScalperAdvisorPanel({ activeSymbol }: { apiKey: string; activeSy
             alerts={alerts}
             onDisarm={handleDisarm}
             onCloseAlert={closeAlert}
-            onSync={publishSync}
+            onSync={handleSync}
             onRevise={handleRevise}
             busy={busy}
           />

@@ -1,14 +1,33 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  Activity,
+  Bookmark,
+  Zap,
+} from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useDefaultLayout } from 'react-resizable-panels'
+import { scalperApi, type ScalperAlert } from '@/api/scalper-orderflow'
 import { scalpingApi } from '@/api/scalping'
 import { type QuotesData, tradingApi } from '@/api/trading'
+import { watchlistApi } from '@/api/watchlist'
+import { Navbar } from '@/components/layout/Navbar'
+import { DepthTable } from '@/components/scalping/DepthTable'
 import { ScalpChart } from '@/components/scalping/ScalpChart'
 import { SetSLDialog } from '@/components/scalping/SetSLDialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover'
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from '@/components/ui/resizable'
 import {
   Select,
   SelectContent,
@@ -28,10 +47,20 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useMarketData } from '@/hooks/useMarketData'
 import { useOrderEventRefresh } from '@/hooks/useOrderEventRefresh'
-import { findLegSL, type SLState, useTrailingSL } from '@/hooks/useTrailingSL'
+import { findLegSL, useTrailingSL } from '@/hooks/useTrailingSL'
 import { priceDecimals } from '@/lib/scalpingPrice'
 import { buildPositionRows } from '@/lib/scalpingRows'
 import { mergeTick, type TickView } from '@/lib/scalpingTick'
+import {
+  getSyncTarget,
+  type ScalperSyncState,
+  type ScalperTarget,
+  setSyncSymbol,
+  setSyncTarget,
+  subscribeSync,
+  subscribeSyncTarget,
+} from '@/lib/scalperSync'
+import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/authStore'
 import { useThemeStore } from '@/stores/themeStore'
 import type {
@@ -48,20 +77,15 @@ import { showToast } from '@/utils/toast'
 
 const DEFAULT_STRIKE_COUNT = 10
 const MAX_LOTS = 20
-const ORDER_COOLDOWN_MS = 120 // min gap between two order fires (anti double-fire)
+const ORDER_COOLDOWN_MS = 120
 const ARMED_STORAGE_KEY = 'scalping.armed'
-// Live charts are OFF by default (opt-in). Three live candlestick charts each
-// open their own market-data subscription and poll broker history, so keeping
-// them off unless wanted spares CPU/network. The choice persists across reloads.
 const CHARTS_STORAGE_KEY = 'scalping.showCharts'
 const CHART_TF_STORAGE_KEY = 'scalping.chartTf'
 const CHART_TIMEFRAMES = ['1m', '5m', '15m'] as const
 
-// NSE/BSE = equity; NFO/BFO/MCX/CDS = derivatives (options + futures).
 type ScalpingExchange = 'NSE' | 'BSE' | 'NFO' | 'BFO' | 'MCX' | 'CDS'
 const EXCHANGES: ScalpingExchange[] = ['NSE', 'BSE', 'NFO', 'BFO', 'MCX', 'CDS']
 
-// Default underlying per F&O exchange (user can change via search).
 const DEFAULT_UNDERLYING: Record<string, string> = {
   NFO: 'NIFTY',
   BFO: 'SENSEX',
@@ -71,20 +95,15 @@ const DEFAULT_UNDERLYING: Record<string, string> = {
 
 const isEquityExchange = (e: ScalpingExchange) => e === 'NSE' || e === 'BSE'
 
-// Keep the Order/Trade books to TODAY only. Broker/sandbox books are already
-// session-scoped server-side; this is a belt-and-suspenders guard so a stale or
-// multi-day book can never show prior-day rows. Timestamps come through as
-// "YYYY-MM-DD HH:MM:SS" (IST); unknown/unparseable formats are kept (not hidden).
 const isTodayTs = (ts?: string): boolean => {
   if (!ts) return true
-  const todayKey = new Date().toLocaleDateString('en-CA') // local YYYY-MM-DD
+  const todayKey = new Date().toLocaleDateString('en-CA')
   if (/^\d{4}-\d{2}-\d{2}/.test(ts)) return ts.slice(0, 10) === todayKey
   const d = new Date(ts)
   if (Number.isNaN(d.getTime())) return true
   return d.toLocaleDateString('en-CA') === todayKey
 }
 
-// Order/position events that should refresh the books (event-driven, no polling).
 const BOOK_EVENTS = [
   'order_event',
   'analyzer_update',
@@ -93,15 +112,9 @@ const BOOK_EVENTS = [
   'modify_order_event',
 ] as const
 
-// A WebSocket tick considered stale after this -> fall back to MultiQuotes.
 const TICK_STALE_MS = 5000
-
-// Collapse rapid book-refresh triggers (multi-leg entries, and the SocketIO order events
-// for several legs arriving together) into at most one refetch per window, so we don't
-// hammer the broker's order/trade/position endpoints.
 const REFRESH_THROTTLE_MS = 400
 
-// Which leg/product the Set-SL dialog is editing.
 interface SLTarget {
   symbol: string
   exchange: string
@@ -109,7 +122,6 @@ interface SLTarget {
   optionType: OptionType
 }
 
-// Read the persisted One-Click arm state (captured across reloads).
 function loadArmed(): boolean {
   try {
     return localStorage.getItem(ARMED_STORAGE_KEY) === '1'
@@ -118,8 +130,6 @@ function loadArmed(): boolean {
   }
 }
 
-// Read the persisted charts on/off preference. Defaults to OFF (charts are
-// opt-in) — a missing key reads as off.
 function loadShowCharts(): boolean {
   try {
     return localStorage.getItem(CHARTS_STORAGE_KEY) === '1'
@@ -128,19 +138,16 @@ function loadShowCharts(): boolean {
   }
 }
 
-// Read the persisted chart timeframe, falling back to 1m if unset/invalid.
 function loadChartTf(): string {
   try {
     const v = localStorage.getItem(CHART_TF_STORAGE_KEY)
     if (v && (CHART_TIMEFRAMES as readonly string[]).includes(v)) return v
   } catch {
-    // ignore storage failures (private mode, etc.)
+    // ignore
   }
   return '1m'
 }
 
-// Pull the trader-friendly reason out of an API error (e.g. the broker/sandbox
-// rejection message), falling back to the axios/network message.
 function apiErrorMessage(e: unknown): string {
   const err = e as { response?: { data?: { message?: string } }; message?: string }
   return err.response?.data?.message || err.message || 'Order failed'
@@ -164,23 +171,10 @@ function buildLeg(
   }
 }
 
-interface TickerProps {
-  title: string
-  symbol?: string
-  ltp?: number
-  change?: number
-  changePercent?: number
-  open?: number
-  high?: number
-  low?: number
-  decimals?: number
-}
-
 const pctInRange = (v: number, low: number, high: number) =>
   high > low ? Math.min(100, Math.max(0, ((v - low) / (high - low)) * 100)) : 50
 
-// Horizontal Low→High range bar with markers for Open (○) and current LTP (▼).
-function RangeBar({
+function RangeBarCompact({
   ltp,
   open,
   high,
@@ -194,92 +188,87 @@ function RangeBar({
   decimals?: number
 }) {
   if (ltp == null || high == null || low == null || high <= low) {
-    return <div className="my-3 h-px w-full bg-border" />
+    return <div className="h-1 w-full bg-border/40 rounded my-1" />
   }
   const ltpPct = pctInRange(ltp, low, high)
   const openPct = open != null ? pctInRange(open, low, high) : null
   return (
-    <div className="my-1">
-      <div className="flex justify-between font-mono text-[11px] text-muted-foreground">
-        <span>L: {low.toFixed(decimals)}</span>
-        <span>{high.toFixed(decimals)} :H</span>
-      </div>
-      <div className="relative my-2 h-1 rounded bg-muted">
+    <div className="my-0.5">
+      <div className="relative h-1.5 rounded bg-muted/60">
         {openPct != null && (
           <span
-            className="-translate-x-1/2 -translate-y-1/2 absolute top-1/2 h-2.5 w-2.5 rounded-full border-2 border-muted-foreground bg-background"
+            className="-translate-x-1/2 -translate-y-1/2 absolute top-1/2 h-2 w-2 rounded-full border border-muted-foreground bg-background"
             style={{ left: `${openPct}%` }}
-            title={`Open ${open?.toFixed(decimals)}`}
+            title={`Open: ${open?.toFixed(decimals)}`}
           />
         )}
         <span
-          className="-translate-x-1/2 -top-1 absolute text-[10px] text-foreground"
+          className="-translate-x-1/2 -top-1 absolute text-[8px] text-foreground font-bold"
           style={{ left: `${ltpPct}%` }}
-          title={`LTP ${ltp.toFixed(decimals)}`}
+          title={`LTP: ${ltp.toFixed(decimals)}`}
         >
-          ▲
+          ▼
         </span>
+      </div>
+      <div className="flex justify-between font-mono text-[9px] text-muted-foreground mt-0.5">
+        <span>L: {low.toFixed(decimals)}</span>
+        {open != null && <span>O: {open.toFixed(decimals)}</span>}
+        <span>H: {high.toFixed(decimals)}</span>
       </div>
     </div>
   )
 }
 
-function Ticker({
-  title,
-  symbol,
-  ltp,
-  change,
-  changePercent,
-  open,
-  high,
-  low,
-  decimals = 2,
-}: TickerProps) {
-  const isUp = (changePercent ?? change ?? 0) >= 0
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm text-muted-foreground">{title}</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="font-mono text-xs text-muted-foreground">{symbol ?? '—'}</div>
-        <RangeBar ltp={ltp} open={open} high={high} low={low} decimals={decimals} />
-        <div className="flex items-baseline gap-2">
-          <span className="font-mono text-2xl font-semibold tabular-nums">
-            {ltp != null ? ltp.toFixed(decimals) : '—'}
-          </span>
-          {(change != null || changePercent != null) && (
-            <span className={`font-mono text-sm ${isUp ? 'text-green-600' : 'text-red-600'}`}>
-              {isUp ? '+' : ''}
-              {change != null ? change.toFixed(decimals) : ''}
-              {changePercent != null ? ` (${changePercent.toFixed(2)}%)` : ''}
-            </span>
-          )}
-        </div>
-        {open != null && (
-          <div className="mt-1 font-mono text-[11px] text-muted-foreground">
-            O {open.toFixed(decimals)}
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  )
+function cleanRoot(s: string): string {
+  return s
+    .replace(/(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d*/gi, '')
+    .replace(/\d+$/, '')
+    .trim()
+}
+
+const safeLayoutStorage = {
+  getItem: (key: string): string | null => {
+    try {
+      return localStorage.getItem(key)
+    } catch {
+      return null
+    }
+  },
+  setItem: (key: string, value: string): void => {
+    try {
+      localStorage.setItem(key, value)
+    } catch {
+      // ignore
+    }
+  },
 }
 
 export default function Scalping() {
   const apiKey = useAuthStore((s) => s.apiKey)
-  const appMode = useThemeStore((s) => s.appMode) // 'live' | 'analyzer'
+  const appMode = useThemeStore((s) => s.appMode)
   const queryClient = useQueryClient()
 
-  // Exchange / segment. NSE/BSE = Equity; NFO/BFO/MCX/CDS = derivatives with
-  // Options (dual-leg CE/PE) or Futures (single instrument). Default = NFO.
+  // Layout persistence for dragging & resizing
+  const verticalLayout = useDefaultLayout({
+    id: 'oa-scalper-v3-dock',
+    storage: safeLayoutStorage,
+  })
+  const optionsColumnsLayout = useDefaultLayout({
+    id: 'oa-scalper-v3-opt-cols',
+    storage: safeLayoutStorage,
+  })
+  const equityColumnsLayout = useDefaultLayout({
+    id: 'oa-scalper-v3-eq-cols',
+    storage: safeLayoutStorage,
+  })
+
+  // Exchange / segment
   const [exchange, setExchange] = useState<ScalpingExchange>('NFO')
   const [segment, setSegment] = useState<Segment>('OPTIONS')
   const isEquityExch = isEquityExchange(exchange)
-  const optionsMode = !isEquityExch && segment === 'OPTIONS' // dual-leg CE/PE
-  const isSingle = !optionsMode // equity + futures use a single instrument
+  const optionsMode = !isEquityExch && segment === 'OPTIONS'
 
-  // Derivative underlying (default per exchange, searchable). Equity uses `instrument`.
+  // Underlying & strikes
   const [underlying, setUnderlying] = useState<string>(DEFAULT_UNDERLYING.NFO)
   const [underlyingQuery, setUnderlyingQuery] = useState('')
   const [underlyingOpen, setUnderlyingOpen] = useState(false)
@@ -287,29 +276,22 @@ export default function Scalping() {
   const [ceStrike, setCeStrike] = useState<string>('')
   const [peStrike, setPeStrike] = useState<string>('')
 
-  // Single-instrument selection (equity symbol search, or chosen futures contract).
+  // Equity instrument
   const [searchQuery, setSearchQuery] = useState('')
   const [instrument, setInstrument] = useState<SearchInstrument | null>(null)
   const [equityShares, setEquityShares] = useState(1)
 
-  // Order-entry controls. The One-Click arm state is captured/persisted across reloads.
+  // Order controls
   const [armed, setArmed] = useState<boolean>(loadArmed)
   const [lots, setLots] = useState(1)
   const [product, setProduct] = useState<ScalpingProduct>('NRML')
   const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null)
 
-  // Live charts are opt-in (default off) and heavy — when off, the ScalpChart
-  // components don't mount, so they open no feed subscriptions. Both this toggle
-  // and the timeframe below persist browser-side so the terminal reopens the way
-  // you left it.
+  // Charts
   const [showCharts, setShowCharts] = useState<boolean>(loadShowCharts)
-
-  // Shared timeframe for the live charts (OpenAlgo interval format). One switch
-  // flips every chart (CE / underlying / PE, or the single instrument) at once.
   const [chartTf, setChartTf] = useState<string>(loadChartTf)
 
-  // Global predefined SL / Target — when enabled, auto-attached to every new entry.
-  // Value is in points or percent of entry (default points).
+  // Predefined SL / Target
   const [predefSlOn, setPredefSlOn] = useState(false)
   const [predefSlValue, setPredefSlValue] = useState('')
   const [predefSlUnit, setPredefSlUnit] = useState<'PTS' | 'PCT'>('PTS')
@@ -317,20 +299,34 @@ export default function Scalping() {
   const [predefTgtValue, setPredefTgtValue] = useState('')
   const [predefTgtUnit, setPredefTgtUnit] = useState<'PTS' | 'PCT'>('PTS')
 
+  // Sync state
+  const pendingStrikeRef = useRef<{ side: 'CE' | 'PE'; strike: number; underlying: string } | null>(null)
+  const [syncSeq, setSyncSeq] = useState(0)
+  const [syncBanner, setSyncBanner] = useState<string | null>(null)
+  const syncBannerTimer = useRef<number | undefined>(undefined)
+
+  const showSyncBanner = useCallback((msg: string) => {
+    setSyncBanner(msg)
+    if (syncBannerTimer.current) window.clearTimeout(syncBannerTimer.current)
+    syncBannerTimer.current = window.setTimeout(() => setSyncBanner(null), 6000)
+  }, [])
+
+  // Books dock active tab
+  const [bookTab, setBookTab] = useState<'positions' | 'orders' | 'trades'>('positions')
+
   useEffect(() => {
     try {
       localStorage.setItem(ARMED_STORAGE_KEY, armed ? '1' : '0')
     } catch {
-      // ignore storage failures (private mode, etc.)
+      // ignore
     }
   }, [armed])
 
-  // Persist the charts on/off and timeframe choices browser-side.
   useEffect(() => {
     try {
       localStorage.setItem(CHARTS_STORAGE_KEY, showCharts ? '1' : '0')
     } catch {
-      // ignore storage failures (private mode, etc.)
+      // ignore
     }
   }, [showCharts])
 
@@ -338,19 +334,17 @@ export default function Scalping() {
     try {
       localStorage.setItem(CHART_TF_STORAGE_KEY, chartTf)
     } catch {
-      // ignore storage failures (private mode, etc.)
+      // ignore
     }
   }, [chartTf])
 
-  // Exchange change: equity → EQUITY segment; F&O → keep Options/Futures (default
-  // Options) + default underlying. Reset transient selections.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: run only on exchange change
+  // Exchange reset
   useEffect(() => {
     if (isEquityExch) {
       setSegment('EQUITY')
     } else {
       setSegment((s) => (s === 'OPTIONS' || s === 'FUTURES' ? s : 'OPTIONS'))
-      setUnderlying(DEFAULT_UNDERLYING[exchange] || '')
+      setUnderlying((u) => u || DEFAULT_UNDERLYING[exchange] || 'NIFTY')
     }
     setInstrument(null)
     setSearchQuery('')
@@ -358,14 +352,28 @@ export default function Scalping() {
     setExpiry('')
     setCeStrike('')
     setPeStrike('')
-  }, [exchange])
+  }, [exchange, isEquityExch])
 
-  // Default product per instrument class (MIS equity, NRML derivatives).
   useEffect(() => {
     setProduct(isEquityExch ? 'MIS' : 'NRML')
   }, [isEquityExch])
 
-  // Equity symbol search (NSE/BSE).
+  // Watchlists query for quick picker
+  const { data: watchlistData } = useQuery({
+    queryKey: ['scalping', 'watchlists'],
+    queryFn: () => watchlistApi.list(),
+  })
+  const watchlists = watchlistData ?? []
+
+  // Advisor alerts query for quick picker
+  const { data: advisorData } = useQuery({
+    queryKey: ['scalping', 'advisor'],
+    queryFn: () => scalperApi.getAdvisor(),
+    refetchInterval: 15000,
+  })
+  const activeAlerts: ScalperAlert[] = advisorData?.monitor?.alerts ?? []
+
+  // Equity search
   const { data: eqSearchResp } = useQuery({
     queryKey: ['scalping', 'eqsearch', exchange, searchQuery],
     queryFn: () => scalpingApi.search(exchange, searchQuery),
@@ -373,24 +381,22 @@ export default function Scalping() {
   })
   const equityResults = eqSearchResp?.data ?? []
 
-  // All F&O underlyings for the exchange/segment (indices first), like
-  // /search/token. Fetched once per exchange+segment and filtered client-side,
-  // so the dropdown lists every underlying instead of requiring a search.
+  // Underlyings list
   const undInstrumentType = segment === 'FUTURES' ? 'futures' : 'options'
   const { data: allUndResp } = useQuery({
     queryKey: ['scalping', 'allunderlyings', exchange, undInstrumentType],
     queryFn: () => scalpingApi.getAllUnderlyings(exchange, undInstrumentType),
     enabled: !isEquityExch,
-    staleTime: 5 * 60 * 1000, // master contracts change at most daily
+    staleTime: 5 * 60 * 1000,
   })
   const allUnderlyings = allUndResp?.data ?? []
   const underlyingMatches = useMemo(() => {
     const q = underlyingQuery.trim().toUpperCase()
     const list = q ? allUnderlyings.filter((u) => u.toUpperCase().includes(q)) : allUnderlyings
-    return list.slice(0, 200)
+    return list.slice(0, 100)
   }, [allUnderlyings, underlyingQuery])
 
-  // Options expiry for the derivative underlying.
+  // Expiries
   const { data: expiryResp } = useQuery({
     queryKey: ['scalping', 'expiry', exchange, underlying],
     queryFn: () => scalpingApi.getExpiry(underlying, exchange, 'options'),
@@ -399,11 +405,11 @@ export default function Scalping() {
   const expiries = expiryResp?.data ?? []
   useEffect(() => {
     if (optionsMode && underlying && !expiry && expiries.length > 0) {
-      setExpiry(expiries[0]) // nearest expiry
+      setExpiry(expiries[0])
     }
   }, [expiries, underlying, expiry, optionsMode])
 
-  // Option chain (depends on underlying + expiry).
+  // Option Chain
   const { data: chainResp } = useQuery({
     queryKey: ['scalping', 'strikes', exchange, underlying, expiry],
     queryFn: () => scalpingApi.getStrikes(underlying, exchange, expiry, DEFAULT_STRIKE_COUNT),
@@ -411,11 +417,10 @@ export default function Scalping() {
   })
   const chain = useMemo(() => chainResp?.chain ?? [], [chainResp])
   const foExchange = chainResp?.fo_exchange ?? exchange
-  // Underlying ticker subscription target (index/stock spot, or the future for MCX/CDS).
   const underlyingSym = chainResp?.underlying_symbol ?? underlying
   const underlyingExch = chainResp?.underlying_exchange ?? exchange
 
-  // Futures contracts (per expiry) for the derivative underlying.
+  // Futures
   const { data: futResp } = useQuery({
     queryKey: ['scalping', 'futures', exchange, underlying],
     queryFn: () => scalpingApi.futures(underlying, exchange),
@@ -423,71 +428,147 @@ export default function Scalping() {
   })
   const futContracts = futResp?.data ?? []
 
-  // Default the futures contract to the nearest expiry when the list loads (and
-  // keep a valid selection across underlying/exchange changes), so the Futures
-  // panel shows a contract immediately instead of waiting for a manual pick.
   useEffect(() => {
     if (isEquityExch || segment !== 'FUTURES' || futContracts.length === 0) return
     const stillValid = instrument && futContracts.some((c) => c.symbol === instrument.symbol)
     if (stillValid) return
-    const c = futContracts[0] // nearest expiry (backend returns ascending)
+    const c = futContracts[0]
     setInstrument({ symbol: c.symbol, exchange, lotsize: c.lotsize, name: underlying })
   }, [futContracts, isEquityExch, segment, instrument, exchange, underlying])
 
-  // Default the CE/PE strike to ATM when the chain loads — but preserve a valid
-  // manual selection (only reset to ATM if the current pick isn't in this chain,
-  // e.g. on first load or after the expiry/underlying changed).
+  // ATM / Pending strike resolution
   useEffect(() => {
     if (chainResp?.atm_strike == null || chain.length === 0) return
-    const atm = String(chainResp.atm_strike)
     const strikes = new Set(chain.map((r) => String(r.strike)))
+    const atm = String(chainResp.atm_strike)
+    const pend = pendingStrikeRef.current
+    if (pend) {
+      const chainUnd = String(chainResp.underlying_symbol ?? underlying ?? '').toUpperCase()
+      if (chainUnd.includes(pend.underlying) || pend.underlying.includes(chainUnd)) {
+        pendingStrikeRef.current = null
+        const want = String(pend.strike)
+        const has = strikes.has(want)
+        if (pend.side === 'CE') {
+          setCeStrike(has ? want : atm)
+          setPeStrike((prev) => (prev && strikes.has(prev) ? prev : atm))
+        } else {
+          setPeStrike(has ? want : atm)
+          setCeStrike((prev) => (prev && strikes.has(prev) ? prev : atm))
+        }
+        return
+      }
+    }
     setCeStrike((prev) => (prev && strikes.has(prev) ? prev : atm))
     setPeStrike((prev) => (prev && strikes.has(prev) ? prev : atm))
-  }, [chainResp, chain])
+  }, [chainResp, chain, syncSeq, underlying])
 
-  // Stable leg identities (only change when strike/exchange/chain actually change)
-  // so the SL evaluation effect isn't re-triggered by unrelated re-renders.
   const ceLeg = useMemo(
-    () =>
-      buildLeg(
-        chain.find((r) => String(r.strike) === ceStrike),
-        'ce',
-        foExchange
-      ),
+    () => buildLeg(chain.find((r) => String(r.strike) === ceStrike), 'ce', foExchange),
     [chain, ceStrike, foExchange]
   )
   const peLeg = useMemo(
-    () =>
-      buildLeg(
-        chain.find((r) => String(r.strike) === peStrike),
-        'pe',
-        foExchange
-      ),
+    () => buildLeg(chain.find((r) => String(r.strike) === peStrike), 'pe', foExchange),
     [chain, peStrike, foExchange]
   )
+  const singleLeg: SelectedLeg | null = useMemo(() => {
+    if (optionsMode || !instrument) return null
+    return {
+      symbol: instrument.symbol,
+      exchange: instrument.exchange,
+      optionType: 'CE',
+      strike: 0,
+      lotsize: instrument.lotsize ?? 1,
+      tickSize: 0.05,
+    }
+  }, [optionsMode, instrument])
 
-  // Single instrument (equity/futures) as a leg the order/SL infra can consume.
-  const singleLeg: SelectedLeg | null = useMemo(
-    () =>
-      instrument
-        ? {
-            symbol: instrument.symbol,
-            exchange: instrument.exchange,
-            optionType: 'CE', // unused for non-options; kept for the shared leg shape
-            strike: 0,
-            lotsize: instrument.lotsize || 1,
-            tickSize: 0,
-          }
-        : null,
-    [instrument]
-  )
+  // ── Sync with Watchlist & Scalper Advisor ───────────────────────────
+  const applySyncSymbol = useCallback((s: ScalperSyncState) => {
+    if (!s.symbol) return
+    const rawExchange = s.symbol.includes(':') ? s.symbol.split(':')[0] : ''
+    const rawSym = s.symbol.includes(':') ? s.symbol.split(':')[1] : s.symbol
+    const upperExch = rawExchange.toUpperCase()
 
-  // Books (positions / orders / trades). Fully event-driven (no polling):
-  // prices/MTM stream over the WebSocket feed, and these fetches refresh on broker
-  // order events (useOrderEventRefresh below) — including the server-side risk
-  // monitor's auto-exits, which emit order events. refetchOnWindowFocus is an
-  // event (tab focus), not an interval. The query key includes appMode so toggling
-  // Analyze/Live re-fetches the corresponding (sandbox vs live) positions/books.
+    if (upperExch === 'NSE' || upperExch === 'BSE') {
+      const isIndex =
+        rawSym.includes('INDEX') ||
+        rawSym.includes('NIFTY') ||
+        rawSym.includes('SENSEX') ||
+        rawSym.includes('BANKNIFTY')
+      if (isIndex) {
+        const derivExch = upperExch === 'BSE' ? 'BFO' : 'NFO'
+        setExchange(derivExch)
+        setSegment('OPTIONS')
+        const root = s.root || (rawSym.includes('BANK') ? 'BANKNIFTY' : rawSym.includes('SENSEX') ? 'SENSEX' : 'NIFTY')
+        setUnderlying(root)
+        showSyncBanner(`Watchlist: Synced index ${root} (${derivExch})`)
+        return
+      }
+      setExchange(upperExch as ScalpingExchange)
+      setSegment('EQUITY')
+      setInstrument({ symbol: rawSym, exchange: upperExch, lotsize: 1, name: rawSym })
+      showSyncBanner(`Watchlist: Synced ${upperExch}:${rawSym}`)
+      return
+    }
+
+    const derivExch: ScalpingExchange = (['NFO', 'BFO', 'MCX', 'CDS'].includes(upperExch) ? upperExch : 'NFO') as ScalpingExchange
+    setExchange(derivExch)
+
+    if (s.optionType && s.strike != null && s.strike > 0) {
+      setSegment('OPTIONS')
+      const root = s.root || cleanRoot(rawSym)
+      setUnderlying(root)
+      pendingStrikeRef.current = { side: s.optionType, strike: s.strike, underlying: root.toUpperCase() }
+      setSyncSeq((n) => n + 1)
+      showSyncBanner(`Watchlist: Synced option ${rawSym} (${s.optionType} @${s.strike})`)
+      return
+    }
+
+    if (rawSym.toUpperCase().endsWith('FUT')) {
+      setSegment('FUTURES')
+      const root = s.root || cleanRoot(rawSym.replace(/FUT$/i, ''))
+      setUnderlying(root)
+      showSyncBanner(`Watchlist: Synced future ${rawSym}`)
+      return
+    }
+
+    setSegment('OPTIONS')
+    const root = s.root || cleanRoot(rawSym)
+    setUnderlying(root)
+    showSyncBanner(`Watchlist: Synced underlying ${root}`)
+  }, [showSyncBanner])
+
+  const applySyncTarget = useCallback((t: ScalperTarget) => {
+    const und = t.underlying || t.key
+    if (!und) return
+    const exch = (['NFO', 'BFO', 'MCX', 'CDS', 'NSE', 'BSE'].includes(t.exchange?.toUpperCase())
+      ? t.exchange.toUpperCase()
+      : 'NFO') as ScalpingExchange
+    setExchange(exch)
+    setSegment('OPTIONS')
+    setUnderlying(und)
+    if (t.side && t.strike != null && t.strike > 0) {
+      pendingStrikeRef.current = { side: t.side, strike: t.strike, underlying: und.toUpperCase() }
+      setSyncSeq((n) => n + 1)
+    }
+    showSyncBanner(`Advisor Alert: ${t.key} BUY ${t.side} @${t.strike}`)
+  }, [showSyncBanner])
+
+  useEffect(() => {
+    const stored = getSyncTarget()
+    if (stored) applySyncTarget(stored)
+    return subscribeSyncTarget((t) => {
+      if (t) applySyncTarget(t)
+    })
+  }, [applySyncTarget])
+
+  useEffect(() => {
+    return subscribeSync((s) => {
+      if (s?.symbol) applySyncSymbol(s)
+    })
+  }, [applySyncSymbol])
+
+  // Positions & Books
   const { data: posResp } = useQuery({
     queryKey: ['scalping', 'positions', appMode],
     queryFn: () => tradingApi.getPositions(apiKey ?? ''),
@@ -506,20 +587,19 @@ export default function Scalping() {
     enabled: !!apiKey,
     refetchOnWindowFocus: true,
   })
-  // The scalping list: instruments this terminal has traded (scopes the book to
-  // the scalping strategy, since broker positions carry no strategy tag).
   const { data: trackedResp } = useQuery({
     queryKey: ['scalping', 'tracked', appMode],
     queryFn: () => scalpingApi.getTracked(),
   })
-  const positions = posResp?.data ?? []
-  const orders = ordResp?.data?.orders ?? []
-  const trades = trdResp?.data ?? []
+
+  const positions = useMemo(() => posResp?.data ?? [], [posResp])
+  const orders = useMemo(() => ordResp?.data?.orders ?? [], [ordResp])
+  const trades = useMemo(() => trdResp?.data ?? [], [trdResp])
   const trackedKeys = useMemo(
     () => new Set((trackedResp?.data ?? []).map((t) => `${t.exchange}:${t.symbol}:${t.product}`)),
     [trackedResp]
   )
-  // Order Book / Trade Book scoped to the scalping list AND to today only.
+
   const scopedOrders = useMemo(
     () =>
       orders.filter(
@@ -539,43 +619,22 @@ export default function Scalping() {
     [trades, trackedKeys]
   )
 
-  // Throttled (leading + trailing): the first trigger refetches immediately, and any
-  // further triggers within REFRESH_THROTTLE_MS collapse into a single trailing refetch.
-  // This de-dups the order's success path + its SocketIO event and bounds multi-leg bursts.
-  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastRefreshRef = useRef(0)
   const refreshBooks = useCallback(() => {
-    const run = () => {
-      lastRefreshRef.current = Date.now()
+    const now = performance.now()
+    if (now - lastRefreshRef.current < REFRESH_THROTTLE_MS) return
+    lastRefreshRef.current = now
+    window.setTimeout(() => {
       queryClient.invalidateQueries({ queryKey: ['scalping', 'positions'] })
       queryClient.invalidateQueries({ queryKey: ['scalping', 'orders'] })
       queryClient.invalidateQueries({ queryKey: ['scalping', 'trades'] })
       queryClient.invalidateQueries({ queryKey: ['scalping', 'tracked'] })
-    }
-    const since = Date.now() - lastRefreshRef.current
-    if (since >= REFRESH_THROTTLE_MS) {
-      run()
-    } else if (refreshTimerRef.current == null) {
-      refreshTimerRef.current = setTimeout(() => {
-        refreshTimerRef.current = null
-        run()
-      }, REFRESH_THROTTLE_MS - since)
-    }
+    }, 150)
   }, [queryClient])
 
-  // Clear any pending trailing refetch on unmount (timer hygiene).
-  useEffect(() => {
-    return () => {
-      if (refreshTimerRef.current != null) clearTimeout(refreshTimerRef.current)
-    }
-  }, [])
-
-  // Refresh the books on order/position events instead of polling. The short delay lets
-  // the server finish persisting before we refetch (was 500ms; 150ms keeps the UI snappy).
   useOrderEventRefresh(refreshBooks, { events: [...BOOK_EVENTS], delay: 150 })
 
-  // Subscribe the live feed for underlying (Quote, for %chg), CE/PE legs, AND
-  // every symbol in the position book — so book LTP and P&L update in realtime.
+  // Subscriptions & Quotes
   const symbols = useMemo(() => {
     const seen = new Set<string>()
     const list: Array<{ symbol: string; exchange: string }> = []
@@ -605,21 +664,16 @@ export default function Scalping() {
     enabled: symbols.length > 0,
   })
 
-  // After-hours MultiQuotes fallback (mirrors /positions' useLivePrice): when the
-  // WebSocket feed is idle (market closed), poll the REST multiquotes every 30s so
-  // the tickers AND the position book keep fresh LTP/OHLC/MTM. The WS feed stays the
-  // live source during market hours; this only kicks in when ticks go stale.
   const symbolsKey = useMemo(
     () => symbols.map((s) => `${s.exchange}:${s.symbol}`).join(','),
     [symbols]
   )
   const [mqMap, setMqMap] = useState<Map<string, QuotesData>>(new Map())
-  // biome-ignore lint/correctness/useExhaustiveDependencies: symbolsKey tracks symbols content
   useEffect(() => {
     if (!apiKey || symbols.length === 0) return
     let cancelled = false
     const fetchMq = () => {
-      if (document.hidden) return // visibility-aware (don't poll a hidden tab)
+      if (document.hidden) return
       tradingApi
         .getMultiQuotes(apiKey, symbols)
         .then((resp) => {
@@ -640,8 +694,6 @@ export default function Scalping() {
     }
   }, [apiKey, symbolsKey])
 
-  // Merged tick (live WS, MultiQuotes after-hours), field-by-field to avoid flicker.
-  // Logic lives in lib/scalpingTick.mergeTick (pure + unit-tested).
   const getTick = useCallback(
     (symbol: string, exchange: string): TickView | undefined => {
       const key = `${exchange}:${symbol}`
@@ -657,20 +709,78 @@ export default function Scalping() {
     [marketData, mqMap]
   )
 
-  const underlyingTick = getTick(underlyingSym, underlyingExch)
   const ceTick = ceLeg ? getTick(ceLeg.symbol, ceLeg.exchange) : undefined
   const peTick = peLeg ? getTick(peLeg.symbol, peLeg.exchange) : undefined
+  const underlyingTick = getTick(underlyingSym, underlyingExch)
   const singleTick = singleLeg ? getTick(singleLeg.symbol, singleLeg.exchange) : undefined
 
-  // Realtime LTP resolver for the position book (live WS, MultiQuotes after hours).
   const liveLtp = useCallback(
     (symbol: string, exchange: string): number | undefined => getTick(symbol, exchange)?.ltp,
     [getTick]
   )
 
-  // Latest live data + predefined config for the (stable) order handler.
   const marketDataRef = useRef(marketData)
   marketDataRef.current = marketData
+
+  const { slMap, setSL, clearSL } = useTrailingSL(appMode)
+
+  const positionRows = useMemo(
+    () => buildPositionRows(positions, trades, slMap, liveLtp, trackedKeys),
+    [positions, trades, slMap, liveLtp, trackedKeys]
+  )
+
+  const netQty = positionRows.reduce((a, r) => a + r.netQty, 0)
+  const mtm = positionRows.reduce((a, r) => a + r.totalPnl, 0)
+
+  // SL Dialog state
+  const [slDialogTarget, setSlDialogTarget] = useState<SLTarget | null>(null)
+  const slDialogOpen = slDialogTarget !== null
+  const slDialogTick = slDialogTarget
+    ? getTick(slDialogTarget.symbol, slDialogTarget.exchange)
+    : undefined
+  const slDialogPos = slDialogTarget
+    ? positions.find(
+        (p) =>
+          p.symbol === slDialogTarget.symbol &&
+          p.exchange === slDialogTarget.exchange &&
+          p.product === slDialogTarget.product
+      )
+    : undefined
+  const slDialogEntry = slDialogPos?.average_price ?? slDialogTick?.ltp ?? 0
+  const slDialogQty = slDialogPos ? Math.abs(slDialogPos.quantity) : 0
+  const slDialogSide: ScalpingAction = slDialogPos && slDialogPos.quantity < 0 ? 'SELL' : 'BUY'
+  const slDialogLeg: SelectedLeg | null = slDialogTarget
+    ? {
+        symbol: slDialogTarget.symbol,
+        exchange: slDialogTarget.exchange,
+        optionType: slDialogTarget.optionType,
+        strike: 0,
+        lotsize: 0,
+        tickSize: 0,
+      }
+    : null
+  const slDialogExisting = slDialogTarget
+    ? findLegSL(slMap, slDialogTarget.symbol, slDialogTarget.exchange, slDialogTarget.product)
+    : undefined
+
+  const openLegSL = (leg: SelectedLeg | null) => {
+    if (leg) setSlDialogTarget({ ...leg, product })
+  }
+
+  const openRowSL = (row: ScalpingPositionRow) => {
+    setSlDialogTarget({
+      symbol: row.symbol,
+      exchange: row.exchange,
+      product: row.product,
+      optionType: row.symbol.endsWith('PE') ? 'PE' : 'CE',
+    })
+  }
+
+  const ceSL = ceLeg ? findLegSL(slMap, ceLeg.symbol, ceLeg.exchange, product) : undefined
+  const peSL = peLeg ? findLegSL(slMap, peLeg.symbol, peLeg.exchange, product) : undefined
+
+  // Orders logic
+  const lastFireRef = useRef<number>(0)
   const predefRef = useRef({
     slOn: predefSlOn,
     slValue: predefSlValue,
@@ -688,98 +798,29 @@ export default function Scalping() {
     tgtUnit: predefTgtUnit,
   }
 
-  // SL / target / trailing config + display. The engine that watches ticks and
-  // fires exits runs SERVER-SIDE (services/scalping_risk_monitor_service.py) so
-  // stops keep working after you leave /scalping or close the browser. This hook
-  // only persists the config and reflects the server's live updates/auto-clears.
-  const { slMap, setSL, clearSL } = useTrailingSL(appMode)
-
-  // Position book: derived rows from positions + today's trades + SL,
-  // with realtime LTP from the live feed (recomputes on each tick).
-  const positionRows = useMemo(
-    () => buildPositionRows(positions, trades, slMap, liveLtp, trackedKeys),
-    [positions, trades, slMap, liveLtp, trackedKeys]
-  )
-  // Summary reflects the displayed rows (scalping book), not raw account totals.
-  const netQty = positionRows.reduce((a, r) => a + r.netQty, 0)
-  const mtm = positionRows.reduce((a, r) => a + r.totalPnl, 0)
-
-  // Set-SL dialog targets one (symbol, exchange, product) leg at a time. The
-  // product is carried on the target so a per-row SL edits the correct MIS/NRML SL.
-  const [slDialogTarget, setSlDialogTarget] = useState<SLTarget | null>(null)
-  const slDialogOpen = slDialogTarget !== null
-  const slDialogTick = slDialogTarget
-    ? getTick(slDialogTarget.symbol, slDialogTarget.exchange)
-    : undefined
-  const slDialogPos = slDialogTarget
-    ? positions.find(
-        (p) =>
-          p.symbol === slDialogTarget.symbol &&
-          p.exchange === slDialogTarget.exchange &&
-          p.product === slDialogTarget.product
-      )
-    : undefined
-  const slDialogEntry = slDialogPos?.average_price ?? slDialogTick?.ltp ?? 0
-  // A stop-loss is only meaningful for an actual open position — qty is 0 when
-  // flat, which blocks the dialog's Save (prevents an SL that would open a fresh
-  // naked position on "exit").
-  const slDialogQty = slDialogPos ? Math.abs(slDialogPos.quantity) : 0
-  // Side is derived from the actual open position: a short (qty < 0) stops out
-  // when price RISES, a long when price FALLS — the SL engine needs this right.
-  const slDialogSide: ScalpingAction = slDialogPos && slDialogPos.quantity < 0 ? 'SELL' : 'BUY'
-  const slDialogLeg: SelectedLeg | null = slDialogTarget
-    ? {
-        symbol: slDialogTarget.symbol,
-        exchange: slDialogTarget.exchange,
-        optionType: slDialogTarget.optionType,
-        strike: 0,
-        lotsize: 0,
-        tickSize: 0,
-      }
-    : null
-  const slDialogExisting = slDialogTarget
-    ? findLegSL(slMap, slDialogTarget.symbol, slDialogTarget.exchange, slDialogTarget.product)
-    : undefined
-
-  const ceSL = ceLeg ? findLegSL(slMap, ceLeg.symbol, ceLeg.exchange, product) : undefined
-  const peSL = peLeg ? findLegSL(slMap, peLeg.symbol, peLeg.exchange, product) : undefined
-
-  // Open the SL dialog for a selected CE/PE leg (uses the current product selector).
-  const openLegSL = (leg: SelectedLeg | null) => {
-    if (leg) setSlDialogTarget({ ...leg, product })
-  }
-
-  // Latest order-entry state for the (stable) keyboard handler — avoids stale closures.
   const stateRef = useRef({
     armed,
     lots,
+    equityShares,
+    segment,
     product,
+    appMode,
     ceLeg,
     peLeg,
     singleLeg,
-    appMode,
-    segment,
-    equityShares,
   })
   stateRef.current = {
     armed,
     lots,
+    equityShares,
+    segment,
     product,
+    appMode,
     ceLeg,
     peLeg,
     singleLeg,
-    appMode,
-    segment,
-    equityShares,
   }
 
-  // Min gap between two order fires. Bounds the rate (prevents accidental
-  // double-taps and held-key bursts) while still allowing deliberate fast
-  // scalping. Held-key auto-repeat is additionally filtered via e.repeat below.
-  const lastFireRef = useRef(0)
-
-  // After an entry, auto-attach the global predefined SL / Target (points or %
-  // of the fill LTP) so the websocket SL engine manages the exit.
   const attachPredefinedSL = useCallback(
     (leg: SelectedLeg, action: ScalpingAction, quantity: number, prod: ScalpingProduct) => {
       const cfg = predefRef.current
@@ -795,7 +836,6 @@ export default function Scalping() {
       const tgtPts = cfg.tgtOn ? toPts(cfg.tgtValue, cfg.tgtUnit) : 0
       if (slPts <= 0 && tgtPts <= 0) return
       const isBuy = action === 'BUY'
-      // No-SL sentinel that never triggers (target-only): below for long, far above for short.
       const initialSl =
         slPts > 0 ? (isBuy ? ltp - slPts : ltp + slPts) : isBuy ? 0 : Number.MAX_SAFE_INTEGER
       const target = tgtPts > 0 ? (isBuy ? ltp + tgtPts : ltp - tgtPts) : 0
@@ -820,7 +860,7 @@ export default function Scalping() {
   )
 
   const submitOrder = useCallback(
-    async (leg: SelectedLeg | null, action: ScalpingAction) => {
+    async (leg: SelectedLeg | null, action: ScalpingAction, sentLotsOverride?: number) => {
       const s = stateRef.current
       if (!s.armed) {
         showToast.error('One-Click is disarmed — enable it to trade', 'orders')
@@ -837,23 +877,18 @@ export default function Scalping() {
       const now = Date.now()
       if (now - lastFireRef.current < ORDER_COOLDOWN_MS) return
       lastFireRef.current = now
-      // Equity trades in whole shares (no lots); derivatives in lots * lot size.
+
       const isEquity = s.segment === 'EQUITY'
-      const quantity = isEquity ? s.equityShares : s.lots * leg.lotsize
-      const sentLots = isEquity ? undefined : s.lots
+      const sentLots = sentLotsOverride ?? (isEquity ? undefined : s.lots)
+      const quantity = isEquity ? s.equityShares : (sentLots ?? s.lots) * leg.lotsize
       if (quantity <= 0) {
         showToast.error('Quantity must be positive', 'orders')
         return
       }
+
       const t0 = performance.now()
-      // Order placement notifications (success AND broker/sandbox rejection) are
-      // shown ONCE by the global SocketProvider — order_event in live mode,
-      // analyzer_update in analyzer mode. We don't toast success here (latency is
-      // in the header). We only toast an error in LIVE mode, where the backend
-      // emits no socket event on failure, or on a transport error (no response).
-      // The live LTP from the WS feed — sent so the sandbox engine can price the fill
-      // without its own (slow, retry-prone) per-order quote fetch. Ignored in live mode.
       const legLtp = marketDataRef.current.get(`${leg.exchange}:${leg.symbol}`)?.data?.ltp
+
       try {
         const res = await scalpingApi.placeOrder({
           symbol: leg.symbol,
@@ -867,8 +902,6 @@ export default function Scalping() {
         setLastLatencyMs(Math.round(performance.now() - t0))
         if (res.status === 'success') {
           attachPredefinedSL(leg, action, quantity, s.product)
-          // Books refresh from this order's SocketIO event (order_event / analyzer_update)
-          // via useOrderEventRefresh — no manual refetch here, to avoid a double refresh.
         } else if (s.appMode === 'live') {
           showToast.error(res.message ?? 'Order failed', 'orders')
         }
@@ -881,14 +914,6 @@ export default function Scalping() {
     [attachPredefinedSL]
   )
 
-  // Note: close-all / cancel-all (F6/F7) and the trailing-SL auto-exit are
-  // intentionally NOT gated by `armed`. "Armed" guards only NEW risk-increasing
-  // entries; risk-reducing actions (flatten, cancel, stop-loss) must always work
-  // even when one-click is off — disarming must never disable your stops.
-  // Success/rejection toasts for close-all and cancel-all are shown globally by
-  // SocketProvider (close_position_event / cancel_order_event / analyzer_update).
-  // We only surface an error here when the global handler won't (live mode or a
-  // transport error), to avoid duplicate notifications.
   const doCloseAll = useCallback(async () => {
     try {
       const res = await scalpingApi.closeAll()
@@ -915,7 +940,6 @@ export default function Scalping() {
     refreshBooks()
   }, [refreshBooks, appMode])
 
-  // Close a single position-book row (risk-reducing, opposite side, live net qty).
   const doCloseRow = useCallback(
     async (row: ScalpingPositionRow) => {
       if (row.netQty === 0) return
@@ -940,15 +964,10 @@ export default function Scalping() {
     [refreshBooks, appMode]
   )
 
-  // Global keyboard handler: arrows fire orders, F6 close-all, F7 cancel-all.
+  // Keyboard navigation
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      // Ignore OS key auto-repeat from a held key — otherwise one held arrow
-      // would fire a continuous stream of market orders.
       if (e.repeat) return
-      // Risk-reducing safety actions fire regardless of focus (even while typing
-      // in a field) — flatten/cancel must always work. Note: on macOS, F6/F7 may
-      // be intercepted as hardware media keys; the on-screen buttons always work.
       if (e.key === 'F6') {
         e.preventDefault()
         doCloseAll()
@@ -970,7 +989,6 @@ export default function Scalping() {
         return
       }
       const s = stateRef.current
-      // Single-instrument (equity/futures): ↑/→ Buy, ↓/← Sell on the one instrument.
       if (s.segment !== 'OPTIONS') {
         switch (e.key) {
           case 'ArrowUp':
@@ -982,14 +1000,6 @@ export default function Scalping() {
           case 'ArrowLeft':
             e.preventDefault()
             submitOrder(s.singleLeg, 'SELL')
-            return
-          case 'F6':
-            e.preventDefault()
-            doCloseAll()
-            return
-          case 'F7':
-            e.preventDefault()
-            doCancelAll()
             return
           default:
             return
@@ -1012,14 +1022,6 @@ export default function Scalping() {
           e.preventDefault()
           submitOrder(s.peLeg, 'SELL')
           break
-        case 'F6':
-          e.preventDefault()
-          doCloseAll()
-          break
-        case 'F7':
-          e.preventDefault()
-          doCancelAll()
-          break
         default:
           break
       }
@@ -1040,814 +1042,1135 @@ export default function Scalping() {
         ? { label: 'Connecting…', variant: 'secondary' as const }
         : { label: 'Disconnected', variant: 'destructive' as const }
 
+  const netQtyFor = useCallback(
+    (sym?: string) => {
+      if (!sym) return 0
+      const r = positionRows.find((p) => p.symbol === sym)
+      return r ? r.netQty : 0
+    },
+    [positionRows]
+  )
+
   return (
-    <div className="space-y-4 p-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Scalping Terminal</h1>
-        <div className="flex items-center gap-3">
-          {lastLatencyMs != null && (
-            <span className="font-mono text-xs text-muted-foreground">order {lastLatencyMs}ms</span>
-          )}
-          <Badge variant={armed ? 'destructive' : 'secondary'}>
-            One-Click {armed ? 'ARMED' : 'off'}
+    <div className="h-screen w-full flex flex-col bg-background overflow-hidden select-none">
+      <Navbar />
+
+      {/* Sync / Reconnecting Banner */}
+      {syncBanner ? (
+        <div className="bg-sky-500/15 text-sky-600 dark:text-sky-400 border-b border-sky-500/30 px-3 py-1 text-xs shrink-0 flex items-center justify-between font-medium">
+          <span>⚡ {syncBanner}</span>
+          <button type="button" onClick={() => setSyncBanner(null)} className="hover:opacity-80">
+            ×
+          </button>
+        </div>
+      ) : !isAuthenticated ? (
+        <div className="bg-destructive/15 text-destructive border-b border-destructive/30 px-3 py-1 text-xs shrink-0 flex items-center justify-between">
+          <span>{isFallbackMode ? 'Feed lost — using REST polling.' : 'Market-data feed disconnected — reconnecting…'}</span>
+        </div>
+      ) : null}
+
+      {/* ── Compact Control Ribbon ─────────────────────────────────── */}
+      <div className="shrink-0 border-b border-border/70 bg-card/70 px-3 py-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs">
+        <div className="flex items-center gap-1.5">
+          <span className="font-bold text-sm tracking-tight text-foreground flex items-center gap-1">
+            <Activity className="h-4 w-4 text-primary" /> Scalper
+          </span>
+          <Badge
+            variant={armed ? 'destructive' : 'secondary'}
+            className="cursor-pointer text-[10px] px-1.5 py-0"
+            onClick={() => setArmed(!armed)}
+          >
+            {armed ? 'ARMED' : 'ARM OFF'}
           </Badge>
-          <Badge variant={wsBadge.variant}>{wsBadge.label}</Badge>
+          <Badge variant={wsBadge.variant} className="text-[10px] px-1.5 py-0">
+            {wsBadge.label}
+          </Badge>
+          {lastLatencyMs != null && (
+            <span className="font-mono text-[10px] text-muted-foreground">{lastLatencyMs}ms</span>
+          )}
         </div>
-      </div>
 
-      {/* Feed-status banner — a stale/lost feed mid-position is dangerous. The
-          shared WebSocket manager auto-resubscribes active legs on reconnect. */}
-      {!isAuthenticated && (
-        <div className="rounded-md border border-red-500/50 bg-red-500/10 px-4 py-2 text-sm text-red-700 dark:text-red-400">
-          {isFallbackMode
-            ? 'Live feed lost — using slower REST polling. Prices may lag; trade with caution.'
-            : isConnected
-              ? 'Reconnecting to the live market-data feed… active legs will resubscribe automatically.'
-              : 'Market-data feed disconnected — prices are stale. Reconnecting…'}
+        <div className="h-4 w-px bg-border/60" />
+
+        {/* Exchange */}
+        <div className="flex items-center gap-1">
+          <span className="text-[11px] text-muted-foreground">Exch</span>
+          <Select value={exchange} onValueChange={(v) => setExchange(v as ScalpingExchange)}>
+            <SelectTrigger className="h-7 w-16 text-xs px-1.5">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {EXCHANGES.map((x) => (
+                <SelectItem key={x} value={x} className="text-xs">
+                  {x}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
-      )}
 
-      {/* Selection controls */}
-      <Card>
-        <CardContent className="grid grid-cols-1 gap-4 pt-6 md:grid-cols-6">
-          <div className="space-y-1">
-            <label className="text-sm text-muted-foreground">Exchange</label>
-            <Select value={exchange} onValueChange={(v) => setExchange(v as ScalpingExchange)}>
-              <SelectTrigger>
-                <SelectValue />
+        {/* Segment */}
+        <div className="flex items-center gap-1">
+          <span className="text-[11px] text-muted-foreground">Seg</span>
+          <Select value={segment} onValueChange={(v) => setSegment(v as Segment)}>
+            <SelectTrigger className="h-7 w-20 text-xs px-1.5">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {isEquityExch ? (
+                <SelectItem value="EQUITY" className="text-xs">Equity</SelectItem>
+              ) : (
+                <>
+                  <SelectItem value="OPTIONS" className="text-xs">Options</SelectItem>
+                  <SelectItem value="FUTURES" className="text-xs">Futures</SelectItem>
+                </>
+              )}
+            </SelectContent>
+          </Select>
+        </div>
+
+        {/* Underlying / Symbol */}
+        {isEquityExch ? (
+          <div className="relative flex items-center gap-1">
+            <span className="text-[11px] text-muted-foreground">Stock</span>
+            <Input
+              value={instrument ? instrument.symbol : searchQuery}
+              placeholder="Search..."
+              className="h-7 w-28 text-xs font-mono px-2"
+              onChange={(e) => {
+                setInstrument(null)
+                setSearchQuery(e.target.value)
+              }}
+            />
+            {!instrument && equityResults.length > 0 && (
+              <div className="absolute top-8 left-10 z-50 max-h-48 w-44 overflow-auto rounded border bg-popover shadow-lg text-xs">
+                {equityResults.slice(0, 15).map((r) => (
+                  <button
+                    type="button"
+                    key={`${r.exchange}:${r.symbol}`}
+                    className="block w-full px-2 py-1 text-left font-mono hover:bg-muted"
+                    onClick={() => {
+                      setInstrument(r)
+                      setSearchQuery('')
+                    }}
+                  >
+                    {r.symbol}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="relative flex items-center gap-1">
+            <span className="text-[11px] text-muted-foreground">Und</span>
+            <Input
+              value={underlyingOpen ? underlyingQuery : underlying}
+              placeholder="Underlying"
+              className="h-7 w-24 text-xs font-mono font-bold px-2"
+              onFocus={() => {
+                setUnderlyingQuery('')
+                setUnderlyingOpen(true)
+              }}
+              onChange={(e) => setUnderlyingQuery(e.target.value)}
+              onBlur={() => window.setTimeout(() => setUnderlyingOpen(false), 180)}
+            />
+            {underlyingOpen && underlyingMatches.length > 0 && (
+              <div className="absolute top-8 left-8 z-50 max-h-56 w-36 overflow-auto rounded border bg-popover shadow-lg text-xs">
+                {underlyingMatches.map((nm) => (
+                  <button
+                    type="button"
+                    key={nm}
+                    className={`block w-full px-2 py-1 text-left font-mono hover:bg-muted ${nm === underlying ? 'bg-muted' : ''}`}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      setUnderlying(nm)
+                      setUnderlyingQuery('')
+                      setUnderlyingOpen(false)
+                      setExpiry('')
+                      setCeStrike('')
+                      setPeStrike('')
+                    }}
+                  >
+                    {nm}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Expiry */}
+        {optionsMode && (
+          <div className="flex items-center gap-1">
+            <span className="text-[11px] text-muted-foreground">Exp</span>
+            <Select value={expiry} onValueChange={setExpiry} disabled={!underlying}>
+              <SelectTrigger className="h-7 w-24 text-xs px-1.5">
+                <SelectValue placeholder="Expiry" />
               </SelectTrigger>
               <SelectContent>
-                {EXCHANGES.map((x) => (
-                  <SelectItem key={x} value={x}>
-                    {x}
+                {expiries.map((e) => (
+                  <SelectItem key={e} value={e} className="text-xs font-mono">
+                    {e}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
-
-          <div className="space-y-1">
-            <label className="text-sm text-muted-foreground">Segment</label>
-            <Select value={segment} onValueChange={(v) => setSegment(v as Segment)}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {isEquityExch ? (
-                  <SelectItem value="EQUITY">Equity</SelectItem>
-                ) : (
-                  <>
-                    <SelectItem value="OPTIONS">Options</SelectItem>
-                    <SelectItem value="FUTURES">Futures</SelectItem>
-                  </>
-                )}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* Equity (NSE/BSE): symbol search */}
-          {isEquityExch && (
-            <div className="relative space-y-1 md:col-span-2">
-              <label className="text-sm text-muted-foreground">Symbol</label>
-              <Input
-                value={instrument ? instrument.symbol : searchQuery}
-                placeholder="Search e.g. RELIANCE"
-                onChange={(e) => {
-                  setInstrument(null)
-                  setSearchQuery(e.target.value)
-                }}
-              />
-              {!instrument && equityResults.length > 0 && (
-                <div className="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-md border bg-popover shadow-md">
-                  {equityResults.slice(0, 25).map((r) => (
-                    <button
-                      type="button"
-                      key={`${r.exchange}:${r.symbol}`}
-                      className="block w-full px-3 py-1.5 text-left font-mono text-sm hover:bg-muted"
-                      onClick={() => {
-                        setInstrument(r)
-                        setSearchQuery('')
-                      }}
-                    >
-                      {r.symbol}
-                      {r.name ? <span className="text-muted-foreground"> · {r.name}</span> : null}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Derivatives (NFO/BFO/MCX/CDS): underlying search shared by options + futures */}
-          {!isEquityExch && (
-            <div className="relative space-y-1">
-              <label className="text-sm text-muted-foreground">Underlying</label>
-              <Input
-                value={underlyingOpen ? underlyingQuery : underlying}
-                placeholder="Select or search e.g. NIFTY / CRUDEOIL"
-                onFocus={() => {
-                  setUnderlyingQuery('')
-                  setUnderlyingOpen(true)
-                }}
-                onChange={(e) => setUnderlyingQuery(e.target.value)}
-                onBlur={() => window.setTimeout(() => setUnderlyingOpen(false), 150)}
-              />
-              {underlyingOpen && underlyingMatches.length > 0 && (
-                <div className="absolute z-10 mt-1 max-h-72 w-full overflow-auto rounded-md border bg-popover shadow-md">
-                  {underlyingMatches.map((nm) => (
-                    <button
-                      type="button"
-                      key={nm}
-                      className={`block w-full px-3 py-1.5 text-left font-mono text-sm hover:bg-muted ${
-                        nm === underlying ? 'bg-muted' : ''
-                      }`}
-                      onMouseDown={(ev) => ev.preventDefault()}
-                      onClick={() => {
-                        setUnderlying(nm)
-                        setUnderlyingQuery('')
-                        setUnderlyingOpen(false)
-                        setExpiry('')
-                        setCeStrike('')
-                        setPeStrike('')
-                        setInstrument(null)
-                      }}
-                    >
-                      {nm}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Options: expiry + CE/PE strikes (dual-leg) */}
-          {optionsMode && (
-            <>
-              <div className="space-y-1">
-                <label className="text-sm text-muted-foreground">Expiry</label>
-                <Select value={expiry} onValueChange={setExpiry} disabled={!underlying}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select expiry" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {expiries.map((e) => (
-                      <SelectItem key={e} value={e}>
-                        {e}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-sm text-muted-foreground">Call Strike</label>
-                <Select value={ceStrike} onValueChange={setCeStrike} disabled={chain.length === 0}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="CE strike" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {chain.map((r) => (
-                      <SelectItem key={`ce-${r.strike}`} value={String(r.strike)}>
-                        {r.strike} {r.ce.label ? `(${r.ce.label})` : ''}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-sm text-muted-foreground">Put Strike</label>
-                <Select value={peStrike} onValueChange={setPeStrike} disabled={chain.length === 0}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="PE strike" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {chain.map((r) => (
-                      <SelectItem key={`pe-${r.strike}`} value={String(r.strike)}>
-                        {r.strike} {r.pe.label ? `(${r.pe.label})` : ''}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </>
-          )}
-
-          {/* Futures: expiry dropdown → framed FUT symbol */}
-          {!isEquityExch && segment === 'FUTURES' && (
-            <div className="space-y-1">
-              <label className="text-sm text-muted-foreground">Expiry</label>
-              <Select
-                value={instrument?.symbol ?? ''}
-                disabled={!underlying || futContracts.length === 0}
-                onValueChange={(sym) => {
-                  const c = futContracts.find((x) => x.symbol === sym)
-                  if (c) {
-                    setInstrument({
-                      symbol: c.symbol,
-                      exchange,
-                      lotsize: c.lotsize,
-                      name: underlying,
-                    })
-                  }
-                }}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select expiry" />
-                </SelectTrigger>
-                <SelectContent>
-                  {futContracts.map((c) => (
-                    <SelectItem key={c.symbol} value={c.symbol}>
-                      {c.expiry}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Live tickers */}
-      {isSingle ? (
-        <div className="grid grid-cols-1 gap-4">
-          <Ticker
-            title={segment === 'EQUITY' ? 'Equity' : 'Futures'}
-            symbol={singleLeg?.symbol}
-            ltp={singleTick?.ltp}
-            change={singleTick?.change}
-            changePercent={singleTick?.change_percent}
-            open={singleTick?.open}
-            high={singleTick?.high}
-            low={singleTick?.low}
-            decimals={priceDecimals(singleLeg?.exchange)}
-          />
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <Ticker
-            title="Call (CE)"
-            symbol={ceLeg?.symbol}
-            ltp={ceTick?.ltp}
-            change={ceTick?.change}
-            changePercent={ceTick?.change_percent}
-            open={ceTick?.open}
-            high={ceTick?.high}
-            low={ceTick?.low}
-            decimals={priceDecimals(ceLeg?.exchange ?? foExchange)}
-          />
-          <Ticker
-            title={underlying || 'Underlying'}
-            symbol={underlying}
-            ltp={underlyingTick?.ltp}
-            change={underlyingTick?.change}
-            changePercent={underlyingTick?.change_percent}
-            open={underlyingTick?.open}
-            high={underlyingTick?.high}
-            low={underlyingTick?.low}
-            decimals={priceDecimals(underlyingExch)}
-          />
-          <Ticker
-            title="Put (PE)"
-            symbol={peLeg?.symbol}
-            ltp={peTick?.ltp}
-            change={peTick?.change}
-            changePercent={peTick?.change_percent}
-            open={peTick?.open}
-            high={peTick?.high}
-            low={peTick?.low}
-            decimals={priceDecimals(peLeg?.exchange ?? foExchange)}
-          />
-        </div>
-      )}
-
-      {/* Live charts (candles + volume + OHLC legend), shared timeframe. Charts
-          are off by default and only mount when toggled on — off means no chart
-          feed subscriptions. The Charts switch + timeframe both persist. */}
-      <div className="flex flex-wrap items-center gap-4">
-        <label className="flex items-center gap-2">
-          <Switch checked={showCharts} onCheckedChange={setShowCharts} />
-          <span className="text-sm font-medium">Charts</span>
-        </label>
-        {showCharts && (
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs text-muted-foreground">Timeframe</span>
-            <div className="inline-flex items-center rounded-md border p-0.5">
-              {CHART_TIMEFRAMES.map((tf) => (
-                <button
-                  type="button"
-                  key={tf}
-                  onClick={() => setChartTf(tf)}
-                  className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-                    chartTf === tf
-                      ? 'bg-primary text-primary-foreground'
-                      : 'text-muted-foreground hover:text-foreground'
-                  }`}
-                >
-                  {tf}
-                </button>
-              ))}
-            </div>
-          </div>
         )}
+
+        {/* Lots / Shares */}
+        <div className="flex items-center gap-1">
+          <span className="text-[11px] text-muted-foreground">
+            {segment === 'EQUITY' ? 'Qty' : 'Lots'}
+          </span>
+          {segment === 'EQUITY' ? (
+            <Input
+              type="number"
+              min={1}
+              value={equityShares}
+              onChange={(e) => setEquityShares(Math.max(1, Number(e.target.value) || 1))}
+              className="h-7 w-16 text-center font-mono text-xs px-1"
+            />
+          ) : (
+            <div className="flex items-center rounded border border-border/80 bg-background">
+              <button
+                type="button"
+                onClick={() => setLots((n) => Math.max(1, n - 1))}
+                className="px-1.5 py-0.5 text-xs hover:bg-muted text-muted-foreground"
+              >
+                −
+              </button>
+              <span className="w-6 text-center font-mono font-bold text-xs tabular-nums">{lots}</span>
+              <button
+                type="button"
+                onClick={() => setLots((n) => Math.min(MAX_LOTS, n + 1))}
+                className="px-1.5 py-0.5 text-xs hover:bg-muted text-muted-foreground"
+              >
+                +
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Product */}
+        <Select value={product} onValueChange={(v) => setProduct(v as ScalpingProduct)}>
+          <SelectTrigger className="h-7 w-16 text-xs px-1.5">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="MIS" className="text-xs">MIS</SelectItem>
+            {segment !== 'EQUITY' && <SelectItem value="NRML" className="text-xs">NRML</SelectItem>}
+            {segment === 'EQUITY' && <SelectItem value="CNC" className="text-xs">CNC</SelectItem>}
+          </SelectContent>
+        </Select>
+
+        <div className="h-4 w-px bg-border/60" />
+
+        {/* Auto SL & Target */}
+        <div className="flex items-center gap-1.5" title="Auto Stop-Loss on Entry">
+          <Checkbox checked={predefSlOn} onCheckedChange={(v) => setPredefSlOn(v === true)} />
+          <span className="text-[11px] text-muted-foreground">SL</span>
+          <Input
+            type="number"
+            disabled={!predefSlOn}
+            value={predefSlValue}
+            onChange={(e) => setPredefSlValue(e.target.value)}
+            placeholder="pts"
+            className="h-7 w-12 text-center text-xs font-mono px-1"
+          />
+          <button
+            type="button"
+            disabled={!predefSlOn}
+            onClick={() => setPredefSlUnit((u) => (u === 'PTS' ? 'PCT' : 'PTS'))}
+            className="text-[10px] font-mono text-muted-foreground hover:text-foreground"
+          >
+            {predefSlUnit}
+          </button>
+        </div>
+
+        <div className="flex items-center gap-1.5" title="Auto Target on Entry">
+          <Checkbox checked={predefTgtOn} onCheckedChange={(v) => setPredefTgtOn(v === true)} />
+          <span className="text-[11px] text-muted-foreground">Tgt</span>
+          <Input
+            type="number"
+            disabled={!predefTgtOn}
+            value={predefTgtValue}
+            onChange={(e) => setPredefTgtValue(e.target.value)}
+            placeholder="pts"
+            className="h-7 w-12 text-center text-xs font-mono px-1"
+          />
+          <button
+            type="button"
+            disabled={!predefTgtOn}
+            onClick={() => setPredefTgtUnit((u) => (u === 'PTS' ? 'PCT' : 'PTS'))}
+            className="text-[10px] font-mono text-muted-foreground hover:text-foreground"
+          >
+            {predefTgtUnit}
+          </button>
+        </div>
+
+        {/* Right side: Watchlist, Advisor, Charts, Actions */}
+        <div className="ml-auto flex items-center gap-2">
+          {/* Watchlist Quick Picker */}
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button variant="outline" size="sm" className="h-7 px-2 text-xs gap-1 border-border/80">
+                <Bookmark className="h-3.5 w-3.5 text-amber-500" />
+                <span>Watchlist</span>
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-64 p-2 text-xs">
+              <div className="font-semibold mb-1 pb-1 border-b text-[11px] flex justify-between items-center">
+                <span>Select from Watchlist</span>
+                <span className="text-[10px] text-muted-foreground">{watchlists.length} lists</span>
+              </div>
+              <div className="max-h-60 overflow-y-auto space-y-1">
+                {watchlists.flatMap((w) => w.items ?? []).length === 0 ? (
+                  <div className="text-center py-3 text-muted-foreground text-[11px]">No watchlist items</div>
+                ) : (
+                  watchlists.map((w) => (
+                    <div key={w.id} className="space-y-0.5">
+                      <div className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider px-1 pt-1">
+                        {w.name}
+                      </div>
+                      {(w.items ?? []).map((item) => (
+                        <button
+                          type="button"
+                          key={item.id}
+                          className="w-full flex items-center justify-between px-1.5 py-1 rounded hover:bg-muted text-left font-mono text-xs"
+                          onClick={() => {
+                            setSyncSymbol(`${item.exchange}:${item.symbol}`)
+                          }}
+                        >
+                          <span className="font-medium">{item.symbol}</span>
+                          <span className="text-[10px] text-muted-foreground">{item.exchange}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ))
+                )}
+              </div>
+            </PopoverContent>
+          </Popover>
+
+          {/* Scalper Advisor Alerts Popover */}
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button variant="outline" size="sm" className="h-7 px-2 text-xs gap-1 border-border/80 relative">
+                <Zap className="h-3.5 w-3.5 text-sky-500" />
+                <span>Advisor</span>
+                {activeAlerts.length > 0 && (
+                  <span className="ml-0.5 rounded-full bg-sky-500 px-1 text-[9px] font-bold text-white leading-tight">
+                    {activeAlerts.length}
+                  </span>
+                )}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-72 p-2 text-xs">
+              <div className="font-semibold mb-1 pb-1 border-b text-[11px] flex justify-between items-center">
+                <span>Scalper Advisor Alerts</span>
+                <span className="text-[10px] text-muted-foreground">{activeAlerts.length} active</span>
+              </div>
+              <div className="max-h-64 overflow-y-auto space-y-1">
+                {activeAlerts.length === 0 ? (
+                  <div className="text-center py-4 text-muted-foreground text-[11px]">No active advisor alerts</div>
+                ) : (
+                  activeAlerts.map((alert) => (
+                    <button
+                      type="button"
+                      key={alert.id}
+                      className="w-full flex flex-col p-1.5 rounded border border-border/50 hover:bg-muted text-left transition-colors"
+                      onClick={() => {
+                        setSyncTarget({
+                          key: alert.key,
+                          underlying: alert.key,
+                          exchange: alert.market ? (alert.market === 'NSE' ? 'NFO' : alert.market === 'BSE' ? 'BFO' : alert.market) : 'NFO',
+                          side: alert.side,
+                          strike: alert.strike ?? 0,
+                          source: 'alert',
+                        })
+                      }}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-xs text-foreground">{alert.key}</span>
+                        <span
+                          className={cn(
+                            'px-1 py-0.2 rounded text-[9px] font-bold',
+                            alert.side === 'CE' ? 'bg-emerald-500/15 text-emerald-600' : 'bg-rose-500/15 text-rose-600'
+                          )}
+                        >
+                          BUY {alert.side} {alert.strike ? `@${alert.strike}` : ''}
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-muted-foreground flex justify-between mt-0.5">
+                        <span>Premium: ₹{alert.current_premium ?? alert.entry_premium ?? '—'}</span>
+                        <span className="text-sky-600 font-semibold">Click to sync</span>
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+            </PopoverContent>
+          </Popover>
+
+          {/* Charts Toggle */}
+          <div className="flex items-center gap-1.5 pl-1">
+            <span className="text-[11px] text-muted-foreground">Chart</span>
+            <Switch checked={showCharts} onCheckedChange={setShowCharts} className="scale-75" />
+            {showCharts && (
+              <div className="inline-flex rounded border border-border/80 p-0.5 bg-muted/40">
+                {CHART_TIMEFRAMES.map((tf) => (
+                  <button
+                    type="button"
+                    key={tf}
+                    onClick={() => setChartTf(tf)}
+                    className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                      chartTf === tf ? 'bg-primary text-primary-foreground font-bold' : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {tf}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="h-4 w-px bg-border/60" />
+
+          {/* MTM & Net */}
+          <div className="flex items-center gap-2 font-mono text-xs">
+            <span className="text-muted-foreground">Net: <span className="font-bold text-foreground">{netQty}</span></span>
+            <span className={cn('font-bold', mtm >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400')}>
+              MTM: ₹{mtm.toFixed(2)}
+            </span>
+          </div>
+
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={doCloseAll}
+            className="h-7 text-xs font-bold px-2"
+            title="Flatten all scalping positions (F6)"
+          >
+            Close All / F6
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={doCancelAll}
+            className="h-7 text-xs font-bold px-2"
+            title="Cancel all pending orders (F7)"
+          >
+            Cancel / F7
+          </Button>
+        </div>
       </div>
 
-      {showCharts &&
-        (isSingle ? (
-          <div className="grid grid-cols-1 gap-3">
-            <div className="h-[340px]">
-              <ScalpChart
-                symbol={singleLeg?.symbol ?? ''}
-                exchange={singleLeg?.exchange ?? ''}
-                interval={chartTf}
-                title={segment === 'EQUITY' ? 'Equity' : 'Futures'}
-              />
-            </div>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-            <div className="h-[340px]">
-              <ScalpChart
-                symbol={ceLeg?.symbol ?? ''}
-                exchange={ceLeg?.exchange ?? ''}
-                interval={chartTf}
-                title="Call (CE)"
-              />
-            </div>
-            <div className="h-[340px]">
-              <ScalpChart
-                symbol={underlyingSym}
-                exchange={underlyingExch}
-                interval={chartTf}
-                title={underlying || 'Underlying'}
-              />
-            </div>
-            <div className="h-[340px]">
-              <ScalpChart
-                symbol={peLeg?.symbol ?? ''}
-                exchange={peLeg?.exchange ?? ''}
-                interval={chartTf}
-                title="Put (PE)"
-              />
-            </div>
-          </div>
-        ))}
-
-      {/* Order entry */}
-      <Card>
-        <CardContent className="space-y-4 pt-6">
-          <div className="flex flex-wrap items-center gap-6">
-            <label className="flex items-center gap-2">
-              <Switch checked={armed} onCheckedChange={setArmed} />
-              <span className="text-sm font-medium">One-Click</span>
-            </label>
-
-            {/* Qty: +/- stepper. Equity = shares; derivatives = lots (max 20). */}
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-muted-foreground">
-                {segment === 'EQUITY' ? 'Qty' : `Qty (In Lot: ${lots})`}
-              </span>
-              {segment === 'EQUITY' ? (
-                <div className="flex items-center gap-1">
-                  <Button
-                    variant="outline"
-                    size="icon-sm"
-                    onClick={() => setEquityShares((q) => Math.max(1, q - 1))}
-                  >
-                    −
-                  </Button>
-                  <Input
-                    type="number"
-                    inputMode="numeric"
-                    min={1}
-                    value={equityShares}
-                    onChange={(e) => setEquityShares(Math.max(1, Number(e.target.value) || 1))}
-                    className="w-20 text-center"
-                  />
-                  <Button
-                    variant="outline"
-                    size="icon-sm"
-                    onClick={() => setEquityShares((q) => q + 1)}
-                  >
-                    +
-                  </Button>
-                </div>
-              ) : (
-                <div className="flex items-center gap-1">
-                  <Button
-                    variant="outline"
-                    size="icon-sm"
-                    onClick={() => setLots((n) => Math.max(1, n - 1))}
-                  >
-                    −
-                  </Button>
-                  <span className="w-10 text-center font-mono tabular-nums">{lots}</span>
-                  <Button
-                    variant="outline"
-                    size="icon-sm"
-                    onClick={() => setLots((n) => Math.min(MAX_LOTS, n + 1))}
-                  >
-                    +
-                  </Button>
-                </div>
-              )}
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-muted-foreground">Product Type</span>
-              <Select value={product} onValueChange={(v) => setProduct(v as ScalpingProduct)}>
-                <SelectTrigger className="w-28">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {/* Raw OpenAlgo product codes (docs/prompt/order-constants.md):
-                      MIS / NRML / CNC — not Intraday/Margin/Delivery. */}
-                  <SelectItem value="MIS">MIS</SelectItem>
-                  {segment !== 'EQUITY' && <SelectItem value="NRML">NRML</SelectItem>}
-                  {segment === 'EQUITY' && <SelectItem value="CNC">CNC</SelectItem>}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-muted-foreground">Order Type</span>
-              <Select value="MARKET" disabled>
-                <SelectTrigger className="w-28">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="MARKET">Market</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Global predefined SL — auto-attached to every entry when enabled */}
-            <div className="flex items-center gap-1.5" title="Auto stop-loss on every entry">
-              <Checkbox checked={predefSlOn} onCheckedChange={(v) => setPredefSlOn(v === true)} />
-              <span className="text-sm text-muted-foreground">SL</span>
-              <Input
-                type="number"
-                inputMode="decimal"
-                disabled={!predefSlOn}
-                value={predefSlValue}
-                onChange={(e) => setPredefSlValue(e.target.value)}
-                placeholder="0"
-                className="w-16"
-              />
-              <Select
-                value={predefSlUnit}
-                onValueChange={(v) => setPredefSlUnit(v as 'PTS' | 'PCT')}
-              >
-                <SelectTrigger className="w-20">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="PTS">Pts</SelectItem>
-                  <SelectItem value="PCT">%</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Global predefined Target — auto take-profit on every entry */}
-            <div className="flex items-center gap-1.5" title="Auto target on every entry">
-              <Checkbox checked={predefTgtOn} onCheckedChange={(v) => setPredefTgtOn(v === true)} />
-              <span className="text-sm text-muted-foreground">Target</span>
-              <Input
-                type="number"
-                inputMode="decimal"
-                disabled={!predefTgtOn}
-                value={predefTgtValue}
-                onChange={(e) => setPredefTgtValue(e.target.value)}
-                placeholder="0"
-                className="w-16"
-              />
-              <Select
-                value={predefTgtUnit}
-                onValueChange={(v) => setPredefTgtUnit(v as 'PTS' | 'PCT')}
-              >
-                <SelectTrigger className="w-20">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="PTS">Pts</SelectItem>
-                  <SelectItem value="PCT">%</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div
-              className="ml-auto flex items-center gap-6 font-mono"
-              title="Sum across the position-book rows below (open + today's closed trades)"
+      {/* ── Main Area: Resizable Columns & Bottom Dock ──────────────── */}
+      <ResizablePanelGroup
+        orientation="vertical"
+        id="scalper-main-layout"
+        defaultLayout={verticalLayout.defaultLayout}
+        onLayoutChanged={verticalLayout.onLayoutChanged}
+        className="flex-1 min-h-0 overflow-hidden"
+      >
+        {/* Upper Resizable Trading Section */}
+        <ResizablePanel
+          id="scalper-trading-panel"
+          defaultSize="74%"
+          minSize="30%"
+          className="flex flex-col min-h-0 p-1.5 overflow-hidden"
+        >
+          {optionsMode ? (
+            <ResizablePanelGroup
+              orientation="horizontal"
+              id="scalper-options-columns"
+              defaultLayout={optionsColumnsLayout.defaultLayout}
+              onLayoutChanged={optionsColumnsLayout.onLayoutChanged}
+              className="flex-1 min-h-0 gap-0"
             >
-              <span>
-                Net Qty: <span className="font-semibold">{netQty}</span>
-              </span>
-              <span>
-                MTM:{' '}
-                <span className={`font-semibold ${mtm >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                  {mtm.toFixed(2)}
-                </span>
-              </span>
-            </div>
-          </div>
+              {/* Column 1: Call (CE) */}
+              <ResizablePanel id="panel-ce" defaultSize="33%" minSize="20%" className="min-h-0 flex flex-col">
+                <div className="flex flex-col h-full min-h-0 rounded-md border border-border/80 bg-card p-1.5 overflow-hidden mr-0.5">
+                  {/* Header */}
+                  <div className="flex items-center gap-1.5 shrink-0 pb-1 border-b border-border/50">
+                    <span className="rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-bold text-xs px-1.5 py-0.5">
+                      CE
+                    </span>
+                    <Select value={ceStrike} onValueChange={setCeStrike} disabled={chain.length === 0}>
+                      <SelectTrigger className="h-6 w-32 text-xs font-mono font-bold px-1.5">
+                        <SelectValue placeholder="CE strike" />
+                      </SelectTrigger>
+                      <SelectContent className="max-h-60 text-xs">
+                        {chain.map((r) => (
+                          <SelectItem key={`ce-${r.strike}`} value={String(r.strike)} className="text-xs font-mono">
+                            {r.strike} {r.ce.label ? `(${r.ce.label})` : ''}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <div className="flex items-baseline gap-1 ml-auto font-mono">
+                      <span className="text-sm font-bold text-emerald-600 dark:text-emerald-400">
+                        {ceTick?.ltp != null ? ceTick.ltp.toFixed(priceDecimals(ceLeg?.exchange ?? foExchange)) : '—'}
+                      </span>
+                      {ceTick?.change_percent != null && (
+                        <span className={cn('text-[10px] font-semibold', ceTick.change_percent >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+                          {ceTick.change_percent >= 0 ? '+' : ''}
+                          {ceTick.change_percent.toFixed(1)}%
+                        </span>
+                      )}
+                    </div>
+                    {netQtyFor(ceLeg?.symbol) !== 0 && (
+                      <span className="rounded bg-primary/10 text-primary font-mono text-[10px] font-bold px-1">
+                        {netQtyFor(ceLeg?.symbol)}
+                      </span>
+                    )}
+                  </div>
 
-          {isSingle ? (
-            <div className="grid grid-cols-2 gap-3">
-              <Button
-                className="bg-green-600 hover:bg-green-700"
-                disabled={!singleLeg}
-                onClick={() => submitOrder(singleLeg, 'BUY')}
-              >
-                ↑ Buy {segment === 'EQUITY' ? 'Stock' : ''}
-              </Button>
-              <Button
-                className="bg-red-600 hover:bg-red-700"
-                disabled={!singleLeg}
-                onClick={() => submitOrder(singleLeg, 'SELL')}
-              >
-                ↓ Sell {segment === 'EQUITY' ? 'Stock' : ''}
-              </Button>
-            </div>
+                  {/* Chart & Market Depth (Vertically Resizable) */}
+                  {showCharts ? (
+                    <ResizablePanelGroup orientation="vertical" id="col-ce-inner" className="flex-1 min-h-0 my-1">
+                      <ResizablePanel id="col-ce-chart" defaultSize="46%" minSize="20%" className="min-h-0 flex flex-col">
+                        <div className="h-full min-h-0 rounded overflow-hidden border border-border/50 bg-background/50">
+                          <ScalpChart
+                            symbol={ceLeg?.symbol ?? ''}
+                            exchange={ceLeg?.exchange ?? ''}
+                            interval={chartTf}
+                            title="Call (CE)"
+                          />
+                        </div>
+                      </ResizablePanel>
+                      <ResizableHandle withHandle orientation="horizontal" className="my-0.5" />
+                      <ResizablePanel id="col-ce-depth" defaultSize="54%" minSize="25%" className="min-h-0 flex flex-col">
+                        <div className="h-full min-h-0 flex flex-col overflow-hidden">
+                          <div className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider mb-0.5 px-0.5 flex justify-between shrink-0">
+                            <span>Market Depth</span>
+                            <span className="font-mono">{ceLeg?.symbol}</span>
+                          </div>
+                          <div className="flex-1 min-h-0 overflow-y-auto">
+                            <DepthTable
+                              apiKey={apiKey}
+                              symbol={ceLeg?.symbol ?? ''}
+                              exchange={ceLeg?.exchange ?? foExchange}
+                              enabled={!!ceLeg}
+                              className="h-full"
+                            />
+                          </div>
+                        </div>
+                      </ResizablePanel>
+                    </ResizablePanelGroup>
+                  ) : (
+                    <div className="flex-1 min-h-[70px] my-1 flex flex-col overflow-hidden">
+                      <div className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider mb-0.5 px-0.5 flex justify-between shrink-0">
+                        <span>Market Depth</span>
+                        <span className="font-mono">{ceLeg?.symbol}</span>
+                      </div>
+                      <div className="flex-1 min-h-0 overflow-y-auto">
+                        <DepthTable
+                          apiKey={apiKey}
+                          symbol={ceLeg?.symbol ?? ''}
+                          exchange={ceLeg?.exchange ?? foExchange}
+                          enabled={!!ceLeg}
+                          className="h-full"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Actions */}
+                  <div className="shrink-0 pt-1 border-t border-border/50 space-y-1">
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <Button
+                        size="sm"
+                        className="h-8 bg-emerald-600 hover:bg-emerald-700 font-bold text-xs"
+                        onClick={() => submitOrder(ceLeg, 'BUY')}
+                      >
+                        ↑ BUY CE
+                      </Button>
+                      <Button
+                        size="sm"
+                        className="h-8 bg-rose-600 hover:bg-rose-700 font-bold text-xs"
+                        onClick={() => submitOrder(ceLeg, 'SELL')}
+                      >
+                        ↓ SELL CE
+                      </Button>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-6 flex-1 text-[10px] font-medium"
+                        onClick={() => openLegSL(ceLeg)}
+                        disabled={!ceLeg}
+                      >
+                        {ceSL ? 'Edit SL' : 'Set SL'}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-6 flex-1 text-[10px] font-medium border-amber-500/40 text-amber-600 hover:bg-amber-500/10"
+                        onClick={() => {
+                          const row = positionRows.find((p) => p.symbol === ceLeg?.symbol)
+                          if (row) doCloseRow(row)
+                          else showToast.info('No open position for this contract')
+                        }}
+                        disabled={!ceLeg || netQtyFor(ceLeg?.symbol) === 0}
+                      >
+                        Square Off
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </ResizablePanel>
+
+              {/* Horizontal Divider between CE and SPOT */}
+              <ResizableHandle withHandle orientation="vertical" className="mx-0.5" />
+
+              {/* Column 2: SPOT / Underlying */}
+              <ResizablePanel id="panel-spot" defaultSize="34%" minSize="20%" className="min-h-0 flex flex-col">
+                <div className="flex flex-col h-full min-h-0 rounded-md border border-border/80 bg-card p-1.5 overflow-hidden mx-0.5">
+                  {/* Header */}
+                  <div className="flex items-center gap-1.5 shrink-0 pb-1 border-b border-border/50">
+                    <span className="rounded bg-sky-500/15 text-sky-600 dark:text-sky-400 font-bold text-xs px-1.5 py-0.5">
+                      SPOT
+                    </span>
+                    <span className="font-bold text-xs font-mono">{underlying}</span>
+                    <div className="flex items-baseline gap-1 ml-auto font-mono">
+                      <span className="text-sm font-bold text-foreground">
+                        {underlyingTick?.ltp != null ? underlyingTick.ltp.toFixed(priceDecimals(underlyingExch)) : '—'}
+                      </span>
+                      {underlyingTick?.change_percent != null && (
+                        <span className={cn('text-[10px] font-semibold', underlyingTick.change_percent >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+                          {underlyingTick.change_percent >= 0 ? '+' : ''}
+                          {underlyingTick.change_percent.toFixed(1)}%
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Chart & Market Depth (Vertically Resizable) */}
+                  {showCharts ? (
+                    <ResizablePanelGroup orientation="vertical" id="col-spot-inner" className="flex-1 min-h-0 my-1">
+                      <ResizablePanel id="col-spot-chart" defaultSize="46%" minSize="20%" className="min-h-0 flex flex-col">
+                        <div className="h-full min-h-0 rounded overflow-hidden border border-border/50 bg-background/50">
+                          <ScalpChart
+                            symbol={underlyingSym}
+                            exchange={underlyingExch}
+                            interval={chartTf}
+                            title={underlying || 'Underlying'}
+                          />
+                        </div>
+                      </ResizablePanel>
+                      <ResizableHandle withHandle orientation="horizontal" className="my-0.5" />
+                      <ResizablePanel id="col-spot-depth" defaultSize="54%" minSize="25%" className="min-h-0 flex flex-col">
+                        <div className="h-full min-h-0 flex flex-col overflow-hidden">
+                          <div className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider mb-0.5 px-0.5 flex justify-between shrink-0">
+                            <span>Underlying Depth</span>
+                            <span className="font-mono">{underlyingSym}</span>
+                          </div>
+                          <div className="flex-1 min-h-0 overflow-y-auto">
+                            <DepthTable
+                              apiKey={apiKey}
+                              symbol={underlyingSym}
+                              exchange={underlyingExch}
+                              enabled={!!underlyingSym}
+                              className="h-full"
+                            />
+                          </div>
+                        </div>
+                      </ResizablePanel>
+                    </ResizablePanelGroup>
+                  ) : (
+                    <div className="flex-1 min-h-[70px] my-1 flex flex-col overflow-hidden">
+                      <div className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider mb-0.5 px-0.5 flex justify-between shrink-0">
+                        <span>Underlying Depth</span>
+                        <span className="font-mono">{underlyingSym}</span>
+                      </div>
+                      <div className="flex-1 min-h-0 overflow-y-auto">
+                        <DepthTable
+                          apiKey={apiKey}
+                          symbol={underlyingSym}
+                          exchange={underlyingExch}
+                          enabled={!!underlyingSym}
+                          className="h-full"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Range & Info */}
+                  <div className="shrink-0 pt-1 border-t border-border/50 space-y-1">
+                    <RangeBarCompact
+                      ltp={underlyingTick?.ltp}
+                      open={underlyingTick?.open}
+                      high={underlyingTick?.high}
+                      low={underlyingTick?.low}
+                      decimals={priceDecimals(underlyingExch)}
+                    />
+                    <div className="flex items-center justify-between text-[10px] text-muted-foreground font-mono bg-muted/20 px-1.5 py-1 rounded">
+                      <span>ATM: <strong className="text-foreground">{chainResp?.atm_strike ?? '—'}</strong></span>
+                      <span>Lotsize: <strong className="text-foreground">{chain[0]?.ce?.lotsize ?? '—'}</strong></span>
+                      <span>Exp: <strong className="text-foreground">{expiry || '—'}</strong></span>
+                    </div>
+                  </div>
+                </div>
+              </ResizablePanel>
+
+              {/* Horizontal Divider between SPOT and PE */}
+              <ResizableHandle withHandle orientation="vertical" className="mx-0.5" />
+
+              {/* Column 3: Put (PE) */}
+              <ResizablePanel id="panel-pe" defaultSize="33%" minSize="20%" className="min-h-0 flex flex-col">
+                <div className="flex flex-col h-full min-h-0 rounded-md border border-border/80 bg-card p-1.5 overflow-hidden ml-0.5">
+                  {/* Header */}
+                  <div className="flex items-center gap-1.5 shrink-0 pb-1 border-b border-border/50">
+                    <span className="rounded bg-rose-500/15 text-rose-600 dark:text-rose-400 font-bold text-xs px-1.5 py-0.5">
+                      PE
+                    </span>
+                    <Select value={peStrike} onValueChange={setPeStrike} disabled={chain.length === 0}>
+                      <SelectTrigger className="h-6 w-32 text-xs font-mono font-bold px-1.5">
+                        <SelectValue placeholder="PE strike" />
+                      </SelectTrigger>
+                      <SelectContent className="max-h-60 text-xs">
+                        {chain.map((r) => (
+                          <SelectItem key={`pe-${r.strike}`} value={String(r.strike)} className="text-xs font-mono">
+                            {r.strike} {r.pe.label ? `(${r.pe.label})` : ''}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <div className="flex items-baseline gap-1 ml-auto font-mono">
+                      <span className="text-sm font-bold text-rose-600 dark:text-rose-400">
+                        {peTick?.ltp != null ? peTick.ltp.toFixed(priceDecimals(peLeg?.exchange ?? foExchange)) : '—'}
+                      </span>
+                      {peTick?.change_percent != null && (
+                        <span className={cn('text-[10px] font-semibold', peTick.change_percent >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+                          {peTick.change_percent >= 0 ? '+' : ''}
+                          {peTick.change_percent.toFixed(1)}%
+                        </span>
+                      )}
+                    </div>
+                    {netQtyFor(peLeg?.symbol) !== 0 && (
+                      <span className="rounded bg-primary/10 text-primary font-mono text-[10px] font-bold px-1">
+                        {netQtyFor(peLeg?.symbol)}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Chart & Market Depth (Vertically Resizable) */}
+                  {showCharts ? (
+                    <ResizablePanelGroup orientation="vertical" id="col-pe-inner" className="flex-1 min-h-0 my-1">
+                      <ResizablePanel id="col-pe-chart" defaultSize="46%" minSize="20%" className="min-h-0 flex flex-col">
+                        <div className="h-full min-h-0 rounded overflow-hidden border border-border/50 bg-background/50">
+                          <ScalpChart
+                            symbol={peLeg?.symbol ?? ''}
+                            exchange={peLeg?.exchange ?? ''}
+                            interval={chartTf}
+                            title="Put (PE)"
+                          />
+                        </div>
+                      </ResizablePanel>
+                      <ResizableHandle withHandle orientation="horizontal" className="my-0.5" />
+                      <ResizablePanel id="col-pe-depth" defaultSize="54%" minSize="25%" className="min-h-0 flex flex-col">
+                        <div className="h-full min-h-0 flex flex-col overflow-hidden">
+                          <div className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider mb-0.5 px-0.5 flex justify-between shrink-0">
+                            <span>Market Depth</span>
+                            <span className="font-mono">{peLeg?.symbol}</span>
+                          </div>
+                          <div className="flex-1 min-h-0 overflow-y-auto">
+                            <DepthTable
+                              apiKey={apiKey}
+                              symbol={peLeg?.symbol ?? ''}
+                              exchange={peLeg?.exchange ?? foExchange}
+                              enabled={!!peLeg}
+                              className="h-full"
+                            />
+                          </div>
+                        </div>
+                      </ResizablePanel>
+                    </ResizablePanelGroup>
+                  ) : (
+                    <div className="flex-1 min-h-[70px] my-1 flex flex-col overflow-hidden">
+                      <div className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider mb-0.5 px-0.5 flex justify-between shrink-0">
+                        <span>Market Depth</span>
+                        <span className="font-mono">{peLeg?.symbol}</span>
+                      </div>
+                      <div className="flex-1 min-h-0 overflow-y-auto">
+                        <DepthTable
+                          apiKey={apiKey}
+                          symbol={peLeg?.symbol ?? ''}
+                          exchange={peLeg?.exchange ?? foExchange}
+                          enabled={!!peLeg}
+                          className="h-full"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Actions */}
+                  <div className="shrink-0 pt-1 border-t border-border/50 space-y-1">
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <Button
+                        size="sm"
+                        className="h-8 bg-emerald-600 hover:bg-emerald-700 font-bold text-xs"
+                        onClick={() => submitOrder(peLeg, 'BUY')}
+                      >
+                        → BUY PE
+                      </Button>
+                      <Button
+                        size="sm"
+                        className="h-8 bg-rose-600 hover:bg-rose-700 font-bold text-xs"
+                        onClick={() => submitOrder(peLeg, 'SELL')}
+                      >
+                        ← SELL PE
+                      </Button>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-6 flex-1 text-[10px] font-medium"
+                        onClick={() => openLegSL(peLeg)}
+                        disabled={!peLeg}
+                      >
+                        {peSL ? 'Edit SL' : 'Set SL'}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-6 flex-1 text-[10px] font-medium border-amber-500/40 text-amber-600 hover:bg-amber-500/10"
+                        onClick={() => {
+                          const row = positionRows.find((p) => p.symbol === peLeg?.symbol)
+                          if (row) doCloseRow(row)
+                          else showToast.info('No open position for this contract')
+                        }}
+                        disabled={!peLeg || netQtyFor(peLeg?.symbol) === 0}
+                      >
+                        Square Off
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </ResizablePanel>
+            </ResizablePanelGroup>
           ) : (
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              <Button
-                className="bg-green-600 hover:bg-green-700"
-                onClick={() => submitOrder(ceLeg, 'BUY')}
-              >
-                ↑ Buy Call
-              </Button>
-              <Button
-                className="bg-red-600 hover:bg-red-700"
-                onClick={() => submitOrder(ceLeg, 'SELL')}
-              >
-                ↓ Sell Call
-              </Button>
-              <Button
-                className="bg-green-600 hover:bg-green-700"
-                onClick={() => submitOrder(peLeg, 'BUY')}
-              >
-                → Buy Put
-              </Button>
-              <Button
-                className="bg-red-600 hover:bg-red-700"
-                onClick={() => submitOrder(peLeg, 'SELL')}
-              >
-                ← Sell Put
-              </Button>
-            </div>
-          )}
-
-          <div className="flex flex-wrap items-center gap-3">
-            {isSingle ? (
-              <Button variant="outline" disabled={!singleLeg} onClick={() => openLegSL(singleLeg)}>
-                {singleLeg && findLegSL(slMap, singleLeg.symbol, singleLeg.exchange, product)
-                  ? 'Edit SL'
-                  : 'Set SL'}
-              </Button>
-            ) : (
-              <>
-                <Button variant="outline" disabled={!ceLeg} onClick={() => openLegSL(ceLeg)}>
-                  {ceSL ? 'Edit Call SL' : 'Set Call SL'}
-                </Button>
-                <Button variant="outline" disabled={!peLeg} onClick={() => openLegSL(peLeg)}>
-                  {peSL ? 'Edit Put SL' : 'Set Put SL'}
-                </Button>
-              </>
-            )}
-            <Button
-              variant="outline"
-              onClick={doCloseAll}
-              title="Closes only the scalping strategy's positions (freeze-safe), not the whole account"
+            /* Single Instrument (Equity / Futures) */
+            <ResizablePanelGroup
+              orientation="horizontal"
+              id="scalper-equity-columns"
+              defaultLayout={equityColumnsLayout.defaultLayout}
+              onLayoutChanged={equityColumnsLayout.onLayoutChanged}
+              className="flex-1 min-h-0 gap-0"
             >
-              Close All Positions / F6
-            </Button>
-            <Button variant="outline" onClick={doCancelAll} title="Cancels all open orders">
-              Cancel All Orders / F7
-            </Button>
+              <ResizablePanel id="panel-equity-main" defaultSize="60%" minSize="30%" className="min-h-0 flex flex-col">
+                <div className="flex flex-col h-full min-h-0 rounded-md border border-border/80 bg-card p-2 overflow-hidden mr-0.5">
+                  <div className="flex items-center gap-2 shrink-0 pb-1 border-b border-border/50">
+                    <Badge variant="outline" className="font-mono">
+                      {segment === 'EQUITY' ? 'EQUITY' : 'FUTURES'}
+                    </Badge>
+                    <span className="font-bold text-sm font-mono">{singleLeg?.symbol}</span>
+                    <div className="flex items-baseline gap-1 ml-auto font-mono">
+                      <span className="text-base font-bold text-foreground">
+                        {singleTick?.ltp != null ? singleTick.ltp.toFixed(priceDecimals(singleLeg?.exchange)) : '—'}
+                      </span>
+                      {singleTick?.change_percent != null && (
+                        <span className={cn('text-xs font-semibold', singleTick.change_percent >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+                          {singleTick.change_percent >= 0 ? '+' : ''}
+                          {singleTick.change_percent.toFixed(1)}%
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {showCharts ? (
+                    <ResizablePanelGroup orientation="vertical" id="col-eq-inner" className="flex-1 min-h-0 my-1">
+                      <ResizablePanel id="col-eq-chart" defaultSize="50%" minSize="20%" className="min-h-0 flex flex-col">
+                        <div className="h-full min-h-0 rounded overflow-hidden border border-border/50">
+                          <ScalpChart
+                            symbol={singleLeg?.symbol ?? ''}
+                            exchange={singleLeg?.exchange ?? ''}
+                            interval={chartTf}
+                            title={segment === 'EQUITY' ? 'Equity' : 'Futures'}
+                          />
+                        </div>
+                      </ResizablePanel>
+                      <ResizableHandle withHandle orientation="horizontal" className="my-0.5" />
+                      <ResizablePanel id="col-eq-depth" defaultSize="50%" minSize="25%" className="min-h-0 flex flex-col">
+                        <div className="h-full min-h-0 flex flex-col overflow-hidden">
+                          <span className="text-[10px] font-semibold text-muted-foreground uppercase mb-0.5 shrink-0">Market Depth</span>
+                          <div className="flex-1 min-h-0 overflow-y-auto">
+                            <DepthTable apiKey={apiKey} symbol={singleLeg?.symbol ?? ''} exchange={singleLeg?.exchange ?? ''} enabled={!!singleLeg} className="h-full" />
+                          </div>
+                        </div>
+                      </ResizablePanel>
+                    </ResizablePanelGroup>
+                  ) : (
+                    <div className="flex-1 min-h-[90px] my-1 flex flex-col overflow-hidden">
+                      <span className="text-[10px] font-semibold text-muted-foreground uppercase mb-0.5 shrink-0">Market Depth</span>
+                      <div className="flex-1 min-h-0 overflow-y-auto">
+                        <DepthTable apiKey={apiKey} symbol={singleLeg?.symbol ?? ''} exchange={singleLeg?.exchange ?? ''} enabled={!!singleLeg} className="h-full" />
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="shrink-0 pt-2 border-t border-border/50 space-y-1.5">
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button
+                        size="sm"
+                        className="h-9 bg-emerald-600 hover:bg-emerald-700 font-bold"
+                        onClick={() => submitOrder(singleLeg, 'BUY')}
+                      >
+                        ↑ BUY
+                      </Button>
+                      <Button
+                        size="sm"
+                        className="h-9 bg-rose-600 hover:bg-rose-700 font-bold"
+                        onClick={() => submitOrder(singleLeg, 'SELL')}
+                      >
+                        ↓ SELL
+                      </Button>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 flex-1 text-xs"
+                        onClick={() => openLegSL(singleLeg)}
+                        disabled={!singleLeg}
+                      >
+                        {singleLeg && findLegSL(slMap, singleLeg.symbol, singleLeg.exchange, product) ? 'Edit SL' : 'Set SL'}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 flex-1 text-xs border-amber-500/40 text-amber-600"
+                        onClick={() => {
+                          const row = positionRows.find((p) => p.symbol === singleLeg?.symbol)
+                          if (row) doCloseRow(row)
+                          else showToast.info('No open position')
+                        }}
+                        disabled={!singleLeg || netQtyFor(singleLeg?.symbol) === 0}
+                      >
+                        Square Off
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </ResizablePanel>
+
+              {/* Horizontal Divider between Equity Main and Stats */}
+              <ResizableHandle withHandle orientation="vertical" className="mx-0.5" />
+
+              <ResizablePanel id="panel-equity-stats" defaultSize="40%" minSize="20%" className="min-h-0 flex flex-col">
+                <div className="flex flex-col h-full min-h-0 rounded-md border border-border/80 bg-card p-2 overflow-hidden ml-0.5">
+                  <div className="font-semibold text-xs border-b border-border/50 pb-1">Benchmark &amp; Day Range</div>
+                  <div className="my-2">
+                    <RangeBarCompact
+                      ltp={singleTick?.ltp}
+                      open={singleTick?.open}
+                      high={singleTick?.high}
+                      low={singleTick?.low}
+                      decimals={priceDecimals(singleLeg?.exchange)}
+                    />
+                  </div>
+                  <div className="text-xs text-muted-foreground p-3 rounded bg-muted/20 space-y-2 mt-auto">
+                    <p>• Arrow Keys: <strong>↑ / → Buy</strong> · <strong>↓ / ← Sell</strong></p>
+                    <p>• Flatten: <strong>F6 Close All Positions</strong></p>
+                    <p>• Cancel: <strong>F7 Cancel All Pending Orders</strong></p>
+                  </div>
+                </div>
+              </ResizablePanel>
+            </ResizablePanelGroup>
+          )}
+        </ResizablePanel>
+
+        {/* Horizontal Drag Handle between Trading Columns and Bottom Dock */}
+        <ResizableHandle withHandle orientation="horizontal" className="my-0.5" />
+
+        {/* ── Bottom Books Dock (Positions · Orders · Trades) ────────── */}
+        <ResizablePanel
+          id="scalper-dock-panel"
+          defaultSize="26%"
+          minSize="10%"
+          className="flex flex-col min-h-0 bg-card/70 border-t border-border/80"
+        >
+          <Tabs value={bookTab} onValueChange={(v) => setBookTab(v as 'positions' | 'orders' | 'trades')} className="flex-1 flex flex-col min-h-0">
+          <div className="flex items-center justify-between px-2 pt-1 border-b border-border/40 shrink-0">
+            <TabsList className="h-7 bg-muted/60 p-0.5">
+              <TabsTrigger value="positions" className="text-xs h-6 px-2.5">
+                Positions ({positionRows.length})
+              </TabsTrigger>
+              <TabsTrigger value="orders" className="text-xs h-6 px-2.5">
+                Orders ({scopedOrders.length})
+              </TabsTrigger>
+              <TabsTrigger value="trades" className="text-xs h-6 px-2.5">
+                Trades ({scopedTrades.length})
+              </TabsTrigger>
+            </TabsList>
+            <div className="text-[10px] text-muted-foreground font-mono">
+              Keys: ↑ Buy CE · ↓ Sell CE · → Buy PE · ← Sell PE · F6 Close · F7 Cancel
+            </div>
           </div>
 
-          <span className="text-xs text-muted-foreground">
-            {isSingle
-              ? 'Keys: ↑/→ Buy · ↓/← Sell · F6 close · F7 cancel'
-              : 'Keys: ↑ Buy Call · ↓ Sell Call · → Buy Put · ← Sell Put · F6 close · F7 cancel'}
-          </span>
-        </CardContent>
-      </Card>
-
-      {/* Books */}
-      <Tabs defaultValue="positions">
-        <TabsList>
-          <TabsTrigger value="positions">Positions</TabsTrigger>
-          <TabsTrigger value="orders">Order Book</TabsTrigger>
-          <TabsTrigger value="trades">Trade Book</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="positions">
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Symbol</TableHead>
-                  <TableHead>Product</TableHead>
-                  <TableHead>Side</TableHead>
-                  <TableHead className="text-right">Net Qty</TableHead>
-                  <TableHead className="text-right">LTP</TableHead>
-                  <TableHead className="text-right">SL</TableHead>
-                  <TableHead className="text-right">TP</TableHead>
-                  <TableHead className="text-right">TSL</TableHead>
-                  <TableHead>Risk</TableHead>
-                  <TableHead className="text-right">R. P&amp;L</TableHead>
-                  <TableHead className="text-right">UR. P&amp;L</TableHead>
-                  <TableHead className="text-right">P&amp;L</TableHead>
-                  <TableHead>Action</TableHead>
-                  <TableHead className="text-right">Avg Price</TableHead>
-                  <TableHead className="text-right">Buy Qty</TableHead>
-                  <TableHead className="text-right">Buy Price</TableHead>
-                  <TableHead className="text-right">Sell Price</TableHead>
-                  <TableHead className="text-right">Sell Qty</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {positionRows.map((r) => {
-                  const open = r.netQty !== 0
-                  const dec = priceDecimals(r.exchange)
-                  return (
-                    <TableRow key={`${r.exchange}:${r.symbol}:${r.product}`}>
-                      <TableCell className="font-mono text-sm">{r.symbol}</TableCell>
-                      <TableCell>{r.product}</TableCell>
-                      <TableCell
-                        className={
-                          r.side === 'BUY'
-                            ? 'text-green-600'
-                            : r.side === 'SELL'
-                              ? 'text-red-600'
-                              : 'text-muted-foreground'
-                        }
-                      >
-                        {r.side}
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">
-                        {r.netQty}
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">
-                        {r.ltp ? r.ltp.toFixed(dec) : '—'}
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">
-                        {r.sl != null ? r.sl.toFixed(dec) : '-'}
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">
-                        {r.target != null ? r.target.toFixed(dec) : '-'}
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">
-                        {r.trailingStep != null ? `±${r.trailingStep}` : '-'}
-                      </TableCell>
-                      <TableCell>
-                        {open ? (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() =>
-                              setSlDialogTarget({
-                                symbol: r.symbol,
-                                exchange: r.exchange,
-                                product: r.product,
-                                optionType: r.symbol.endsWith('PE') ? 'PE' : 'CE',
-                              })
-                            }
-                          >
-                            {r.sl != null || r.target != null ? 'Edit' : 'Set'}
-                          </Button>
-                        ) : (
-                          '-'
-                        )}
-                      </TableCell>
-                      <TableCell
-                        className={`text-right font-mono tabular-nums ${r.realizedPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}
-                      >
-                        {r.realizedPnl.toFixed(2)}
-                      </TableCell>
-                      <TableCell
-                        className={`text-right font-mono tabular-nums ${r.unrealizedPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}
-                      >
-                        {r.unrealizedPnl.toFixed(2)}
-                      </TableCell>
-                      <TableCell
-                        className={`text-right font-mono tabular-nums font-semibold ${r.totalPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}
-                      >
-                        {r.totalPnl.toFixed(2)}
-                      </TableCell>
-                      <TableCell>
-                        {open ? (
-                          <Button variant="outline" size="sm" onClick={() => doCloseRow(r)}>
-                            Close
-                          </Button>
-                        ) : (
-                          '-'
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">
-                        {r.avgPrice ? r.avgPrice.toFixed(dec) : '—'}
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">
-                        {r.buyQty}
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">
-                        {r.buyAvg ? r.buyAvg.toFixed(dec) : '—'}
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">
-                        {r.sellAvg ? r.sellAvg.toFixed(dec) : '—'}
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">
-                        {r.sellQty}
-                      </TableCell>
-                    </TableRow>
-                  )
-                })}
-                {positionRows.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={18} className="text-center text-muted-foreground">
-                      No positions or trades today
-                    </TableCell>
+          <TabsContent value="positions" className="flex-1 min-h-0 m-0 overflow-y-auto">
+            {positionRows.length === 0 ? (
+              <div className="flex items-center justify-center h-full text-xs text-muted-foreground">
+                No active scalping positions
+              </div>
+            ) : (
+              <Table className="text-xs">
+                <TableHeader className="sticky top-0 bg-card z-10">
+                  <TableRow className="h-6">
+                    <TableHead className="py-1">Symbol</TableHead>
+                    <TableHead className="py-1">Prod</TableHead>
+                    <TableHead className="py-1">Side</TableHead>
+                    <TableHead className="py-1 text-right">Net Qty</TableHead>
+                    <TableHead className="py-1 text-right">LTP</TableHead>
+                    <TableHead className="py-1 text-right">SL</TableHead>
+                    <TableHead className="py-1 text-right">TP</TableHead>
+                    <TableHead className="py-1 text-right">TSL</TableHead>
+                    <TableHead className="py-1 text-right">Total P&amp;L</TableHead>
+                    <TableHead className="py-1">SL</TableHead>
+                    <TableHead className="py-1 text-right">Action</TableHead>
                   </TableRow>
-                )}
-              </TableBody>
-            </Table>
-          </div>
-        </TabsContent>
+                </TableHeader>
+                <TableBody className="font-mono text-xs">
+                  {positionRows.map((r) => {
+                    const open = r.netQty !== 0
+                    const dec = priceDecimals(r.exchange)
+                    return (
+                      <TableRow key={`${r.exchange}:${r.symbol}:${r.product}`} className="h-7">
+                        <TableCell className="py-1 font-semibold">{r.symbol}</TableCell>
+                        <TableCell className="py-1">{r.product}</TableCell>
+                        <TableCell className={r.side === 'BUY' ? 'text-emerald-600 font-bold' : r.side === 'SELL' ? 'text-rose-600 font-bold' : 'text-muted-foreground'}>
+                          {r.side}
+                        </TableCell>
+                        <TableCell className="py-1 text-right font-bold">{r.netQty}</TableCell>
+                        <TableCell className="py-1 text-right">{r.ltp ? r.ltp.toFixed(dec) : '—'}</TableCell>
+                        <TableCell className="py-1 text-right">{r.sl != null ? r.sl.toFixed(dec) : '-'}</TableCell>
+                        <TableCell className="py-1 text-right">{r.target != null ? r.target.toFixed(dec) : '-'}</TableCell>
+                        <TableCell className="py-1 text-right">{r.trailingStep != null ? `±${r.trailingStep}` : '-'}</TableCell>
+                        <TableCell className={cn('py-1 text-right font-bold', r.totalPnl >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+                          {r.totalPnl.toFixed(2)}
+                        </TableCell>
+                        <TableCell className="py-1">
+                          {open ? (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-5 text-[10px] px-1 font-sans"
+                              onClick={() => openRowSL(r)}
+                            >
+                              {r.sl != null || r.target != null ? 'Edit SL' : '+ SL'}
+                            </Button>
+                          ) : (
+                            '-'
+                          )}
+                        </TableCell>
+                        <TableCell className="py-1 text-right">
+                          {open && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-5 text-[10px] text-destructive px-1 hover:bg-destructive/10 font-sans"
+                              onClick={() => doCloseRow(r)}
+                            >
+                              Close
+                            </Button>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+              </Table>
+            )}
+          </TabsContent>
 
-        <TabsContent value="orders">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Symbol</TableHead>
-                <TableHead>Side</TableHead>
-                <TableHead className="text-right">Qty</TableHead>
-                <TableHead>Type</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Order ID</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {scopedOrders.map((o) => (
-                <TableRow key={o.orderid}>
-                  <TableCell className="font-mono text-sm">{o.symbol}</TableCell>
-                  <TableCell className={o.action === 'BUY' ? 'text-green-600' : 'text-red-600'}>
-                    {o.action}
-                  </TableCell>
-                  <TableCell className="text-right font-mono tabular-nums">{o.quantity}</TableCell>
-                  <TableCell>{o.pricetype}</TableCell>
-                  <TableCell>{o.order_status}</TableCell>
-                  <TableCell className="font-mono text-xs">{o.orderid}</TableCell>
-                </TableRow>
-              ))}
-              {scopedOrders.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={6} className="text-center text-muted-foreground">
-                    No orders
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
-        </TabsContent>
+          <TabsContent value="orders" className="flex-1 min-h-0 m-0 overflow-y-auto">
+            {scopedOrders.length === 0 ? (
+              <div className="flex items-center justify-center h-full text-xs text-muted-foreground">
+                No orders today
+              </div>
+            ) : (
+              <Table className="text-xs">
+                <TableHeader className="sticky top-0 bg-card z-10">
+                  <TableRow className="h-6">
+                    <TableHead className="py-1">Time</TableHead>
+                    <TableHead className="py-1">Symbol</TableHead>
+                    <TableHead className="py-1">Action</TableHead>
+                    <TableHead className="py-1 text-right">Qty</TableHead>
+                    <TableHead className="py-1 text-right">Price</TableHead>
+                    <TableHead className="py-1">Status</TableHead>
+                    <TableHead className="py-1 font-mono">Order ID</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody className="font-mono text-xs">
+                  {scopedOrders.map((ord) => (
+                    <TableRow key={ord.orderid} className="h-7">
+                      <TableCell className="py-1">{ord.timestamp ? ord.timestamp.slice(11, 19) : '—'}</TableCell>
+                      <TableCell className="py-1 font-semibold">{ord.symbol}</TableCell>
+                      <TableCell className="py-1">
+                        <span className={ord.action === 'BUY' ? 'text-emerald-600 font-bold' : 'text-rose-600 font-bold'}>
+                          {ord.action}
+                        </span>
+                      </TableCell>
+                      <TableCell className="py-1 text-right">{ord.quantity}</TableCell>
+                      <TableCell className="py-1 text-right">{ord.price ?? ord.pricetype ?? 'MKT'}</TableCell>
+                      <TableCell className="py-1">
+                        <Badge variant="outline" className="text-[9px] px-1 py-0">{ord.order_status}</Badge>
+                      </TableCell>
+                      <TableCell className="py-1 text-muted-foreground text-[10px]">{ord.orderid}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </TabsContent>
 
-        <TabsContent value="trades">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Symbol</TableHead>
-                <TableHead>Side</TableHead>
-                <TableHead className="text-right">Qty</TableHead>
-                <TableHead className="text-right">Avg Price</TableHead>
-                <TableHead>Order ID</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {scopedTrades.map((t) => (
-                <TableRow key={`${t.orderid}-${t.timestamp}`}>
-                  <TableCell className="font-mono text-sm">{t.symbol}</TableCell>
-                  <TableCell className={t.action === 'BUY' ? 'text-green-600' : 'text-red-600'}>
-                    {t.action}
-                  </TableCell>
-                  <TableCell className="text-right font-mono tabular-nums">{t.quantity}</TableCell>
-                  <TableCell className="text-right font-mono tabular-nums">
-                    {Number(t.average_price || 0).toFixed(priceDecimals(t.exchange))}
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">{t.orderid}</TableCell>
-                </TableRow>
-              ))}
-              {scopedTrades.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={5} className="text-center text-muted-foreground">
-                    No trades
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
-        </TabsContent>
-      </Tabs>
+          <TabsContent value="trades" className="flex-1 min-h-0 m-0 overflow-y-auto">
+            {scopedTrades.length === 0 ? (
+              <div className="flex items-center justify-center h-full text-xs text-muted-foreground">
+                No trades today
+              </div>
+            ) : (
+              <Table className="text-xs">
+                <TableHeader className="sticky top-0 bg-card z-10">
+                  <TableRow className="h-6">
+                    <TableHead className="py-1">Time</TableHead>
+                    <TableHead className="py-1">Symbol</TableHead>
+                    <TableHead className="py-1">Action</TableHead>
+                    <TableHead className="py-1 text-right">Qty</TableHead>
+                    <TableHead className="py-1 text-right">Avg Price</TableHead>
+                    <TableHead className="py-1 font-mono">Order ID</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody className="font-mono text-xs">
+                  {scopedTrades.map((trd) => (
+                    <TableRow key={`${trd.orderid}-${trd.timestamp}`} className="h-7">
+                      <TableCell className="py-1">{trd.timestamp ? trd.timestamp.slice(11, 19) : '—'}</TableCell>
+                      <TableCell className="py-1 font-semibold">{trd.symbol}</TableCell>
+                      <TableCell className="py-1">
+                        <span className={trd.action === 'BUY' ? 'text-emerald-600 font-bold' : 'text-rose-600 font-bold'}>
+                          {trd.action}
+                        </span>
+                      </TableCell>
+                      <TableCell className="py-1 text-right">{trd.quantity}</TableCell>
+                      <TableCell className="py-1 text-right">
+                        {Number(trd.average_price || 0).toFixed(priceDecimals(trd.exchange))}
+                      </TableCell>
+                      <TableCell className="py-1 text-muted-foreground text-[10px]">{trd.orderid}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </TabsContent>
+        </Tabs>
+      </ResizablePanel>
+    </ResizablePanelGroup>
 
+      {/* Set SL Dialog */}
       <SetSLDialog
         open={slDialogOpen}
         onOpenChange={(o) => {
@@ -1860,13 +2183,16 @@ export default function Scalping() {
         quantity={slDialogQty}
         ltp={slDialogTick?.ltp}
         existing={slDialogExisting}
-        onSave={(sl: SLState) => setSL(sl)}
-        onClear={
-          slDialogExisting && slDialogTarget
-            ? () =>
-                clearSL(slDialogTarget.symbol, slDialogTarget.exchange, slDialogExisting.product)
-            : undefined
-        }
+        onSave={(sl) => {
+          setSL(sl)
+          setSlDialogTarget(null)
+        }}
+        onClear={() => {
+          if (slDialogTarget) {
+            clearSL(slDialogTarget.symbol, slDialogTarget.exchange, slDialogTarget.product)
+          }
+          setSlDialogTarget(null)
+        }}
       />
     </div>
   )

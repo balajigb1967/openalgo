@@ -149,8 +149,3 @@ zipp==3.23.1
 # Pure-NumPy kernels -- no Numba, so nothing pins numpy's upper bound.
 openstatz==0.4.1
 tenacity
-
-# litellm's aiohttp transport needs aiohttp.ConnectionTimeoutError, which only
-# exists from 3.10; fyers-apiv3 pins ==3.9.3 and would silently downgrade it
-# back, breaking every agent build. Keep the floor so conflicts surface loudly.
-aiohttp>=3.10,<4

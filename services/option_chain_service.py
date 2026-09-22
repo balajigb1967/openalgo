@@ -70,7 +70,96 @@ from services.quotes_service import get_multiquotes, get_quotes, import_broker_m
 from utils.constants import CRYPTO_EXCHANGES, INSTRUMENT_PERPFUT
 from utils.logging import get_logger
 
+import os
+import threading
+import time
+
+import httpx
+
 logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Peer-instance failover for option chain
+# ---------------------------------------------------------------------------
+
+def _oc_peer_config() -> tuple[str, str, float, float]:
+    """Read peer settings lazily."""
+    return (
+        os.getenv("PEER_OPENALGO_URL", "").strip(),
+        os.getenv("PEER_OPENALGO_API_KEY", "").strip(),
+        float(os.getenv("PEER_OPENALGO_TIMEOUT", "15")),   # chains are heavy
+        float(os.getenv("PEER_OPENALGO_COOLDOWN", "300")),
+    )
+
+
+_oc_peer_lock = threading.Lock()
+_oc_peer_down_until = 0.0
+_oc_peer_inflight = threading.local()
+
+
+def _oc_peer_available() -> bool:
+    url, key, _, _ = _oc_peer_config()
+    return bool(url and key) and time.monotonic() >= _oc_peer_down_until
+
+
+def _oc_mark_peer_down(seconds: float | None = None) -> None:
+    global _oc_peer_down_until
+    _, _, _, cooldown = _oc_peer_config()
+    with _oc_peer_lock:
+        _oc_peer_down_until = time.monotonic() + (seconds if seconds is not None else cooldown)
+
+
+def _try_peer_option_chain(
+    underlying: str, exchange: str, expiry_date: str,
+    strike_count: int, with_greeks: bool = False,
+    interest_rate: float | None = None,
+) -> tuple[bool, dict, int] | None:
+    """Fetch option chain from the peer instance; None if unavailable."""
+    if not _oc_peer_available():
+        return None
+    if getattr(_oc_peer_inflight, "active", False):
+        return None
+    url_base, key, timeout, _ = _oc_peer_config()
+    if not (url_base and key):
+        return None
+    _oc_peer_inflight.active = True
+    try:
+        url = url_base.rstrip("/") + "/api/v1/optionchain"
+        payload = {
+            "apikey": key,
+            "underlying": underlying,
+            "exchange": exchange,
+            "expiry_date": expiry_date,
+            "strike_count": strike_count,
+        }
+        if with_greeks:
+            payload["with_greeks"] = True
+        if interest_rate is not None:
+            payload["interest_rate"] = interest_rate
+        try:
+            resp = httpx.post(url, json=payload, timeout=timeout)
+            if resp.status_code == 429:
+                _oc_mark_peer_down(30.0)
+                return None
+            if resp.status_code == 200:
+                body = resp.json()
+                if body.get("status") == "success" and body.get("chain"):
+                    logger.info(
+                        f"Option chain {exchange}:{underlying} served by peer instance"
+                    )
+                    return True, body, 200
+                return None
+            logger.debug(f"Peer optionchain {url} -> HTTP {resp.status_code}")
+            if resp.status_code >= 500 or resp.status_code in (401, 403):
+                _oc_mark_peer_down()
+            return None
+        except Exception as exc:
+            logger.debug(f"Peer optionchain {url} failed: {exc}")
+            _oc_mark_peer_down()
+            return None
+    finally:
+        _oc_peer_inflight.active = False
 
 
 def _reference_metadata(symbol: str, exchange: str) -> dict[str, str]:
@@ -450,6 +539,13 @@ def get_option_chain(
             )
 
         if not success:
+            # Peer failover: can't get underlying LTP locally -> try peer chain
+            peer = _try_peer_option_chain(
+                underlying, exchange, expiry_date, strike_count,
+                with_greeks=with_greeks, interest_rate=interest_rate,
+            )
+            if peer is not None:
+                return peer
             return (
                 False,
                 {
@@ -719,6 +815,13 @@ def get_option_chain(
 
     except Exception as e:
         logger.exception(f"Error in get_option_chain: {e}")
+        # Peer-instance failover: local chain build failed -> try sibling
+        peer = _try_peer_option_chain(
+            underlying, exchange, expiry_date, strike_count,
+            with_greeks=with_greeks, interest_rate=interest_rate,
+        )
+        if peer is not None:
+            return peer
         return (
             False,
             {

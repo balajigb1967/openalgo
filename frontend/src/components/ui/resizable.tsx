@@ -21,22 +21,45 @@ function ResizablePanel({ ...props }: React.ComponentProps<typeof Panel>) {
 function ResizableHandle({
   withHandle,
   className,
+  orientation,
   ...props
 }: React.ComponentProps<typeof Separator> & {
   withHandle?: boolean
+  orientation?: 'horizontal' | 'vertical'
 }) {
   return (
     <Separator
       data-slot="resizable-handle"
       className={cn(
-        'bg-border focus-visible:ring-ring relative flex w-px items-center justify-center after:absolute after:inset-y-0 after:left-1/2 after:w-1 after:-translate-x-1/2 focus-visible:ring-1 focus-visible:ring-offset-1 focus-visible:outline-hidden data-[panel-group-direction=vertical]:h-px data-[panel-group-direction=vertical]:w-full data-[panel-group-direction=vertical]:after:left-0 data-[panel-group-direction=vertical]:after:h-1 data-[panel-group-direction=vertical]:after:w-full data-[panel-group-direction=vertical]:after:translate-x-0 data-[panel-group-direction=vertical]:after:-translate-y-1/2 [&[data-panel-group-direction=vertical]>div]:rotate-90',
+        'bg-border/80 hover:bg-primary/50 active:bg-primary/80 relative flex items-center justify-center transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring select-none touch-none',
+        orientation === 'horizontal' &&
+          'h-1.5 w-full cursor-row-resize after:absolute after:inset-x-0 after:top-1/2 after:h-3 after:-translate-y-1/2',
+        orientation === 'vertical' &&
+          'w-1.5 h-full cursor-col-resize after:absolute after:inset-y-0 after:left-1/2 after:w-3 after:-translate-x-1/2',
+        !orientation && [
+          'w-1.5 h-full cursor-col-resize after:absolute after:inset-y-0 after:left-1/2 after:w-3 after:-translate-x-1/2',
+          '[&[aria-orientation=horizontal]]:h-1.5 [&[aria-orientation=horizontal]]:w-full [&[aria-orientation=horizontal]]:cursor-row-resize [&[aria-orientation=horizontal]]:after:inset-x-0 [&[aria-orientation=horizontal]]:after:top-1/2 [&[aria-orientation=horizontal]]:after:h-3 [&[aria-orientation=horizontal]]:after:w-full [&[aria-orientation=horizontal]]:after:-translate-y-1/2 [&[aria-orientation=horizontal]]:after:translate-x-0',
+          '[&[aria-orientation=vertical]]:w-1.5 [&[aria-orientation=vertical]]:h-full [&[aria-orientation=vertical]]:cursor-col-resize',
+          'data-[panel-group-direction=vertical]:h-1.5 data-[panel-group-direction=vertical]:w-full data-[panel-group-direction=vertical]:cursor-row-resize',
+        ],
         className
       )}
       {...props}
     >
       {withHandle && (
-        <div className="bg-border z-10 flex h-4 w-3 items-center justify-center rounded-xs border">
-          <GripVerticalIcon className="size-2.5" />
+        <div
+          className={cn(
+            'bg-background z-10 flex items-center justify-center rounded-xs border border-border/80 shadow-xs transition-colors',
+            orientation === 'horizontal'
+              ? 'h-2 w-6'
+              : orientation === 'vertical'
+                ? 'h-6 w-2'
+                : 'h-4 w-3 [&[aria-orientation=horizontal]>div]:rotate-90'
+          )}
+        >
+          <GripVerticalIcon
+            className={cn('size-2 text-muted-foreground', orientation === 'horizontal' && 'rotate-90')}
+          />
         </div>
       )}
     </Separator>

@@ -35,7 +35,45 @@ let state: ScalperSyncState = {
   strike: null,
 }
 
+// Recover initial state from localStorage if available
+try {
+  const savedSym = typeof localStorage !== 'undefined' ? localStorage.getItem('oa-scalper-sync-symbol') : null
+  if (savedSym) {
+    state = parseSyncSymbol(savedSym)
+  }
+} catch {
+  // ignore
+}
+
 const listeners = new Set<Listener>()
+
+const SYNC_CHANNEL = 'openalgo-scalper-sync'
+let channel: BroadcastChannel | null = null
+try {
+  if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+    channel = new BroadcastChannel(SYNC_CHANNEL)
+    channel.onmessage = (e) => {
+      if (e.data?.type === 'symbol' && typeof e.data.symbol === 'string') {
+        const next = parseSyncSymbol(e.data.symbol)
+        if (
+          next.symbol === state.symbol &&
+          next.optionSymbol === state.optionSymbol &&
+          next.root === state.root
+        ) {
+          return
+        }
+        state = next
+        for (const l of listeners) l(state)
+      } else if (e.data?.type === 'target') {
+        const t = e.data.target as ScalperTarget | null
+        target = t
+        for (const l of targetListeners) l(target)
+      }
+    }
+  }
+} catch {
+  // ignore
+}
 
 /** Index/stock roots that trade weekly options on the F&O exchanges. */
 const MCX_ROOTS = [
@@ -93,6 +131,18 @@ export function setSyncSymbol(symbol: string): void {
     return
   }
   state = next
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('oa-scalper-sync-symbol', symbol)
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    channel?.postMessage({ type: 'symbol', symbol })
+  } catch {
+    // ignore
+  }
   for (const l of listeners) l(state)
 }
 
@@ -121,6 +171,17 @@ export interface ScalperTarget {
 type TargetListener = (t: ScalperTarget | null) => void
 
 let target: ScalperTarget | null = null
+
+// Recover initial target from localStorage
+try {
+  const savedTarget = typeof localStorage !== 'undefined' ? localStorage.getItem('oa-scalper-sync-target') : null
+  if (savedTarget) {
+    target = JSON.parse(savedTarget)
+  }
+} catch {
+  // ignore
+}
+
 const targetListeners = new Set<TargetListener>()
 
 /**
@@ -138,6 +199,19 @@ export function setSyncTarget(t: ScalperTarget | null): void {
       t.exchange === target.exchange)
   if (same) return
   target = t
+  try {
+    if (typeof localStorage !== 'undefined') {
+      if (t) localStorage.setItem('oa-scalper-sync-target', JSON.stringify(t))
+      else localStorage.removeItem('oa-scalper-sync-target')
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    channel?.postMessage({ type: 'target', target: t })
+  } catch {
+    // ignore
+  }
   for (const l of targetListeners) l(target)
 }
 

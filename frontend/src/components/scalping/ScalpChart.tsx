@@ -298,7 +298,9 @@ export function ScalpChart({
       .then((d) => {
         if (disposed) return
         if (d.status !== 'success') {
-          setStatus(`error: ${d.message || 'history failed'}`)
+          readyRef.current = true
+          currentBucketRef.current = null
+          setStatus('waiting for live ticks…')
           schedule()
           return
         }
@@ -323,7 +325,9 @@ export function ScalpChart({
       })
       .catch(() => {
         if (!disposed) {
-          setStatus('history fetch failed')
+          readyRef.current = true
+          currentBucketRef.current = null
+          setStatus('waiting for live ticks…')
           schedule()
         }
       })

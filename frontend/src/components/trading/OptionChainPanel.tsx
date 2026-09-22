@@ -25,6 +25,7 @@ import { Check, ChevronsUpDown, RefreshCw } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 import { useOptionChainLive } from '@/hooks/useOptionChainLive'
+import { rootOf } from '@/lib/scalperSync'
 import { scalpingApi } from '@/api/scalping'
 import { Button } from '@/components/ui/button'
 import {
@@ -260,6 +261,27 @@ export function OptionChainPanel({ apiKey, onPick, activeSymbol }: Props) {
   useEffect(() => {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs))
   }, [prefs])
+
+  // Sync underlying and segment to activeSymbol (from Watchlist or Scalper Advisor)
+  useEffect(() => {
+    if (!activeSymbol) return
+    const parts = activeSymbol.split(':')
+    const exchRaw = (parts.length > 1 ? parts[0] : '').toUpperCase()
+    const symRaw = parts.length > 1 ? parts[1] : parts[0]
+    const root = rootOf(symRaw || '').toUpperCase()
+    if (!root) return
+
+    let exch: Exchange = 'NFO'
+    if (exchRaw === 'MCX') exch = 'MCX'
+    else if (exchRaw === 'CDS') exch = 'CDS'
+    else if (exchRaw.includes('BSE')) exch = 'BFO'
+    else exch = 'NFO'
+
+    setPrefs((p) => {
+      if (p.underlying.toUpperCase() === root && p.exchange === exch) return p
+      return { ...p, underlying: root, exchange: exch, expiry: '' }
+    })
+  }, [activeSymbol])
 
   /* ── underlyings for the chosen segment ───────────────────────────────── */
   // biome-ignore lint/correctness/useExhaustiveDependencies: `attempt` is a deliberate re-run trigger, not a value this effect reads; Retry bumps it to refetch without changing the contract

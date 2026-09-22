@@ -220,7 +220,6 @@ function App() {
                 <Route path="/sandbox/mypnl" element={<SandboxPnL />} />
                 <Route path="/analyzer" element={<Analyzer />} />
                 <Route path="/tools" element={<Tools />} />
-                <Route path="/scalping" element={<Scalping />} />
                 <Route path="/optionchain" element={<OptionChain />} />
                 <Route path="/ivchart" element={<IVChart />} />
                 <Route path="/oitracker" element={<OITracker />} />
@@ -309,6 +308,7 @@ function App() {
               <Route element={<FullWidthLayout />}>
                 <Route path="/playground" element={<Playground />} />
                 <Route path="/trading" element={<Trading />} />
+                <Route path="/scalping" element={<Scalping />} />
                 {/* Scalper terminal popout — the detached /trading widget, no
                     chrome, driven by the same terminal component. */}
                 <Route path="/scalper" element={<ScalperPopout />} />

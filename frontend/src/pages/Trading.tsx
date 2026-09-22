@@ -177,14 +177,6 @@ export default function Trading() {
     }
   }, [scalperOpen])
 
-  // Advisor/chart sync while the terminal is closed: open it so the target
-  // actually lands — previously the event fired into the void and the toast
-  // still claimed "synced".
-  useEffect(() => {
-    return subscribeSyncTarget(() => {
-      setScalperOpen(true)
-    })
-  }, [])
 
   /* ── one drawing rail for every pane ─────────────────────────────────── */
   const [tool, setTool] = useState<string | null>(null)
@@ -274,6 +266,14 @@ export default function Trading() {
   const focusedSymbol = paneSymbols[focusedPane] ?? null
   useEffect(() => {
     setSyncSymbol(focusedSymbol ?? '')
+    if (focusedSymbol) {
+      const sym = focusedSymbol.split(':')[1] || focusedSymbol
+      fetch('/plugins/fcc/commentary/auto', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: true, symbol: sym }),
+      }).catch(() => {})
+    }
   }, [focusedSymbol])
 
   /**
@@ -289,6 +289,17 @@ export default function Trading() {
     },
     [panelTarget]
   )
+
+  // Advisor/chart sync: when an alert/target is published from Scalper Advisor,
+  // ensure the terminal is open AND the focused chart pane loads that symbol.
+  useEffect(() => {
+    return subscribeSyncTarget((t) => {
+      setScalperOpen(true)
+      if (t?.underlying && t?.exchange) {
+        sendToFocusedPane({ symbol: t.underlying, exchange: t.exchange })
+      }
+    })
+  }, [sendToFocusedPane])
 
   /**
    * Whether any pane is replaying, or picking a bar to replay from. The
@@ -794,7 +805,11 @@ export default function Trading() {
           )}
           {apiKey && wsUrl && panel === 'scalper' && (
             <Suspense fallback={null}>
-              <ScalperAdvisorPanel apiKey={apiKey} activeSymbol={paneSymbols[focusedPane] ?? null} />
+              <ScalperAdvisorPanel
+                apiKey={apiKey}
+                activeSymbol={paneSymbols[focusedPane] ?? null}
+                onPick={sendToFocusedPane}
+              />
             </Suspense>
           )}
           {apiKey && wsUrl && panel === 'orderflow' && (

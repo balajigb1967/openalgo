@@ -198,6 +198,18 @@ def chart_history():
 
     if not success:
         message = response.get("message") if isinstance(response, dict) else str(response)
+        msg_str = (message or "").lower()
+        if status_code == 404 or "no data" in msg_str or "not found" in msg_str or "error for chunk" in msg_str:
+            return jsonify(
+                {
+                    "status": "success",
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "interval": interval,
+                    "date": None,
+                    "candles": [],
+                }
+            ), 200
         return jsonify(
             {"status": "error", "message": message or "History fetch failed"}
         ), status_code

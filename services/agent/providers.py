@@ -52,6 +52,7 @@ PROVIDER_KINDS: tuple[str, ...] = (
     "ollama",
     "openai_compatible",
     "litellm",
+    "fcc",
 )
 
 
@@ -85,6 +86,7 @@ class ProviderSpec:
 #   ollama             no         yes             ollama/{model_name} + api_base
 #   openai_compatible  yes        yes             openai/{model_name} + api_base
 #   litellm            yes        no              {model_name} verbatim
+#   fcc                no         no              anthropic/{model_name} + local proxy
 #
 # `openai_compatible` requires a key because LiteLLM's OpenAI transport sends an
 # Authorization header unconditionally. An endpoint that checks no credential
@@ -125,6 +127,13 @@ PROVIDER_SPECS: Mapping[str, ProviderSpec] = MappingProxyType(
             needs_key=True,
             needs_base_url=False,
             prefix="",
+        ),
+        "fcc": ProviderSpec(
+            kind="fcc",
+            label="Free Claude Code (FCC)",
+            needs_key=False,
+            needs_base_url=False,
+            prefix="anthropic",
         ),
     }
 )
@@ -258,15 +267,20 @@ def litellm_kwargs(row: Any, api_key: str | None = None) -> dict[str, Any]:
     base_url = normalize_base_url(_row_value(row, "base_url"))
     key = (api_key or "").strip()
 
-    error = validate_provider_config(kind, model_name, base_url, has_key=bool(key))
+    error = validate_provider_config(kind, model_name, base_url, has_key=bool(key or kind == "fcc"))
     if error:
         raise ValueError(error)
 
     kwargs: dict[str, Any] = {"id": litellm_model_id(kind, model_name)}
-    if key:
-        kwargs["api_key"] = key
-    if provider_spec(kind).needs_base_url:
-        kwargs["api_base"] = base_url
+    if kind == "fcc":
+        import os
+        kwargs["api_base"] = base_url or os.getenv("FCC_BASE_URL", "http://127.0.0.1:8082").rstrip("/")
+        kwargs["api_key"] = key or os.getenv("FCC_AUTH_TOKEN", "freecc")
+    else:
+        if key:
+            kwargs["api_key"] = key
+        if provider_spec(kind).needs_base_url:
+            kwargs["api_base"] = base_url
     kwargs.update(sampling_kwargs())
     return kwargs
 

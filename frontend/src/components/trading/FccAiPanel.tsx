@@ -1,18 +1,16 @@
 /**
  * FCC AI panel — the fno-trader AI feature set on OpenAlgo's data.
  *
- * Uniform fno-trader layout in every tab (Chat / Live / Agent):
- *   one toolbar row -> scrollable middle -> bottom dock.
- *
+ * Two tabs, no overlap with the Assistant beside it in the rail:
  * - **Chat** is grounded with a live market snapshot the server builds from
- *   the platform's own quote / option-chain / candle services at send time,
- *   focused on the operator's active chart symbol.
+ *   the platform's own quote / option-chain / scalper services at send time.
+ *   It complements (does not replace) the chart assistant: that one reads the
+ *   pane and can draw; this one reads the whole platform.
  * - **Live** generates institutional-style commentary bullets for a symbol
  *   and keeps the recent history, so the operator can replay the session.
- * - **Agent** runs the fcc-* coding agents against this project, streamed.
  *
- * The panel speaks to the plugin blueprint at /plugins/fcc (the same surface
- * the phone uses), authenticated by the browser session.
+ * The coding-agent runner lives here too — it is a power tool and the phone
+ * ships the same one, so both surfaces stay at feature parity.
  */
 
 import { Loader2, Send, Sparkles, Square, Radio } from 'lucide-react'
@@ -43,7 +41,6 @@ interface CommentaryItem {
   commentary: string
   bias: string
   tag: string
-  signals?: string[]
 }
 
 const API = '/plugins/fcc'
@@ -58,82 +55,64 @@ async function fccFetch<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
-  const focus = (activeSymbol ?? '').split(':').pop()?.trim() || ''
-
   const [status, setStatus] = useState<FccStatus | null>(null)
-  const [tab, setTab] = useState<'chat' | 'live' | 'agent'>('chat')
+  const [tab, setTab] = useState<'chat' | 'live' | 'agent'>('live')
 
   // chat
   const [turns, setTurns] = useState<Turn[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [model, setModel] = useState('')
   const threadRef = useRef<HTMLDivElement>(null)
 
   // live
-  const [symbol, setSymbol] = useState('NIFTY')
+  const [symbol, setSymbol] = useState(() => (activeSymbol?.split(':').pop() || 'NIFTY').toUpperCase())
   const [items, setItems] = useState<CommentaryItem[]>([])
   const [liveBusy, setLiveBusy] = useState(false)
-  const [liveNote, setLiveNote] = useState('')
-  const [auto, setAuto] = useState(false)
-
-  // load-balancer visibility (node health + last-served routes)
-  const [lb, setLb] = useState<{ nodes: Record<string, { ok: boolean; err?: string }>; last_served: Record<string, { node: string; ts: number }> } | null>(null)
 
   // agent
-  const [agent, setAgent] = useState('')
-  const [agentTask, setAgentTask] = useState('')
-  const [agentModel, setAgentModel] = useState('')
   const [agentOutput, setAgentOutput] = useState('')
   const [agentRun, setAgentRun] = useState<{ id: string; status: string } | null>(null)
-
-  // The active chart drives the panel: chat focus, commentary symbol and the
-  // agent's starting instrument all follow the pane the operator is on.
-  useEffect(() => {
-    if (focus) setSymbol(focus)
-  }, [focus])
 
   useEffect(() => {
     fccFetch<{ connected: boolean; models: string[]; agents_available: Record<string, boolean> }>('/status')
       .then((d) => setStatus({ ...d, error: null }))
       .catch((e) => setStatus({ connected: false, models: [], agents_available: {}, error: String(e) }))
-    fccFetch<{ auto?: { enabled?: boolean } }>('/commentary/auto')
-      .then((d) => {
-        setAuto(!!d.auto?.enabled)
-      })
-      .catch(() => { /* auto optional */ })
   }, [])
 
-  // LB health strip refresh
+  // Follow activeSymbol changes and sync squawk on server
   useEffect(() => {
-    const load = () => fccFetch<{ nodes: Record<string, { ok: boolean; err?: string }>; last_served: Record<string, { node: string; ts: number }> }>('/lb-status')
-      .then((d) => setLb(d)).catch(() => setLb(null))
-    load()
-    const t = setInterval(load, 30_000)
-    return () => clearInterval(t)
+    if (activeSymbol) {
+      const s = (activeSymbol.split(':').pop() || '').trim().toUpperCase()
+      if (s) {
+        setSymbol(s)
+        fccFetch('/commentary/auto', {
+          method: 'POST',
+          body: JSON.stringify({ enabled: true, symbol: s }),
+        }).catch(() => {})
+      }
+    }
+  }, [activeSymbol])
+
+  // Poll live squawk history continuously
+  useEffect(() => {
+    let alive = true
+    const poll = async () => {
+      try {
+        const d = await fccFetch<{ history: CommentaryItem[] }>('/commentary/history?limit=30')
+        if (alive && d.history) {
+          setItems(d.history)
+        }
+      } catch {
+        // ignore
+      }
+    }
+    poll()
+    const timer = setInterval(poll, 12000)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
   }, [])
-
-  // auto-squawk: pull the server-generated bullets while the loop runs, and
-  // keep the session state server-authoritative (a duration expiry on the
-  // server must flip the toggle off here within one poll).
-  useEffect(() => {
-    if (!auto) return
-    const t = setInterval(() => {
-      fccFetch<{ history: CommentaryItem[] }>('/commentary/history?limit=30')
-        .then((d) => setItems(d.history || []))
-        .catch(() => { /* next tick */ })
-      fccFetch<{ auto?: { enabled?: boolean } }>('/commentary/auto')
-        .then((d) => {
-          const on = !!d.auto?.enabled
-          setAuto(on)
-          if (!on) clearInterval(t)
-        })
-        .catch(() => { /* next tick */ })
-    }, 20_000)
-    return () => clearInterval(t)
-  }, [auto])
-
-
 
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight })
@@ -151,7 +130,7 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
         .map((t) => ({ role: t.role, content: t.content }))
       const d = await fccFetch<{ content: string }>('/chat', {
         method: 'POST',
-        body: JSON.stringify({ messages: history, context: true, focus: focus || undefined, model: model || undefined }),
+        body: JSON.stringify({ messages: history, context: true }),
       })
       setTurns((t) => {
         const next = [...t]
@@ -167,40 +146,30 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
     } finally {
       setBusy(false)
     }
-  }, [input, busy, turns, focus, model])
+  }, [input, busy, turns])
 
   const generateCommentary = useCallback(async (sym: string) => {
     setLiveBusy(true)
-    setLiveNote('')
     try {
-      const res = await fetch(`${API}/commentary`, {
+      const d = await fccFetch<{ item: CommentaryItem }>('/commentary', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol: sym }),
       })
-      if (res.status === 204) {
-        // event engine stayed silent — nothing new happened
-        setLiveNote(`No new events for ${sym} since the last alert`)
-        return
-      }
-      if (!res.ok) throw new Error(`FCC ${res.status}`)
-      const d = await res.json() as { item: CommentaryItem }
-      if (d.item) setItems((prev) => [d.item, ...prev])
+      setItems((prev) => [d.item, ...prev])
     } catch {
-      setLiveNote('Squawk failed — check the FCC proxy')
+      /* surfaced by the empty list */
     } finally {
       setLiveBusy(false)
     }
   }, [])
 
-  const runAgent = useCallback(async () => {
-    const task = agentTask.trim()
-    if (!agent || !task || agentRun?.status === 'running') return
-    setAgentTask('')
+  const runAgent = useCallback(async (agent: string) => {
+    const prompt = window.prompt(`Task for fcc-${agent}`)
+    if (!prompt) return
     try {
       const d = await fccFetch<{ run: { run_id: string } }>('/agent', {
         method: 'POST',
-        body: JSON.stringify({ agent, prompt: task, model: agentModel || undefined, symbol: focus || undefined }),
+        body: JSON.stringify({ agent, prompt }),
       })
       setAgentRun({ id: d.run.run_id, status: 'running' })
       setAgentOutput('')
@@ -215,7 +184,7 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
     } catch (e) {
       setAgentOutput(`Launch failed: ${e}`)
     }
-  }, [agent, agentTask, agentModel, focus, agentRun])
+  }, [])
 
   const stopAgent = useCallback(async () => {
     if (!agentRun) return
@@ -224,105 +193,15 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
     } catch { /* best effort */ }
   }, [agentRun])
 
-  const toggleAuto = useCallback(async () => {
-    const next = !auto
-    try {
-      const d = await fccFetch<{ auto: { enabled?: boolean } }>('/commentary/auto', {
-        method: 'POST',
-        body: JSON.stringify({ enabled: next, symbol: symbol.trim() || undefined, interval: 60 }),
-      })
-      setAuto(!!d.auto?.enabled)
-    } catch { /* surfaced by the toggle not flipping */ }
-  }, [auto, symbol])
-
-  const agents = status ? Object.entries(status.agents_available).filter(([, ok]) => ok).map(([a]) => a).sort() : []
-  const models = status?.models ?? []
-
-  // A native <select> is the only dropdown that behaves identically in every
-  // browser and embedded webview — the old datalist input never opened its
-  // list on an empty value, which read as "only the default model exists".
-  const modelSelect = (value: string, onValue: (m: string) => void, label: string) => (
-    <select
-      value={value}
-      onChange={(e) => onValue(e.target.value)}
-      className="h-7 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-[11px]"
-      aria-label={label}
-    >
-      <option value="">model: server default</option>
-      {models.slice(0, 400).map((m) => <option key={m} value={m}>{m}</option>)}
-    </select>
-  )
-
-  // The fno-trader skeleton: one toolbar row per tab, then the scrollable
-  // middle, then a fixed dock. Every tab follows the same three tiers.
-  const toolbar = tab === 'chat' ? (
-    <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-1.5">
-      {modelSelect(model, setModel, 'Chat model')}
-    </div>
-  ) : tab === 'live' ? (
-    <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-1.5">
-      <Input
-        value={symbol}
-        onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-        className="h-7 flex-1 text-[12px]"
-        placeholder="Symbol"
-      />
-      <Button
-        size="sm"
-        variant={auto ? 'default' : 'secondary'}
-        className={cn('h-7 shrink-0 px-2 text-[10px]', auto && 'bg-emerald-600 hover:bg-emerald-600 text-white')}
-        onClick={toggleAuto}
-        title="Live feed on/off — bullets fire as events happen, market hours only; runs until switched off"
-      >
-        {auto ? '● LIVE' : 'LIVE OFF'}
-      </Button>
-      {focus && symbol.trim() !== focus && (
-        <Button size="sm" variant="ghost" className="h-7 shrink-0 px-2 text-[10px]" onClick={() => setSymbol(focus)}>
-          use {focus}
-        </Button>
-      )}
-    </div>
-  ) : (
-    <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-1.5">
-      <select
-        value={agent || agents[0]}
-        onChange={(e) => setAgent(e.target.value)}
-        className="h-7 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-[11px]"
-        aria-label="Coding agent"
-      >
-        {agents.length === 0 && <option value="">no agents installed</option>}
-        {agents.map((a) => <option key={a} value={a}>fcc-{a}</option>)}
-      </select>
-      {modelSelect(agentModel, setAgentModel, 'Agent model')}
-    </div>
-  )
+  const agents = status ? Object.entries(status.agents_available).filter(([, ok]) => ok).map(([a]) => a) : []
 
   return (
     <PanelShell id="oa-panel-fcc" label="FCC AI" storageKey="oa-trading-fcc-width" defaultWidth={400}>
       <div className={PANEL_HEADER}>
         <Sparkles className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium">FCC AI</span>
-        {focus && (
-          <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
-            {focus}
-          </span>
-        )}
         {status && !status.connected && (
-          <span className="shrink-0 text-[10px] font-medium text-destructive" title={status.error ?? ''}>
-            offline
-          </span>
-        )}
-        {lb?.nodes && Object.keys(lb.nodes).length > 0 && (
-          <span className="flex shrink-0 items-center gap-1" title={Object.entries(lb.nodes)
-            .map(([n, h]) => `${n}: ${h.ok ? 'healthy' : `down (${h.err ?? '?'})`}`)
-            .join(' · ') + (lb.last_served && Object.keys(lb.last_served).length
-              ? '\n' + Object.entries(lb.last_served).map(([r, v]) => `${r} → ${v.node}`).join('\n')
-              : '')}>
-            {Object.entries(lb.nodes).map(([name, h]) => (
-              <span key={name} className={cn('h-1.5 w-1.5 rounded-full', h.ok ? 'bg-emerald-500' : 'bg-destructive animate-pulse')} />
-            ))}
-            <span className="text-[9.5px] text-muted-foreground">LB</span>
-          </span>
+          <span className="shrink-0 text-[10px] font-medium text-destructive">offline</span>
         )}
         <div className="flex shrink-0 rounded-md border border-border text-[11px]">
           {(['chat', 'live', 'agent'] as const).map((t) => (
@@ -341,21 +220,15 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
         </div>
       </div>
 
-      {toolbar}
-
-      {/* ------------------------------------------------ middle: chat */}
       {tab === 'chat' && (
         <div ref={threadRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
           {turns.length === 0 && (
             <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
               <Sparkles className="h-8 w-8 text-muted-foreground/50" aria-hidden />
-              <p className="text-sm font-medium">
-                {focus ? `Grounded on ${focus} + live OpenAlgo data` : 'Grounded in live OpenAlgo data'}
-              </p>
+              <p className="text-sm font-medium">Grounded in live OpenAlgo data</p>
               <p className="text-xs leading-relaxed text-muted-foreground">
-                {focus
-                  ? <>Quotes, candles, option chain and scalper state for <b>{focus}</b> are injected into every turn. Try &ldquo;analyse the chart&rdquo;.</>
-                  : 'Open a chart to map a symbol, or just ask — quotes, chains and scalper state are injected into every turn.'}
+                Quotes, option chains and scalper state are injected into every
+                turn. Try &ldquo;analyse NIFTY&rdquo;.
               </p>
             </div>
           )}
@@ -369,18 +242,31 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
         </div>
       )}
 
-      {/* ------------------------------------------------ middle: live */}
       {tab === 'live' && (
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-          {liveNote && (
-            <p className="mb-2 rounded-md border border-border bg-accent/30 px-2 py-1.5 text-[11px] text-muted-foreground">{liveNote}</p>
-          )}
-          {items.length === 0 && !liveNote && (
+          <div className="mb-3 flex items-center gap-1.5">
+            <Input
+              value={symbol}
+              onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+              className="h-8 flex-1 text-[12px]"
+              placeholder="Symbol"
+            />
+            <Button size="sm" variant="secondary" className="h-8" disabled={liveBusy}
+              onClick={() => generateCommentary(symbol)}>
+              {liveBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Radio className="h-3.5 w-3.5" />}
+              Squawk
+            </Button>
+          </div>
+          <div className="mb-2.5 flex items-center justify-between rounded bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+            <span className="flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+              SQUAWK ALWAYS ON ({symbol})
+            </span>
+            <span className="text-[10px] text-muted-foreground font-normal">Live institutional feed</span>
+          </div>
+          {items.length === 0 && (
             <p className="px-1 text-xs text-muted-foreground">
-              Event-driven trading tips: RSI zones, trend flips, nearing & breached
-              supports/resistances, breakout alerts, OI walls and chart patterns.
-              A bullet appears ONLY when a new event fires — silence means nothing
-              has changed.
+              Generate a bullet for any symbol; history builds up below.
             </p>
           )}
           <div className="space-y-2">
@@ -393,39 +279,31 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
                 </div>
                 <p className="mt-1 text-[12px] font-semibold">{it.headline}</p>
                 <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">{it.commentary}</p>
-                {it.signals && it.signals.length > 0 && (
-                  <ul className="mt-1.5 space-y-0.5 border-t border-border/60 pt-1.5">
-                    {it.signals.slice(0, 8).map((s, i) => (
-                      <li key={i} className="text-[10.5px] leading-snug text-muted-foreground">• {s}</li>
-                    ))}
-                  </ul>
-                )}
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {/* ------------------------------------------------ middle: agent */}
       {tab === 'agent' && (
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-          {status && !status.connected ? (
-            <p className="text-xs text-muted-foreground">
-              FCC proxy offline on the server ({status.error ?? 'unreachable'}).
-            </p>
-          ) : agents.length === 0 ? (
+          {agents.length === 0 ? (
             <p className="text-xs text-muted-foreground">
               No FCC agents installed on the server. Install with{' '}
               <code className="rounded bg-accent px-1">npm i -g free-claude-code</code>.
             </p>
-          ) : !agentRun ? (
-            <p className="text-xs text-muted-foreground">
-              Give fcc-{agent || agents[0]} a task in the dock below
-              {focus ? <> — it starts from <b>{focus}</b>.</> : '.'} Output streams here.
-            </p>
-          ) : null}
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {agents.map((a) => (
+                <Button key={a} size="sm" variant="secondary" className="h-7 text-[11px]"
+                  disabled={agentRun?.status === 'running'} onClick={() => runAgent(a)}>
+                  fcc-{a}
+                </Button>
+              ))}
+            </div>
+          )}
           {agentRun && (
-            <div>
+            <div className="mt-3">
               <div className="mb-1 flex items-center gap-2 text-[11px] text-muted-foreground">
                 <span className={cn('h-1.5 w-1.5 rounded-full',
                   agentRun.status === 'running' ? 'animate-pulse bg-primary' : 'bg-muted-foreground')} />
@@ -436,7 +314,7 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
                   </button>
                 )}
               </div>
-              <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-md bg-accent/30 p-2 text-[11px] leading-relaxed">
+              <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap rounded-md bg-accent/30 p-2 text-[11px] leading-relaxed">
                 {agentOutput || '…'}
               </pre>
             </div>
@@ -444,7 +322,6 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
         </div>
       )}
 
-      {/* ------------------------------------------------ dock */}
       {tab === 'chat' && (
         <div className="shrink-0 border-t border-border px-3 py-2.5">
           <div className="flex items-center gap-2">
@@ -452,36 +329,12 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), send())}
-              placeholder={busy ? 'FCC AI is thinking…' : focus ? `Ask about ${focus}…` : 'Ask the FCC AI…'}
+              placeholder={busy ? 'FCC AI is thinking…' : 'Ask the FCC AI…'}
               className="h-9 text-[13px]"
               disabled={busy}
             />
             <Button size="icon" className="h-9 w-9 shrink-0" disabled={busy || !input.trim()} onClick={send}>
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-            </Button>
-          </div>
-        </div>
-      )}
-      {tab === 'live' && (
-        <div className="shrink-0 border-t border-border px-3 py-2.5">
-          <Button className="h-9 w-full" disabled={liveBusy || !symbol.trim()} onClick={() => generateCommentary(symbol.trim())}>
-            {liveBusy ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Radio className="mr-1.5 h-4 w-4" />}
-            Generate squawk for {symbol.trim() || 'symbol'}
-          </Button>
-        </div>
-      )}
-      {tab === 'agent' && (
-        <div className="shrink-0 border-t border-border px-3 py-2.5">
-          <div className="flex items-center gap-2">
-            <Input
-              value={agentTask}
-              onChange={(e) => setAgentTask(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && runAgent()}
-              placeholder={focus ? `Task for fcc-${agent || agents[0]} (maps to ${focus})…` : `Task for fcc-${agent || agents[0]}…`}
-              className="h-9 flex-1 text-[12px]"
-            />
-            <Button size="sm" className="h-9 shrink-0" disabled={!agentTask.trim() || agentRun?.status === 'running'} onClick={runAgent}>
-              Run
             </Button>
           </div>
         </div>

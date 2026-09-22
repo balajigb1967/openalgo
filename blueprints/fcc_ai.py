@@ -143,16 +143,33 @@ def fcc_commentary_auto_status():
 @scalper_orderflow_bp.route("/fcc/lb-status", methods=["GET"])
 @app_key_required
 def fcc_lb_status():
-    """OpenAlgo load-balancer node health + which node served each route.
-    The LB lives in the terminal process, so proxy its status endpoint."""
-    try:
-        import os
-        import urllib.request
-        term = (os.getenv("FNO_TERMINAL_URL") or "http://127.0.0.1:8000").rstrip("/")
-        with urllib.request.urlopen(f"{term}/api/lb-status", timeout=4) as r:
-            return jsonify({"status": "success", "lb": json.loads(r.read().decode())})
-    except Exception as e:
-        return jsonify({"status": "success", "lb": {"error": str(e)[:120], "nodes": {}, "last_served": {}}})
+    """Dual-instance OpenAlgo health.  Reports local + peer status."""
+    import os
+
+    peer_url = os.getenv("PEER_OPENALGO_URL", "").strip()
+    peer_key = os.getenv("PEER_OPENALGO_API_KEY", "").strip()
+    port = os.getenv("PORT", os.getenv("FLASK_PORT", "5000"))
+
+    nodes = {
+        f"local:{port}": {"status": "up", "broker": os.getenv("BROKER_API_NAME", "unknown")},
+    }
+
+    if peer_url:
+        try:
+            import httpx
+            r = httpx.post(
+                peer_url.rstrip("/") + "/api/v1/quotes",
+                json={"apikey": peer_key, "symbol": "NIFTY", "exchange": "NSE_INDEX"},
+                timeout=4,
+            )
+            nodes[peer_url] = {
+                "status": "up" if r.status_code in (200, 400) else "degraded",
+                "http": r.status_code,
+            }
+        except Exception as e:
+            nodes[peer_url] = {"status": "down", "error": str(e)[:100]}
+
+    return jsonify({"status": "success", "lb": {"nodes": nodes}})
 
 
 @scalper_orderflow_bp.route("/fcc/agent", methods=["POST"])

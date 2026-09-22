@@ -606,7 +606,7 @@ def get_commentary_history(limit: int = 30) -> list[dict]:
 
 _auto_lock = threading.Lock()
 _AUTO_STATE_PATH = os.path.join(PROJECT_ROOT, ".fcc_squawk_state.json")
-_auto_state: dict[str, Any] = {"enabled": False, "symbol": "NIFTY", "interval": 60,
+_auto_state: dict[str, Any] = {"enabled": True, "symbol": "NIFTY", "interval": 60,
                                "last_error": "", "last_ts": 0.0, "thread": None,
                                "stopped_reason": ""}
 
@@ -714,32 +714,31 @@ def _persist_auto_state() -> None:
 
 
 def _resume_on_boot() -> None:
-    """Re-arm a squawk session persisted by a previous process generation.
-
-    Loop state lives in memory, so every restart (deploy, crash, reboot)
-    silently killed a running squawk. The persisted flag lets a fresh process
-    pick the session back up and run until switched off. Idempotent: only
-    fires when the current generation has no session yet."""
+    """Re-arm or start a squawk session. Defaults to ON for NIFTY if no state persisted."""
+    saved = {}
     try:
-        with open(_AUTO_STATE_PATH, "r") as f:
-            saved = json.load(f)
+        if os.path.exists(_AUTO_STATE_PATH):
+            with open(_AUTO_STATE_PATH, "r") as f:
+                saved = json.load(f)
     except Exception:
-        return
-    if not isinstance(saved, dict) or not saved.get("enabled"):
-        return
+        saved = {}
+    enabled = saved.get("enabled", True) if isinstance(saved, dict) else True
+    symbol = str(saved.get("symbol") or "NIFTY") if isinstance(saved, dict) else "NIFTY"
+    interval = max(30, int(saved.get("interval") or 60)) if isinstance(saved, dict) else 60
     with _auto_lock:
-        if _auto_state.get("enabled") or _auto_state.get("thread"):
-            return  # this generation already runs a session; disk copy is stale
-        _auto_state.update({
-            "enabled": True,
-            "symbol": str(saved.get("symbol") or "NIFTY"),
-            "interval": max(30, int(saved.get("interval") or 60)),
-            "stopped_reason": "",
-        })
-        t = threading.Thread(target=_auto_loop, name="fcc-auto-squawk", daemon=True)
-        _auto_state["thread"] = t
-        t.start()
-    logger.info("resumed auto-squawk for %s", saved.get("symbol"))
+        if _auto_state.get("enabled") and _auto_state.get("thread"):
+            return  # this generation already runs a session
+        if enabled:
+            _auto_state.update({
+                "enabled": True,
+                "symbol": symbol,
+                "interval": interval,
+                "stopped_reason": "",
+            })
+            t = threading.Thread(target=_auto_loop, name="fcc-auto-squawk", daemon=True)
+            _auto_state["thread"] = t
+            t.start()
+            logger.info("squawk loop running (default ON) for %s", symbol)
 
 
 def auto_squawk_status() -> dict:
@@ -748,6 +747,13 @@ def auto_squawk_status() -> dict:
         out = {k: v for k, v in _auto_state.items() if k != "thread"}
         out["running"] = bool(_auto_state.get("thread"))
         return out
+
+
+# Start auto-squawk by default on boot
+try:
+    _resume_on_boot()
+except Exception as _e:
+    logger.debug("init auto-squawk failed: %s", _e)
 
 
 def _rsi(closes: list[float], period: int = 14) -> float | None:
