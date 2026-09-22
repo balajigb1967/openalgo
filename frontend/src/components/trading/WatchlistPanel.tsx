@@ -55,6 +55,7 @@ import { Input } from '@/components/ui/input'
 import { type PriceableItem, useLivePrice } from '@/hooks/useLivePrice'
 import { useMarketStatus } from '@/hooks/useMarketStatus'
 import { needsPreviousClose, previousClose } from '@/lib/trading/previousClose'
+import { setSyncSymbol } from '@/lib/scalperSync'
 import type { SearchRow } from '@/lib/trading/terminal'
 import { cn } from '@/lib/utils'
 import { showToast } from '@/utils/toast'
@@ -188,7 +189,7 @@ const DISPLAY_DEFAULT: Display = {
   columns: ['last', 'changePercent'],
   logo: true,
   exchange: true,
-  sections: false,
+  sections: true,
 }
 
 function readDisplay(): Display {
@@ -203,11 +204,22 @@ function readDisplay(): Display {
         : DISPLAY_DEFAULT.columns,
       logo: typeof saved.logo === 'boolean' ? saved.logo : true,
       exchange: typeof saved.exchange === 'boolean' ? saved.exchange : true,
-      sections: typeof saved.sections === 'boolean' ? saved.sections : false,
+      sections: typeof saved.sections === 'boolean' ? saved.sections : true,
     }
   } catch {
     return DISPLAY_DEFAULT
   }
+}
+
+export function itemSection(item: WatchlistItem): string {
+  if (item.section && item.section.trim().length > 0) return item.section.trim()
+  const exch = (item.exchange || '').toUpperCase()
+  if (exch === 'GLOBAL') return 'Global'
+  if (exch === 'NSE_INDEX' || exch === 'BSE_INDEX') return 'Indices'
+  if (exch === 'MCX') return 'Commodities'
+  if (exch === 'CDS') return 'Currency'
+  if (exch === 'NSE' || exch === 'BSE') return 'Equities'
+  return 'Symbols'
 }
 
 /** High/low/open: a dollar cell when the row is global, a dash when absent. */
@@ -285,7 +297,7 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
   } | null>(null)
   const [confirm, setConfirm] = useState<{ kind: 'delete' | 'clear'; name: string } | null>(null)
   /** "New section" flow: names a group, then files the chosen row into it. */
-  const [sectionDialog, setSectionDialog] = useState<{ item: WatchlistItem } | null>(null)
+  const [sectionDialog, setSectionDialog] = useState<{ item?: WatchlistItem | null } | null>(null)
   const [sectionName, setSectionName] = useState('')
 
   const fileRef = useRef<HTMLInputElement>(null)
@@ -691,7 +703,7 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
     if (display.sections) {
       const above = insertAt > 0 ? ordered[insertAt - 1] : undefined
       const below = ordered[insertAt + 1]
-      section = above?.section ?? below?.section ?? null
+      section = above ? itemSection(above) : below ? itemSection(below) : null
     }
     const next = display.sections ? { ...moved, section } : moved
     const withMoved = ordered.map((i) => (i.id === next.id ? next : i))
@@ -783,21 +795,24 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
     const item = sectionDialog?.item
     setSectionDialog(null)
     setSectionName('')
-    if (!item || !name || !active) return
-    // Re-order locally: pull the row to the end, then set its section.
-    const ordered = [...active.items.filter((i) => i.id !== item.id), { ...item, section: name }]
-    setLists((prev) => prev.map((l) => (l.id === active.id ? { ...l, items: ordered } : l)))
-    try {
-      await watchlistApi.reorderItems(
-        active.id,
-        ordered.map((i) => i.id)
-      )
-      await watchlistApi.setItemSection(item.id, name)
-      // Sections view turns on automatically: the user just made one.
-      setDisplay((prev) => ({ ...prev, sections: true }))
-    } catch (error) {
-      showToast.error(watchlistError(error, 'Could not create the section'))
-      await refresh(active.id).catch(() => {})
+    if (!name || !active) return
+    setDisplay((prev) => ({ ...prev, sections: true }))
+    if (item) {
+      // Re-order locally: pull the row to the end, then set its section.
+      const ordered = [...active.items.filter((i) => i.id !== item.id), { ...item, section: name }]
+      setLists((prev) => prev.map((l) => (l.id === active.id ? { ...l, items: ordered } : l)))
+      try {
+        await watchlistApi.reorderItems(
+          active.id,
+          ordered.map((i) => i.id)
+        )
+        await watchlistApi.setItemSection(item.id, name)
+      } catch (error) {
+        showToast.error(watchlistError(error, 'Could not create the section'))
+        await refresh(active.id).catch(() => {})
+      }
+    } else {
+      showToast.success(`Section "${name}" ready — drag symbols into it`)
     }
   }
 
@@ -870,20 +885,18 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
       | { kind: 'row'; item: WatchlistItem; index: number }
     > => {
       if (!display.sections) return rows.map((item, index) => ({ kind: 'row' as const, item, index }))
-      const anySectioned = rows.some((r) => (r.section ?? '').length > 0)
-      if (!anySectioned) return rows.map((item, index) => ({ kind: 'row' as const, item, index }))
       const out: Array<
         | { kind: 'section'; name: string | null; dim: boolean; count: number }
         | { kind: 'row'; item: WatchlistItem; index: number }
       > = []
       let current: string | null | undefined = undefined
       for (let i = 0; i < rows.length; i++) {
-        const name = rows[i].section?.trim() || null
+        const name = itemSection(rows[i])
         if (name !== current) {
           current = name
           let count = 0
-          for (let j = i; j < rows.length && (rows[j].section?.trim() || null) === name; j++) count++
-          out.push({ kind: 'section', name, dim: name === null, count })
+          for (let j = i; j < rows.length && itemSection(rows[j]) === name; j++) count++
+          out.push({ kind: 'section', name, dim: false, count })
         }
         out.push({ kind: 'row', item: rows[i], index: i })
       }
@@ -919,7 +932,8 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
                   setOverId(item.id)
                   // Above or below the midline decides which side the row
                   // lands on — the line the user sees is the line they get.
-                  setDropAfterId(e.clientY > e.currentTarget.getBoundingClientRect().bottom / 2)
+                  const rect = e.currentTarget.getBoundingClientRect()
+                  setDropAfterId(e.clientY > rect.top + rect.height / 2)
                   // Back over rows after a pass over a header: the header's
                   // highlight must not stick.
                   setOverSection((s) => (s === undefined ? s : undefined))
@@ -974,6 +988,7 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
                     // GLOBAL rows are chartable too: the terminal feeds the
                     // pane from the Yahoo-backed global history plugin, so a
                     // click loads the international benchmark's dollar chart.
+                    setSyncSymbol(`${item.exchange}:${item.symbol}`)
                     onPick({ symbol: item.symbol, exchange: item.exchange })
                   }}
                   onKeyDown={(e) => {
@@ -996,9 +1011,13 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
                   aria-current={activeSymbol === key ? true : undefined}
                 />
 
-                {/* Out of flow: at rest the grip costs the symbol column no
-                    width at all, which is the column under the most pressure. */}
-                <GripVertical className="pointer-events-none absolute left-0 top-1/2 h-3 w-3 -translate-y-1/2 text-transparent transition-colors group-hover:text-muted-foreground/50" />
+                {/* Visible drag handle for reordering rows and moving across sections */}
+                <span
+                  className="relative z-10 -ml-1 mr-0.5 flex h-4 w-4 shrink-0 cursor-grab items-center justify-center text-muted-foreground/30 transition-colors hover:text-foreground group-hover:text-muted-foreground/70 active:cursor-grabbing"
+                  title="Drag to rearrange"
+                >
+                  <GripVertical className="h-3.5 w-3.5" />
+                </span>
 
                 <span className="pointer-events-none relative flex min-w-0 items-center gap-1.5">
                   {display.logo && (
@@ -1199,6 +1218,21 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
           aria-label="Add instrument"
         >
           <Plus className="h-4 w-4" />
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 shrink-0"
+          disabled={!active}
+          onClick={() => {
+            setSectionName('')
+            setSectionDialog({ item: null })
+          }}
+          title="Add section"
+          aria-label="Add section"
+        >
+          <FolderPlus className="h-4 w-4" />
         </Button>
 
         {/* What the rows show. Separate from the list menu beside it: that
@@ -1421,9 +1455,9 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
           <DialogHeader>
             <DialogTitle>New section</DialogTitle>
             <DialogDescription>
-              {sectionDialog
-                ? `Group for ${sectionDialog.item.symbol} — it moves to the end of the list, under this name.`
-                : ''}
+              {sectionDialog?.item
+                ? `Group for ${sectionDialog.item.symbol} — it moves under this name.`
+                : 'Create a named section header to organize symbols in your watchlist.'}
             </DialogDescription>
           </DialogHeader>
           <Input
@@ -1441,7 +1475,7 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
               Cancel
             </Button>
             <Button disabled={!sectionName.trim()} onClick={() => void submitNewSection()}>
-              Create & move
+              {sectionDialog?.item ? 'Create & move' : 'Create section'}
             </Button>
           </DialogFooter>
         </DialogContent>

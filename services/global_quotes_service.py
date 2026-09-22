@@ -38,7 +38,7 @@ CATALOG = {
     "GOLD": {"tv": "TVC:GOLD", "name": "Gold Spot (USD)", "yahoo": "GC=F", "decimals": 2},
     "SILVER": {"tv": "TVC:SILVER", "name": "Silver Spot (USD)", "yahoo": "SI=F", "decimals": 3},
     "NATGAS": {"tv": "NYMEX:NG1!", "name": "Natural Gas (USD)", "yahoo": "NG=F", "decimals": 3},
-    "GIFTNIFTY": {"tv": "NSEIX:NIFTY1!", "name": "GIFT NIFTY (USD)", "yahoo": None, "decimals": 1},
+    "GIFTNIFTY": {"tv": "NSEIX:NIFTY1!", "name": "GIFT NIFTY (USD)", "yahoo": "^NSEI", "decimals": 1},
 }
 
 #: How long a fetched batch is reused. Globals move slowly relative to Indian
@@ -188,10 +188,15 @@ def get_global_quotes(keys: list | None = None) -> dict:
 
 _YAHOO_RESOLUTIONS = {
     "1m": ("1m", "2d"),
+    "3m": ("5m", "5d"),
     "5m": ("5m", "5d"),
+    "10m": ("15m", "10d"),
     "15m": ("15m", "10d"),
+    "30m": ("30m", "60d"),
     "1h": ("60m", "30d"),
     "D": ("1d", "2y"),
+    "W": ("1wk", "5y"),
+    "M": ("1mo", "10y"),
 }
 
 _hist_cache: dict = {}  # (key, interval) -> {"ts": float, "candles": [...]}

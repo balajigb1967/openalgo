@@ -1,7 +1,10 @@
 import importlib
+import os
+import threading
 import time
 from typing import Any
 
+import httpx
 import pandas as pd
 
 from database.auth_db import get_auth_token_broker
@@ -11,6 +14,91 @@ from utils.logging import get_logger
 
 # Initialize logger
 logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Peer-instance failover for history
+#
+# When the local broker's history API is unavailable (dead token, outage),
+# transparently retry against a sibling OpenAlgo instance.  Reuses the same
+# PEER_OPENALGO_URL / PEER_OPENALGO_API_KEY env vars as quotes_service.
+# ---------------------------------------------------------------------------
+
+def _peer_config() -> tuple[str, str, float, float]:
+    """Read peer settings lazily so .env load order never matters."""
+    return (
+        os.getenv("PEER_OPENALGO_URL", "").strip(),
+        os.getenv("PEER_OPENALGO_API_KEY", "").strip(),
+        float(os.getenv("PEER_OPENALGO_TIMEOUT", "10")),   # history can be slow
+        float(os.getenv("PEER_OPENALGO_COOLDOWN", "300")),
+    )
+
+
+_peer_lock = threading.Lock()
+_peer_down_until = 0.0
+_peer_inflight = threading.local()
+
+
+def _peer_available() -> bool:
+    url, key, _, _ = _peer_config()
+    return bool(url and key) and time.monotonic() >= _peer_down_until
+
+
+def _mark_peer_down(seconds: float | None = None) -> None:
+    global _peer_down_until
+    _, _, _, cooldown = _peer_config()
+    with _peer_lock:
+        _peer_down_until = time.monotonic() + (seconds if seconds is not None else cooldown)
+
+
+def _try_peer_history(
+    symbol: str, exchange: str, interval: str,
+    start_date: str, end_date: str, local_broker: str,
+) -> tuple[bool, dict[str, Any], int] | None:
+    """Fetch history from the peer instance; None if unavailable."""
+    if not _peer_available():
+        return None
+    if getattr(_peer_inflight, "active", False):
+        return None  # never recurse A -> B -> A
+    url_base, key, timeout, _ = _peer_config()
+    if not (url_base and key):
+        return None
+    _peer_inflight.active = True
+    try:
+        url = url_base.rstrip("/") + "/api/v1/history"
+        payload = {
+            "apikey": key,
+            "symbol": symbol,
+            "exchange": exchange,
+            "interval": interval,
+            "start_date": start_date,
+            "end_date": end_date,
+        }
+        try:
+            resp = httpx.post(url, json=payload, timeout=timeout)
+            if resp.status_code == 429:
+                _mark_peer_down(30.0)
+                return None
+            if resp.status_code == 200:
+                body = resp.json()
+                if body.get("status") == "success" and body.get("data"):
+                    logger.info(
+                        f"History {exchange}:{symbol} served by peer instance "
+                        f"(local broker '{local_broker}' unusable)"
+                    )
+                    return True, body, 200
+                return None
+            logger.debug(f"Peer history {url} -> HTTP {resp.status_code}")
+            if resp.status_code >= 500 or resp.status_code in (401, 403):
+                _mark_peer_down()
+            return None
+        except Exception as exc:
+            logger.debug(f"Peer history {url} failed: {exc}")
+            _mark_peer_down()
+            return None
+    finally:
+        _peer_inflight.active = False
+
 
 # Rate limiter: max 3 broker history API requests per second
 # Uses minimum interval between calls to prevent burst requests
@@ -316,9 +404,17 @@ def get_history(
         )
         if AUTH_TOKEN is None:
             return False, {"status": "error", "message": "Invalid openalgo apikey"}, 403
-        return get_history_with_auth(
+        result = get_history_with_auth(
             AUTH_TOKEN, FEED_TOKEN, broker_name, symbol, exchange, interval, start_date, end_date
         )
+        # Peer-instance failover: local broker history unavailable -> sibling
+        if not result[0] and result[2] >= 500:
+            peer = _try_peer_history(
+                symbol, exchange, interval, start_date, end_date, broker_name
+            )
+            if peer is not None:
+                return peer
+        return result
 
     # Case 2: Direct internal call with auth_token and broker
     elif auth_token and broker:

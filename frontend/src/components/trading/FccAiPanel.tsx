@@ -43,7 +43,7 @@ interface CommentaryItem {
   tag: string
 }
 
-const API = '/api/fcc'
+const API = '/plugins/fcc'
 
 async function fccFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API}${path}`, {
@@ -54,9 +54,9 @@ async function fccFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
-export function FccAiPanel() {
+export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
   const [status, setStatus] = useState<FccStatus | null>(null)
-  const [tab, setTab] = useState<'chat' | 'live' | 'agent'>('chat')
+  const [tab, setTab] = useState<'chat' | 'live' | 'agent'>('live')
 
   // chat
   const [turns, setTurns] = useState<Turn[]>([])
@@ -65,7 +65,7 @@ export function FccAiPanel() {
   const threadRef = useRef<HTMLDivElement>(null)
 
   // live
-  const [symbol, setSymbol] = useState('NIFTY')
+  const [symbol, setSymbol] = useState(() => (activeSymbol?.split(':').pop() || 'NIFTY').toUpperCase())
   const [items, setItems] = useState<CommentaryItem[]>([])
   const [liveBusy, setLiveBusy] = useState(false)
 
@@ -77,6 +77,41 @@ export function FccAiPanel() {
     fccFetch<{ connected: boolean; models: string[]; agents_available: Record<string, boolean> }>('/status')
       .then((d) => setStatus({ ...d, error: null }))
       .catch((e) => setStatus({ connected: false, models: [], agents_available: {}, error: String(e) }))
+  }, [])
+
+  // Follow activeSymbol changes and sync squawk on server
+  useEffect(() => {
+    if (activeSymbol) {
+      const s = (activeSymbol.split(':').pop() || '').trim().toUpperCase()
+      if (s) {
+        setSymbol(s)
+        fccFetch('/commentary/auto', {
+          method: 'POST',
+          body: JSON.stringify({ enabled: true, symbol: s }),
+        }).catch(() => {})
+      }
+    }
+  }, [activeSymbol])
+
+  // Poll live squawk history continuously
+  useEffect(() => {
+    let alive = true
+    const poll = async () => {
+      try {
+        const d = await fccFetch<{ history: CommentaryItem[] }>('/commentary/history?limit=30')
+        if (alive && d.history) {
+          setItems(d.history)
+        }
+      } catch {
+        // ignore
+      }
+    }
+    poll()
+    const timer = setInterval(poll, 12000)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
   }, [])
 
   useEffect(() => {
@@ -221,6 +256,13 @@ export function FccAiPanel() {
               {liveBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Radio className="h-3.5 w-3.5" />}
               Squawk
             </Button>
+          </div>
+          <div className="mb-2.5 flex items-center justify-between rounded bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+            <span className="flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+              SQUAWK ALWAYS ON ({symbol})
+            </span>
+            <span className="text-[10px] text-muted-foreground font-normal">Live institutional feed</span>
           </div>
           {items.length === 0 && (
             <p className="px-1 text-xs text-muted-foreground">

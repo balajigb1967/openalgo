@@ -72,11 +72,12 @@ def fcc_chat():
         if len(messages) > 40:
             messages = messages[-40:]
         api_key = _resolve_api_key()
+        focus = body.get("focus") or body.get("symbol") or None
         result = fcc.chat(
             messages,
             model=(body.get("model") or None) or None,
             use_project_context=body.get("context", True) is not False,
-            focus=body.get("focus"),
+            focus=focus,
             api_key=api_key,
         )
         return jsonify({"status": "success", **result})
@@ -88,13 +89,18 @@ def fcc_chat():
 @scalper_orderflow_bp.route("/fcc/commentary", methods=["POST"])
 @app_key_required
 def fcc_commentary():
-    """Fresh squawk bullet for a symbol. Body: {symbol?, model?}"""
+    """Fresh squawk bullet for a symbol. Body: {symbol?, model?}
+
+    Event-driven: returns 204 (no content) when nothing new happened since
+    the last read — silence means no new trading event, not a failure."""
     try:
         body = request.get_json(silent=True) or {}
         item = fcc.generate_commentary(
             symbol=body.get("symbol"), model=body.get("model"),
             api_key=_resolve_api_key(),
         )
+        if not item:
+            return "", 204
         return jsonify({"status": "success", "item": item})
     except Exception as e:
         logger.exception("fcc commentary failed")
@@ -108,6 +114,64 @@ def fcc_commentary_history():
     return jsonify({"status": "success", "history": fcc.get_commentary_history(limit)})
 
 
+@scalper_orderflow_bp.route("/fcc/commentary/auto", methods=["POST"])
+@app_key_required
+def fcc_commentary_auto():
+    """Start/stop the auto-squawk loop. Body: {enabled, symbol?, interval?}
+
+    No session timer — the loop runs until switched off (it pauses itself
+    outside market hours and survives restarts via persisted state)."""
+    try:
+        body = request.get_json(silent=True) or {}
+        st = fcc.set_auto_squawk(
+            enabled=bool(body.get("enabled")),
+            symbol=body.get("symbol"),
+            interval=body.get("interval"),
+        )
+        return jsonify({"status": "success", "auto": st})
+    except Exception as e:
+        logger.exception("fcc auto squawk toggle failed")
+        return jsonify({"status": "error", "message": str(e)[:300]}), 500
+
+
+@scalper_orderflow_bp.route("/fcc/commentary/auto", methods=["GET"])
+@app_key_required
+def fcc_commentary_auto_status():
+    return jsonify({"status": "success", "auto": fcc.auto_squawk_status()})
+
+
+@scalper_orderflow_bp.route("/fcc/lb-status", methods=["GET"])
+@app_key_required
+def fcc_lb_status():
+    """Dual-instance OpenAlgo health.  Reports local + peer status."""
+    import os
+
+    peer_url = os.getenv("PEER_OPENALGO_URL", "").strip()
+    peer_key = os.getenv("PEER_OPENALGO_API_KEY", "").strip()
+    port = os.getenv("PORT", os.getenv("FLASK_PORT", "5000"))
+
+    nodes = {
+        f"local:{port}": {"status": "up", "broker": os.getenv("BROKER_API_NAME", "unknown")},
+    }
+
+    if peer_url:
+        try:
+            import httpx
+            r = httpx.post(
+                peer_url.rstrip("/") + "/api/v1/quotes",
+                json={"apikey": peer_key, "symbol": "NIFTY", "exchange": "NSE_INDEX"},
+                timeout=4,
+            )
+            nodes[peer_url] = {
+                "status": "up" if r.status_code in (200, 400) else "degraded",
+                "http": r.status_code,
+            }
+        except Exception as e:
+            nodes[peer_url] = {"status": "down", "error": str(e)[:100]}
+
+    return jsonify({"status": "success", "lb": {"nodes": nodes}})
+
+
 @scalper_orderflow_bp.route("/fcc/agent", methods=["POST"])
 @app_key_required
 def fcc_agent():
@@ -115,9 +179,16 @@ def fcc_agent():
     timeout?, model?}"""
     try:
         body = request.get_json(silent=True) or {}
+        prompt = str(body.get("prompt") or "")
+        symbol = (body.get("symbol") or body.get("focus") or "").strip()
+        if symbol:
+            # Map the operator's active chart onto the agent: it starts every
+            # run already pointed at the instrument being analysed.
+            prompt = (f"The operator's active chart is {symbol.split(':')[-1]}. "
+                      f"Analyse that instrument unless the task says otherwise.\n\n{prompt}")
         run = fcc.run_agent(
             agent=str(body.get("agent") or "claude"),
-            prompt=str(body.get("prompt") or ""),
+            prompt=prompt,
             cwd=body.get("cwd"), timeout=body.get("timeout"),
             model=body.get("model"),
         )

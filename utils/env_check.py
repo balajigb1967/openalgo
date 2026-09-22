@@ -1220,7 +1220,9 @@ def load_and_check_env_variables() -> None:
     try:
         import re
 
-        match = re.search(r"/([^/]+)/callback$", redirect_url)
+        # The broker-credentials UI can persist REDIRECT_URL with a query
+        # suffix (.../callback?); strip it or broker extraction breaks.
+        match = re.search(r"/([^/]+)/callback$", redirect_url.split("?", 1)[0].strip())
         if match:
             broker_name = match.group(1).lower()
     except Exception:
@@ -1334,6 +1336,9 @@ def load_and_check_env_variables() -> None:
     try:
         import re
 
+        # Tolerate a query suffix the admin UI may persist; without this the
+        # app can never restart once REDIRECT_URL carries one.
+        redirect_url = (redirect_url or "").split("?", 1)[0].strip()
         match = re.search(r"/([^/]+)/callback$", redirect_url)
         if not match:
             print("\nError: Invalid REDIRECT_URL format.")

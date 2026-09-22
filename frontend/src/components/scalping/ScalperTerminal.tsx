@@ -86,6 +86,20 @@ const INDEX_ROOT_MAP: Record<string, string> = {
   'BSE SENSEX 50': 'SENSEX50',
 }
 
+/** Global commodity / index symbols mapped to their Indian F&O tradable equivalent. */
+const GLOBAL_TO_FO: Record<
+  string,
+  { exchange: TermExchange; underlying: string; spotSym: string; spotExch: string }
+> = {
+  GIFTNIFTY: { exchange: 'NFO', underlying: 'NIFTY', spotSym: 'NIFTY', spotExch: 'NSE_INDEX' },
+  'GIFT NIFTY': { exchange: 'NFO', underlying: 'NIFTY', spotSym: 'NIFTY', spotExch: 'NSE_INDEX' },
+  USOIL: { exchange: 'MCX', underlying: 'CRUDEOIL', spotSym: 'CRUDEOIL', spotExch: 'MCX' },
+  BRENT: { exchange: 'MCX', underlying: 'CRUDEOIL', spotSym: 'CRUDEOIL', spotExch: 'MCX' },
+  NATGAS: { exchange: 'MCX', underlying: 'NATURALGAS', spotSym: 'NATURALGAS', spotExch: 'MCX' },
+  GOLD: { exchange: 'MCX', underlying: 'GOLD', spotSym: 'GOLD', spotExch: 'MCX' },
+  SILVER: { exchange: 'MCX', underlying: 'SILVER', spotSym: 'SILVER', spotExch: 'MCX' },
+}
+
 /** F&O root for a clicked symbol: index display names mapped, noise stripped. */
 function normalizeUnd(sym: string): string {
   const s = sym.trim().toUpperCase()
@@ -143,6 +157,148 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose, defaultMaximize
   // card. The popout passes defaultMaximized because a detached window has
   // nothing to float over — the terminal IS the page there.
   const [maximized, setMaximized] = useState(defaultMaximized)
+
+  /* ── window position & size state (drag & resize anywhere) ─────────── */
+  const containerDivRef = useRef<HTMLDivElement | null>(null)
+  const [winPos, setWinPos] = useState<{ x: number; y: number } | null>(() => {
+    try {
+      const saved = localStorage.getItem('oa-scalper-pos')
+      if (saved) return JSON.parse(saved)
+    } catch {}
+    return null
+  })
+  const [winSize, setWinSize] = useState<{ w: number; h: number } | null>(() => {
+    try {
+      const saved = localStorage.getItem('oa-scalper-size')
+      if (saved) return JSON.parse(saved)
+    } catch {}
+    return null
+  })
+
+  useEffect(() => {
+    if (winPos) {
+      try {
+        localStorage.setItem('oa-scalper-pos', JSON.stringify(winPos))
+      } catch {}
+    }
+  }, [winPos])
+
+  useEffect(() => {
+    if (winSize) {
+      try {
+        localStorage.setItem('oa-scalper-size', JSON.stringify(winSize))
+      } catch {}
+    }
+  }, [winSize])
+
+  const dragWinRef = useRef<{ startX: number; startY: number; initX: number; initY: number } | null>(null)
+  const onHeaderDragStart = useCallback(
+    (e: React.MouseEvent) => {
+      const target = e.target as HTMLElement
+      if (
+        target.closest('button') ||
+        target.closest('select') ||
+        target.closest('[role="combobox"]') ||
+        target.closest('input')
+      ) {
+        return
+      }
+      if (maximized) return
+      e.preventDefault()
+
+      const termEl = containerDivRef.current
+      const rect = termEl?.getBoundingClientRect()
+      const parentRect = termEl?.parentElement?.getBoundingClientRect()
+      const curX = rect && parentRect ? rect.left - parentRect.left : (winPos?.x ?? 8)
+      const curY = rect && parentRect ? rect.top - parentRect.top : (winPos?.y ?? 48)
+
+      dragWinRef.current = {
+        startX: e.clientX,
+        startY: e.clientY,
+        initX: curX,
+        initY: curY,
+      }
+
+      const onMove = (ev: MouseEvent) => {
+        if (!dragWinRef.current) return
+        const dx = ev.clientX - dragWinRef.current.startX
+        const dy = ev.clientY - dragWinRef.current.startY
+        setWinPos({
+          x: Math.max(0, dragWinRef.current.initX + dx),
+          y: Math.max(0, dragWinRef.current.initY + dy),
+        })
+      }
+
+      const onUp = () => {
+        dragWinRef.current = null
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+      }
+
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+    },
+    [maximized, winPos]
+  )
+
+  const resizeWinRef = useRef<{
+    startX: number
+    startY: number
+    initW: number
+    initH: number
+    edge: 'both' | 'right' | 'bottom'
+  } | null>(null)
+
+  const onWindowResizeStart = useCallback(
+    (e: React.MouseEvent, edge: 'both' | 'right' | 'bottom') => {
+      if (maximized) return
+      e.preventDefault()
+      e.stopPropagation()
+
+      const termEl = containerDivRef.current
+      const rect = termEl?.getBoundingClientRect()
+      const curW = rect?.width ?? winSize?.w ?? 1180
+      const curH = rect?.height ?? winSize?.h ?? 600
+
+      resizeWinRef.current = {
+        startX: e.clientX,
+        startY: e.clientY,
+        initW: curW,
+        initH: curH,
+        edge,
+      }
+
+      const onMove = (ev: MouseEvent) => {
+        const cur = resizeWinRef.current
+        if (!cur) return
+        const dx = ev.clientX - cur.startX
+        const dy = ev.clientY - cur.startY
+        setWinSize((prev) => ({
+          w:
+            cur.edge === 'bottom'
+              ? (prev?.w ?? cur.initW)
+              : Math.max(640, cur.initW + dx),
+          h:
+            cur.edge === 'right'
+              ? (prev?.h ?? cur.initH)
+              : Math.max(420, cur.initH + dy),
+        }))
+      }
+
+      const onUp = () => {
+        resizeWinRef.current = null
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+      }
+
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+    },
+    [maximized, winSize]
+  )
+
+  /* ── chart timeframe state ─────────────────────────────────────────── */
+  const [chartTf, setChartTf] = useState<'1m' | '5m' | '15m'>('5m')
 
   /* ── selection state ─────────────────────────────────────────────────── */
   const [exchange, setExchange] = useState<TermExchange>('NFO')
@@ -258,14 +414,27 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose, defaultMaximize
   useEffect(() => {
     return subscribeSync((s) => {
       if (!followChart || !s.symbol) return
-      const prefix = s.symbol.split(':')[0] ?? ''
+      const prefix = (s.symbol.split(':')[0] ?? '').toUpperCase()
+      const rawSym = s.symbol.split(':')[1] ?? s.symbol
+      const cleanSym = rawSym.trim().toUpperCase()
+
+      // Handle GLOBAL symbols by mapping to their Indian F&O counterpart
+      if (prefix === 'GLOBAL' || prefix === 'GLOBAL_INDEX') {
+        const gm = GLOBAL_TO_FO[cleanSym]
+        if (gm) {
+          aimAt(gm.exchange, gm.underlying, gm.spotSym, gm.spotExch)
+          showFlash(`Following chart: ${s.symbol} → ${gm.underlying} (${gm.exchange})`)
+          return
+        }
+      }
+
       const info = underlyingFromChart(s.symbol)
       if (!info.underlying) return
-      aimAt(exchForChartPrefix(prefix), info.underlying, info.rawSym, prefix.toUpperCase())
+      aimAt(exchForChartPrefix(prefix), info.underlying, info.rawSym, prefix)
       if (info.isOption && info.optionType && info.strike != null) {
         pendingStrike.current = { side: info.optionType, strike: info.strike, underlying: info.underlying.toUpperCase() }
       }
-      showFlash(`Following chart: ${s.symbol.split(':')[1] ?? s.symbol}`)
+      showFlash(`Following chart: ${rawSym}`)
     })
   }, [followChart, showFlash, aimAt])
 
@@ -595,28 +764,53 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose, defaultMaximize
   const spotLabel = optionsMode ? rawSpot || underlyingSym || underlying : futSymbol
   /** The SPOT chart/depth instrument: raw clicked symbol, else chain resolution. */
   const spotSym = optionsMode ? rawSpot || underlyingSym || '' : futSymbol
-  /** SPOT's exchange: the raw instrument's own (NSE / NSE_INDEX / BSE…),
-   * else the chain's underlying exchange — never the F&O options exchange,
-   * which has no equities/indices and made every raw load fail silently. */
+  const defaultSpotExch =
+    (({
+      NFO: 'NSE_INDEX',
+      BFO: 'BSE_INDEX',
+      MCX: 'MCX',
+      CDS: 'CDS',
+    } as Record<TermExchange, string>)[exchange] ?? 'NSE_INDEX')
   const spotExch = optionsMode
     ? rawSpot
-      ? rawSpotExch || underlyingExch || 'NSE'
-      : underlyingExch || 'NSE'
+      ? rawSpotExch || underlyingExch || defaultSpotExch
+      : underlyingExch || defaultSpotExch
     : exchange
 
   return (
     <div
+      ref={containerDivRef}
       data-trading-scalper-terminal
+      style={
+        maximized
+          ? undefined
+          : {
+              left: winPos ? `${winPos.x}px` : undefined,
+              top: winPos ? `${winPos.y}px` : undefined,
+              width: winSize ? `${winSize.w}px` : undefined,
+              height: winSize ? `${winSize.h}px` : undefined,
+            }
+      }
       className={cn(
         'absolute z-30 flex flex-col overflow-hidden border bg-background/95 shadow-xl backdrop-blur-sm',
         maximized
           // Fullscreen: cover the whole chart area edge-to-edge.
           ? 'inset-0 rounded-none'
-          : 'left-2 top-12 max-h-[calc(100%-3.5rem)] min-h-[560px] w-[min(1180px,calc(100%-1rem))] rounded-lg'
+          : cn(
+              !winPos && 'left-2 top-12',
+              !winSize && 'w-[min(1180px,calc(100%-1rem))] max-h-[calc(100%-3.5rem)] min-h-[560px]',
+              'rounded-lg'
+            )
       )}
     >
       {/* Header: identity + sync */}
-      <div className="flex items-center gap-1.5 border-b bg-muted/30 px-2 py-1">
+      <div
+        onMouseDown={onHeaderDragStart}
+        className={cn(
+          'flex items-center gap-1.5 border-b bg-muted/30 px-2 py-1 select-none',
+          !maximized && 'cursor-grab active:cursor-grabbing'
+        )}
+      >
         <span className="text-[11px] font-bold uppercase tracking-wide text-foreground">Scalper</span>
         <Select
           value={exchange}
@@ -703,6 +897,25 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose, defaultMaximize
           ×{strikeCount}
         </button>
 
+        {/* Chart timeframe toggle: 1m / 5m / 15m */}
+        <div className="flex items-center rounded border border-border/60 bg-muted/40 p-0.5 text-[9px]">
+          {(['1m', '5m', '15m'] as const).map((tf) => (
+            <button
+              key={tf}
+              type="button"
+              onClick={() => setChartTf(tf)}
+              className={cn(
+                'px-1.5 py-0.5 font-bold rounded text-[9px] transition-colors',
+                chartTf === tf
+                  ? 'bg-primary text-primary-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              )}
+            >
+              {tf}
+            </button>
+          ))}
+        </div>
+
         {spotTick?.ltp != null && spotLabel && (
           <span className="font-mono text-[10px] font-semibold tabular-nums text-foreground">
             {underlying}{' '}
@@ -788,6 +1001,7 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose, defaultMaximize
           setOrdCfg={setOrdCfg}
           lots={qtyOverride.ce ?? 1}
           setLots={(n) => setQtyOverride((p) => ({ ...p, ce: n }))}
+          chartTf={chartTf}
           onBuy={() => submitOrder(ceLeg, 'BUY')}
           onSell={() => submitOrder(ceLeg, 'SELL')}
           onSquare={() => squareOff(ceLeg)}
@@ -832,6 +1046,7 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose, defaultMaximize
           setOrdCfg={setOrdCfg}
           lots={qtyOverride.pe ?? 1}
           setLots={(n) => setQtyOverride((p) => ({ ...p, pe: n }))}
+          chartTf={chartTf}
           onBuy={() =>
             optionsMode
               ? showToast.info?.('Spot is reference-only — trade the CE/PE columns')
@@ -877,6 +1092,7 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose, defaultMaximize
           setOrdCfg={setOrdCfg}
           lots={qtyOverride.pe ?? 1}
           setLots={(n) => setQtyOverride((p) => ({ ...p, pe: n }))}
+          chartTf={chartTf}
           onBuy={() => submitOrder(peLeg, 'BUY')}
           onSell={() => submitOrder(peLeg, 'SELL')}
           onSquare={() => squareOff(peLeg)}
@@ -910,6 +1126,31 @@ export function ScalperTerminal({ apiKey, wsUrl, armed, onClose, defaultMaximize
         </span>
         <span>Charts stream live · depth polls REST every 3s · orders use the scalping lot-cap</span>
       </div>
+
+      {/* Window Resize Handles (Horizontal, Vertical, Diagonal) */}
+      {!maximized && (
+        <>
+          <div
+            onMouseDown={(e) => onWindowResizeStart(e, 'right')}
+            className="absolute right-0 top-0 bottom-4 w-1.5 cursor-ew-resize hover:bg-primary/25 transition-colors"
+            title="Drag horizontally to resize width"
+          />
+          <div
+            onMouseDown={(e) => onWindowResizeStart(e, 'bottom')}
+            className="absolute bottom-0 left-0 right-4 h-1.5 cursor-ns-resize hover:bg-primary/25 transition-colors"
+            title="Drag vertically to resize height"
+          />
+          <div
+            onMouseDown={(e) => onWindowResizeStart(e, 'both')}
+            className="absolute bottom-0 right-0 h-4 w-4 cursor-nwse-resize flex items-end justify-end p-0.5 text-muted-foreground/60 hover:text-foreground select-none"
+            title="Drag corner to resize width & height"
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" className="pointer-events-none">
+              <path d="M8 2L2 8M8 5L5 8M8 8L8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -947,6 +1188,7 @@ function Column({
   onSell,
   onSquare,
   headerExtra,
+  chartTf,
 }: {
   side: 'ce' | 'spot' | 'pe'
   label: string
@@ -972,6 +1214,7 @@ function Column({
   onSell: () => void
   onSquare: () => void
   headerExtra?: React.ReactNode
+  chartTf?: string
 }) {
   const isTradable = side !== 'spot' || !!symbol
   return (
@@ -1003,10 +1246,10 @@ function Column({
         <div className="ml-auto flex items-center gap-1">{headerExtra}</div>
       </div>
 
-      {/* chart (the same OpenAlgo engine as the main grid) + resizer */}
+      {/* chart (lightweight ScalpChart with adaptive history + live ticks) + resizer */}
       <div className="relative shrink-0 overflow-hidden rounded border border-border/60 bg-card" style={{ height: chartH }}>
         {symbol && exchange ? (
-          <ScalperChart apiKey={apiKey} wsUrl={wsUrl} symbol={symbol} exchange={exchange} columnId={columnId} />
+          <ScalperChart apiKey={apiKey} wsUrl={wsUrl} symbol={symbol} exchange={exchange} interval={chartTf} columnId={columnId} />
         ) : (
           <div className="flex h-full items-center justify-center text-[10px] text-muted-foreground">Pick a strike…</div>
         )}

@@ -132,6 +132,7 @@ _BRANDS: Mapping[str, tuple[str, str]] = MappingProxyType(
         "deepseek": ("DeepSeek", "deepseek"),
         "docker_model_runner": ("Docker Model Runner", "docker"),
         "featherless_ai": ("Featherless AI", "featherless"),
+        "fcc": ("Free Claude Code (FCC)", "sparkles"),
         "fireworks_ai": ("Fireworks AI", "fireworks"),
         "friendliai": ("FriendliAI", "friendliai"),
         "gemini": ("Google Gemini", "google"),
@@ -200,6 +201,7 @@ _KEYLESS_PROVIDERS: frozenset[str] = frozenset(
         "custom",
         "custom_openai",
         "docker_model_runner",
+        "fcc",
         "lemonade",
         "llamafile",
         "lm_studio",
@@ -260,6 +262,7 @@ _PROVIDER_KINDS: Mapping[str, str] = MappingProxyType(
         "custom": "openai_compatible",
         "custom_openai": "openai_compatible",
         "docker_model_runner": "openai_compatible",
+        "fcc": "fcc",
         "hosted_vllm": "openai_compatible",
         "lemonade": "openai_compatible",
         "litellm_proxy": "openai_compatible",
@@ -806,6 +809,47 @@ def _read_models_by_provider(
             key, entry = _lookup(entries, _candidates(name, pid), pid)
             models.append(_model_info(name, pid, key, entry))
         built[pid] = tuple(models)
+
+    # FCC Provider models
+    fcc_models: list[ModelInfo] = []
+    try:
+        from services.fcc_ai_service import get_status
+        status = get_status()
+        m_list = status.get("models") or []
+        if not m_list:
+            m_list = [
+                "claude-haiku-4-20250514",
+                "claude-sonnet-4-6",
+                "claude-opus-4-6",
+                "gemini-2.5-pro",
+                "gemini-2.5-flash",
+                "anthropic/nvidia_nim/nvidia/nemotron-3-super-120b-a12b",
+            ]
+        for m in m_list:
+            m_clean = _clean(m)
+            if not m_clean:
+                continue
+            fcc_models.append(
+                ModelInfo(
+                    id=m_clean,
+                    provider="fcc",
+                    qualified_id=f"fcc/{m_clean}",
+                    catalog_key=None,
+                    mode="chat",
+                    max_input_tokens=200000,
+                    max_output_tokens=8192,
+                    input_price_per_million=0.0,
+                    output_price_per_million=0.0,
+                    supports_function_calling=True,
+                    supports_vision=True,
+                    supports_reasoning=True,
+                )
+            )
+    except Exception as e:
+        logger.debug("Failed to populate FCC models: %s", e)
+    if fcc_models:
+        built["fcc"] = tuple(fcc_models)
+
     return MappingProxyType(built)
 
 
@@ -844,6 +888,21 @@ def _read_providers(
             model_count=sum(1 for model in models if model.is_chat),
             total_model_count=len(models),
         )
+
+    if "fcc" in by_provider and "fcc" not in built:
+        models = by_provider.get("fcc", ())
+        display_name, icon = _BRANDS.get("fcc", ("Free Claude Code (FCC)", "sparkles"))
+        built["fcc"] = ProviderInfo(
+            id="fcc",
+            display_name=display_name,
+            icon=icon,
+            provider_kind="fcc",
+            needs_key=False,
+            needs_base_url=False,
+            model_count=len(models),
+            total_model_count=len(models),
+        )
+
     return tuple(sorted(built.values(), key=lambda info: info.display_name.casefold()))
 
 
