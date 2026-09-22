@@ -285,9 +285,17 @@ export default function Trading() {
    */
   const sendToFocusedPane = useCallback(
     (row: SearchRow) => {
+      const fullKey = `${row.exchange}:${row.symbol}`
+      setPaneSymbols((prev) => ({ ...prev, [focusedPane]: fullKey }))
+      setSyncSymbol(fullKey)
       void panelTarget()?.loadSymbol(row)
+      fetch('/plugins/fcc/commentary/auto', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: true, symbol: row.symbol }),
+      }).catch(() => {})
     },
-    [panelTarget]
+    [focusedPane, panelTarget]
   )
 
   // Advisor/chart sync: when an alert/target is published from Scalper Advisor,

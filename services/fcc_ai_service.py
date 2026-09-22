@@ -16,6 +16,7 @@
 
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -23,7 +24,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -147,7 +148,42 @@ def _fmt(v: Any, dp: int = 2) -> str:
         return "N/A"
 
 
-def _live_quote_lines(api_key: str | None) -> list[str]:
+def _watchlist_symbols(user_id: str | None) -> list[tuple[str, str]]:
+    """Symbol/exchange pairs from the operator's watchlists, deduped.
+
+    The quotes block used to be a hardcoded handful of index/MCX roots, which
+    is why the telemetry went deaf for any instrument outside it (NATURALGAS
+    being the one that bit). The watchlist is the source of truth for what
+    the operator actually trades.
+    """
+    if not user_id:
+        return []
+    try:
+        from database.watchlist_db import get_watchlists
+    except Exception:
+        logger.exception("watchlist db unavailable for FCC context")
+        return []
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    try:
+        for wl in get_watchlists(user_id):
+            for item in wl.get("items") or []:
+                sym = str(item.get("symbol") or "").strip().upper()
+                exch = str(item.get("exchange") or "").strip().upper()
+                if not sym or not exch:
+                    continue
+                key = (sym, exch)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(key)
+    except Exception:
+        logger.exception("watchlist symbols for FCC context failed")
+    return out
+
+
+def _live_quote_lines(api_key: str | None, user_id: str | None = None,
+                      focus: str | None = None) -> list[str]:
     lines = []
     try:
         from services.quotes_service import get_quotes
@@ -156,13 +192,27 @@ def _live_quote_lines(api_key: str | None) -> list[str]:
             from restful_api_service import get_quotes  # type: ignore
         except Exception:
             return ["Live quotes unavailable (quotes service not importable)"]
-    for sym, exch in _QUOTE_ROOTS:
+    # Focus first, then everything the operator watches; the fixed roots are
+    # only a fallback when no watchlist exists yet.
+    rows: list[tuple[str, str]] = []
+    if focus:
+        f = focus.strip().upper()
+        rows.append((f, _fo_exchange(f)))
+    seen = {(s, e) for s, e in rows}
+    for pair in _watchlist_symbols(user_id):
+        if pair not in seen:
+            seen.add(pair)
+            rows.append(pair)
+    if not rows:
+        rows = list(_QUOTE_ROOTS)
+    rows = rows[:16]
+    for sym, exch in rows:
         try:
             ok, resp, _ = get_quotes(symbol=sym, exchange=exch, api_key=api_key or "")
             data = resp.get("data") if ok and isinstance(resp, dict) else None
             if isinstance(data, dict) and data.get("ltp") is not None:
                 chp = float(data.get("pchg") or data.get("chp") or 0)
-                lines.append(f"{sym} {_fmt(data.get('ltp'))} ({chp:+.2f}%)")
+                lines.append(f"{sym} [{exch}] {_fmt(data.get('ltp'))} ({chp:+.2f}%)")
         except Exception:
             continue
     return lines or ["Live quotes unavailable (no data)"]
@@ -375,39 +425,275 @@ def _daily_candles(symbol: str, api_key: str | None, days: int = 40) -> list[tup
     return []
 
 
+def _macd(closes: list[float], fast: int = 12, slow: int = 26, signal: int = 9) -> dict | None:
+    if len(closes) < slow + signal:
+        return None
+    k_f = 2.0 / (fast + 1)
+    k_s = 2.0 / (slow + 1)
+    k_sig = 2.0 / (signal + 1)
+    e_f = closes[0]
+    e_s = closes[0]
+    macd_series = []
+    for c in closes:
+        e_f = c * k_f + e_f * (1 - k_f)
+        e_s = c * k_s + e_s * (1 - k_s)
+        macd_series.append(e_f - e_s)
+    sig_series = []
+    e_sig = macd_series[slow - 1]
+    for m in macd_series[slow - 1:]:
+        e_sig = m * k_sig + e_sig * (1 - k_sig)
+        sig_series.append(e_sig)
+    cur_m = macd_series[-1]
+    cur_s = sig_series[-1]
+    hist = cur_m - cur_s
+    prev_m = macd_series[-2] if len(macd_series) >= 2 else cur_m
+    prev_s = sig_series[-2] if len(sig_series) >= 2 else cur_s
+    cross = "BULLISH_CROSS" if cur_m > cur_s and prev_m <= prev_s else ("BEARISH_CROSS" if cur_m < cur_s and prev_m >= prev_s else ("BULLISH" if cur_m > cur_s else "BEARISH"))
+    return {"macd": round(cur_m, 2), "signal": round(cur_s, 2), "hist": round(hist, 2), "status": cross}
+
+
+def _bollinger_bands(closes: list[float], period: int = 20, mult: float = 2.0) -> dict | None:
+    if len(closes) < period:
+        return None
+    c = closes[-period:]
+    m = sum(c) / period
+    var = sum((x - m) ** 2 for x in c) / period
+    std = math.sqrt(var)
+    u = m + mult * std
+    l = m - mult * std
+    bw = ((u - l) / m) * 100 if m else 0
+    return {"upper": round(u, 2), "middle": round(m, 2), "lower": round(l, 2), "bandwidth_pct": round(bw, 2)}
+
+
+def _moving_averages(closes: list[float], ltp: float) -> dict:
+    out: dict[str, Any] = {}
+    if not closes:
+        return out
+    ref = ltp or closes[-1]
+    if len(closes) >= 5:
+        out["sma20"] = round(sum(closes[-20:]) / min(20, len(closes)), 2)
+    if len(closes) >= 50:
+        out["sma50"] = round(sum(closes[-50:]) / 50, 2)
+    if len(closes) >= 200:
+        out["sma200"] = round(sum(closes[-200:]) / 200, 2)
+    k = 2.0 / (20 + 1)
+    e = closes[0]
+    for c in closes[1:]:
+        e = c * k + e * (1 - k)
+    out["ema20"] = round(e, 2)
+    return out
+
+
+def _recent_candles_table(symbol: str, exchange: str, interval: str, count: int, api_key: str | None) -> list[str]:
+    try:
+        from services.history_service import get_history
+        now = datetime.now()
+        days = max(3, count // 10 + 2) if interval in ("1m", "3m", "5m", "15m", "30m", "1h") else max(30, count + 10)
+        start = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+        end = now.strftime("%Y-%m-%d")
+        ok, resp, _ = get_history(symbol=symbol, exchange=exchange, interval=interval,
+                                  start_date=start, end_date=end, api_key=api_key or "")
+        if not ok or not isinstance(resp, dict):
+            return []
+        data = resp.get("data") or []
+        if not isinstance(data, list) or not data:
+            return []
+        rows = data[-count:]
+        lines = [f"{symbol} [{interval}] Recent OHLCV Candles (last {len(rows)} bars):"]
+        lines.append("Time (IST) | Open | High | Low | Close | Volume")
+        for r in rows:
+            ts = r.get("timestamp") or 0
+            try:
+                dt = datetime.fromtimestamp(ts, tz=timezone(timedelta(hours=5, minutes=30)))
+                t_str = dt.strftime("%H:%M" if interval != "D" else "%Y-%m-%d")
+            except Exception:
+                t_str = str(ts)
+            o = _fmt(r.get("open"))
+            h = _fmt(r.get("high"))
+            l = _fmt(r.get("low"))
+            c = _fmt(r.get("close"))
+            v = f"{int(r.get('volume') or 0):,}"
+            lines.append(f"{t_str} | {o} | {h} | {l} | {c} | {v}")
+        return lines
+    except Exception as e:
+        logger.debug("recent candles table failed for %s %s: %s", symbol, interval, e)
+        return []
+
+
+def _depth_lines(symbol: str, exchange: str, api_key: str | None) -> list[str]:
+    try:
+        from services.depth_service import get_depth
+        ok, resp, _ = get_depth(symbol=symbol, exchange=exchange, api_key=api_key or "")
+        if not ok or not isinstance(resp, dict):
+            return []
+        d = resp.get("data") or {}
+        bids = d.get("bids") or []
+        asks = d.get("asks") or []
+        tbq = float(d.get("totalbuyqty") or 0)
+        tsq = float(d.get("totalsellqty") or 0)
+        ratio = round(tbq / tsq, 2) if tsq > 0 else (1.0 if tbq == 0 else 99.0)
+        lines = [f"{symbol} Market Depth (Order Book): Total Buy Qty={tbq:,.0f}, Total Sell Qty={tsq:,.0f} (Buyer/Seller Dominance: {ratio:.2f}x)"]
+        b_top = [f"₹{_fmt(b.get('price'))} (qty {b.get('quantity', 0):,})" for b in bids[:3] if b.get('price')]
+        a_top = [f"₹{_fmt(a.get('price'))} (qty {a.get('quantity', 0):,})" for a in asks[:3] if a.get('price')]
+        if b_top:
+            lines.append("  Top Bids: " + ", ".join(b_top))
+        if a_top:
+            lines.append("  Top Asks: " + ", ".join(a_top))
+        return lines
+    except Exception as e:
+        logger.debug("depth lines %s: %s", symbol, e)
+        return []
+
+
+def _orderflow_lines(symbol: str) -> list[str]:
+    try:
+        from services.orderflow_service import get_orderflow
+        res = get_orderflow(symbol=symbol, timeframe="5m", n_bars=15)
+        if not res or not isinstance(res, dict):
+            return []
+        s = res.get("summary") or {}
+        fut = res.get("target_symbol") or symbol
+        lines = [
+            f"{symbol} Orderflow [{fut}]: Delta={s.get('session_delta', 0):+,}, "
+            f"CVD={s.get('session_cvd', 0):+,}, Bias={s.get('delta_bias', 'NEUTRAL')}, "
+            f"POC=₹{_fmt(s.get('poc', 0))}, VAH=₹{_fmt(s.get('vah', 0))}, VAL=₹{_fmt(s.get('val', 0))}"
+        ]
+        if s.get("imbalance_summary"):
+            lines.append(f"  Imbalance: {s.get('imbalance_summary')}")
+        return lines
+    except Exception as e:
+        logger.debug("orderflow lines %s: %s", symbol, e)
+        return []
+
+
+def _market_brief_lines() -> list[str]:
+    try:
+        from services.market_brief_service import market_brief
+        mb = market_brief()
+        st = mb.get("session_stance") or {}
+        phase = st.get("phase_label") or st.get("phase") or "LIVE"
+        stance = st.get("stance") or "NEUTRAL"
+        narrative = st.get("narrative") or ""
+        return [f"Market Brief: Stance={stance} ({phase}). Narrative: {narrative}"]
+    except Exception as e:
+        logger.debug("market brief lines: %s", e)
+        return []
+
+
+def _news_lines(symbol: str) -> list[str]:
+    try:
+        from services.market_news_service import fetch_symbol_news
+        res = fetch_symbol_news(symbol, limit=4)
+        items = res.get("items") or []
+        if items:
+            formatted = [f"[{it.get('source', 'News')}]: {it.get('title', '')} ({it.get('sentiment', 'NEUTRAL')})" for it in items[:4]]
+            return [f"{symbol} News & Catalysts: " + " | ".join(formatted)]
+        return []
+    except Exception as e:
+        logger.debug("news lines %s: %s", symbol, e)
+        return []
+
+
+def _calendar_lines() -> list[str]:
+    try:
+        from services.plugin_calendar_service import economic_calendar
+        cal = economic_calendar()
+        evts = cal.get("events") or []
+        if evts:
+            formatted = [f"{e.get('time', '')} {e.get('currency', '')} {e.get('event', '')} [Impact: {e.get('impact', '')}]" for e in evts[:3]]
+            return ["Economic Calendar: " + " | ".join(formatted)]
+        return []
+    except Exception as e:
+        logger.debug("calendar lines: %s", e)
+        return []
+
+
+def _watchlist_lines(user_id: str | None, api_key: str | None) -> list[str]:
+    pairs = _watchlist_symbols(user_id)
+    if not pairs:
+        return []
+    try:
+        from services.quotes_service import get_quotes
+        advances = 0
+        declines = 0
+        quotes_str = []
+        for s, e in pairs[:15]:
+            try:
+                ok, resp, _ = get_quotes(symbol=s, exchange=e, api_key=api_key or "")
+                d = resp.get("data") if ok and isinstance(resp, dict) else None
+                if isinstance(d, dict) and d.get("ltp") is not None:
+                    chp = float(d.get("pchg") or d.get("chp") or 0)
+                    if chp > 0:
+                        advances += 1
+                    elif chp < 0:
+                        declines += 1
+                    quotes_str.append(f"{s} {_fmt(d.get('ltp'))} ({chp:+.2f}%)")
+            except Exception:
+                continue
+        breadth = f"Watchlist Breadth: {advances} Advancing, {declines} Declining (out of {len(pairs)} items)"
+        return [breadth, "Watchlist Quotes: " + "; ".join(quotes_str)]
+    except Exception as e:
+        logger.debug("watchlist lines: %s", e)
+        return []
+
+
 def _chart_lines(symbol: str, ltp: float, api_key: str | None) -> list[str]:
-    """Daily chart snapshot for the focus symbol: trend, RSI, week/month range
-    and classic floor pivots — the grounding behind 'analyse the chart'."""
+    """Rich multi-timeframe chart snapshot for the focus symbol: OHLCV candles,
+    trend, RSI, MACD, Moving Averages, Bollinger Bands, and classic floor pivots."""
     out: list[str] = []
+    exch = _fo_exchange(symbol)
     try:
         daily = _daily_candles(symbol, api_key)
-        if not daily:
-            return out
-        closes = [c[4] for c in daily]
-        last = closes[-1] if closes else 0.0
+        closes_5m = _candles_for(symbol, exch, api_key)
+        daily_closes = [c[4] for c in daily] if daily else []
+        last = daily_closes[-1] if daily_closes else (closes_5m[-1] if closes_5m else 0.0)
         ref = ltp or last
-        # Trend: 20-EMA position plus short-slope.
-        ema = last
-        k = 2 / (20 + 1)
-        for c in closes:
-            ema = c * k + ema * (1 - k)
-        slope5 = (closes[-1] - closes[-6]) / closes[-6] * 100 if len(closes) >= 6 and closes[-6] else 0.0
-        trend = "up" if ref > ema * 1.002 and slope5 > 0 else ("down" if ref < ema * 0.998 and slope5 < 0 else "range")
-        rsi = _rsi(closes[-60:]) if closes else None
-        week_hi = max(c[2] for c in daily[-5:])
-        week_lo = min(c[3] for c in daily[-5:])
-        month_hi = max(c[2] for c in daily[-22:])
-        month_lo = min(c[3] for c in daily[-22:])
-        bits = [f"{symbol} daily chart: trend {trend} (close {'above' if ref > ema else 'below'} 20-EMA, "
-                f"5-day {slope5:+.1f}%)"]
-        if rsi is not None:
-            bits.append(f"RSI {rsi}")
-        bits.append(f"week {_fmt(week_lo)}–{_fmt(week_hi)}, month {_fmt(month_lo)}–{_fmt(month_hi)}")
+
+        # Trend & Indicators
+        mas = _moving_averages(daily_closes or closes_5m, ref)
+        ema20 = mas.get("ema20", ref)
+        slope5 = (daily_closes[-1] - daily_closes[-6]) / daily_closes[-6] * 100 if len(daily_closes) >= 6 and daily_closes[-6] else 0.0
+        trend = "up" if ref > ema20 * 1.002 and slope5 > 0 else ("down" if ref < ema20 * 0.998 and slope5 < 0 else "range")
+        rsi_val = _rsi((closes_5m or daily_closes)[-60:]) if (closes_5m or daily_closes) else None
+        macd_val = _macd(closes_5m or daily_closes)
+
+        bb_val = _bollinger_bands(closes_5m or daily_closes)
+
+        # Pivots & Ranges
+        week_hi = max(c[2] for c in daily[-5:]) if len(daily) >= 5 else None
+        week_lo = min(c[3] for c in daily[-5:]) if len(daily) >= 5 else None
+        month_hi = max(c[2] for c in daily[-22:]) if len(daily) >= 22 else None
+        month_lo = min(c[3] for c in daily[-22:]) if len(daily) >= 22 else None
+
+        tech_bits = [f"{symbol} Chart Trend: {trend.upper()} (LTP {'above' if ref >= ema20 else 'below'} 20-EMA ₹{_fmt(ema20)}, 5-day slope {slope5:+.1f}%)"]
+        if rsi_val is not None:
+            tech_bits.append(f"RSI(14): {rsi_val} ({_zone(rsi_val)})")
+        if macd_val:
+            tech_bits.append(f"MACD(12,26,9): {macd_val['status']} (MACD={macd_val['macd']}, Signal={macd_val['signal']}, Hist={macd_val['hist']:+.2f})")
+        if mas.get("sma50"):
+            tech_bits.append(f"SMA50=₹{_fmt(mas['sma50'])}, SMA200=₹{_fmt(mas.get('sma200', 0))}")
+        if bb_val:
+            tech_bits.append(f"Bollinger Bands: Upper=₹{_fmt(bb_val['upper'])}, Mid=₹{_fmt(bb_val['middle'])}, Lower=₹{_fmt(bb_val['lower'])} (Bandwidth: {bb_val['bandwidth_pct']:.2f}%)")
+        if week_hi is not None and week_lo is not None:
+            tech_bits.append(f"Week Range: ₹{_fmt(week_lo)} – ₹{_fmt(week_hi)}, Month Range: ₹{_fmt(month_lo)} – ₹{_fmt(month_hi)}")
         if len(daily) >= 2:
             _, po, ph, pl, pc = daily[-2]
             pp = (ph + pl + pc) / 3
-            bits.append(f"pivots PP {_fmt(pp)}, R1 {_fmt(2 * pp - pl)}, S1 {_fmt(2 * pp - ph)}")
-        out.append(" ".join(bits))
+            r1 = 2 * pp - pl
+            s1 = 2 * pp - ph
+            r2 = pp + (ph - pl)
+            s2 = pp - (ph - pl)
+            tech_bits.append(f"Classical Floor Pivots: PP=₹{_fmt(pp)}, R1=₹{_fmt(r1)}, S1=₹{_fmt(s1)}, R2=₹{_fmt(r2)}, S2=₹{_fmt(s2)}")
+        out.append(" | ".join(tech_bits))
+
+        # Add recent 5m and Daily OHLCV candle tables
+        candles_5m_tbl = _recent_candles_table(symbol, exch, "5m", 10, api_key)
+        if candles_5m_tbl:
+            out.append("\n".join(candles_5m_tbl))
+        candles_d_tbl = _recent_candles_table(symbol, exch, "D", 10, api_key)
+        if candles_d_tbl:
+            out.append("\n".join(candles_d_tbl))
+
     except Exception as e:
         logger.debug("fcc chart lines %s: %s", symbol, e)
     return out
@@ -424,50 +710,114 @@ def _scalper_lines() -> list[str]:
         events = mon.get("events") or []
         out = []
         if alerts:
-            names = ", ".join(f"{a.get('key')} {a.get('side')}" for a in alerts[:5])
-            out.append(f"Active scalper alerts: {len(alerts)} ({names})")
+            al_strs = []
+            for a in alerts[:5]:
+                sym = a.get("key") or a.get("symbol")
+                side = a.get("side", "")
+                stk = a.get("strike", "")
+                entry = a.get("entry_premium", 0)
+                pnl = a.get("pnl_pct", 0)
+                risk = (a.get("reversal_risk") or {}).get("label", "")
+                al_strs.append(f"{sym} {stk} {side} @₹{entry} (P&L {pnl:+.1f}%, {risk})")
+            out.append(f"Active scalper alerts ({len(alerts)}): " + "; ".join(al_strs))
         if armed:
-            out.append(f"Armed monitors: {len(armed)}")
+            out.append(f"Armed scalper monitors: {len(armed)}")
         if events:
-            out.append(f"Latest monitor event: {events[0].get('msg', '')[:120]}")
+            out.append(f"Latest scalper event: {events[0].get('msg', '')[:120]}")
         return out
     except Exception:
         return []
 
 
-def _focus_ltp(symbol: str, api_key: str | None) -> float:
+def _focus_ltp(symbol: str, api_key: str | None, user_id: str | None = None) -> float:
+    """Live LTP for the focus symbol, trying every exchange it might live on.
+
+    The watchlist's exchange for this symbol is tried first (the operator's
+    own tagging beats any mapping), then the symbol-service guess. A symbol
+    must never analyse without a price when a broker can quote it.
+    """
     try:
         from services.quotes_service import get_quotes
-        ok, resp, _ = get_quotes(symbol=symbol, exchange=_fo_exchange(symbol), api_key=api_key or "")
-        data = resp.get("data") if ok and isinstance(resp, dict) else None
-        return float((data or {}).get("ltp") or 0)
+        candidates: list[str] = []
+        for s, e in _watchlist_symbols(user_id):
+            if s.upper() == symbol.upper() and e not in candidates:
+                candidates.append(e)
+        mapped = _fo_exchange(symbol)
+        if mapped not in candidates:
+            candidates.append(mapped)
+        for exch in candidates:
+            try:
+                ok, resp, _ = get_quotes(symbol=symbol, exchange=exch, api_key=api_key or "")
+                data = resp.get("data") if ok and isinstance(resp, dict) else None
+                ltp = float((data or {}).get("ltp") or 0)
+                if ltp:
+                    return ltp
+            except Exception:
+                continue
+        return 0.0
     except Exception:
         return 0.0
 
 
-def build_project_context(focus: str | None = None, api_key: str | None = None) -> str:
+def build_project_context(focus: str | None = None, api_key: str | None = None,
+                          user_id: str | None = None) -> str:
     """Live OpenAlgo snapshot injected as the FCC system prompt."""
     if focus:
         focus = focus.split(":")[-1].strip().upper() or None
+    if not focus:
+        with _auto_lock:
+            focus = _auto_state.get("symbol")
+    if not focus:
+        wl = _watchlist_symbols(user_id)
+        if wl:
+            focus = wl[0][0]
+    if not focus:
+        focus = "NIFTY"
+
     lines = [
         "You are the FCC AI analyst embedded in OpenAlgo, an open-source algo trading "
         "platform for Indian markets (NSE/BSE/MCX) with broker-neutral execution.",
-        "Answer crisply. When numbers are provided below, reason from them and say when "
-        "data is unavailable instead of inventing it. When the operator asks to analyse "
-        "the chart or the market, analyse the focus symbol from the telemetry below.",
+        "You have complete live telemetry: multi-timeframe OHLCV candles, technical indicators "
+        "(RSI, MACD, EMAs, Bollinger Bands, ATR), support/resistance pivots, market depth, "
+        "orderflow, option chain with OI buildup, scalper alerts, market brief, news, and calendar.",
+        "When the operator asks to analyse the chart or the market, analyse the focus symbol "
+        "from the concrete telemetry below. Provide a clear technical breakdown (Trend, Key Levels, "
+        "Indicators, Options Bias, Orderflow, Actionable Strategy).",
         "",
-        "Live quotes: " + "; ".join(_live_quote_lines(api_key)),
+        "=== MARKET STANCE & BRIEF ===",
     ]
+    lines.extend(_market_brief_lines())
+    lines.append("")
+    lines.append("Live quotes: " + "; ".join(_live_quote_lines(api_key, user_id, focus)))
     glob = _global_lines()
     if glob:
         lines.append("Global (dollar) references: " + "; ".join(glob))
-    if focus:
-        ltp = _focus_ltp(focus, api_key)
-        lines.extend(_chart_lines(focus, ltp, api_key))
-        lines.extend(_chain_lines(focus, api_key))
+
+    # Watchlist
+    lines.append("")
+    lines.append("=== WATCHLIST SNAPSHOT ===")
+    lines.extend(_watchlist_lines(user_id, api_key))
+
+    # Focus symbol telemetry
+    lines.append("")
+    lines.append(f"=== FOCUS SYMBOL: {focus} ===")
+    ltp = _focus_ltp(focus, api_key, user_id)
+    exch = _fo_exchange(focus)
+    if ltp:
+        lines.append(f"Focus price: {focus} [{exch}] LTP ₹{_fmt(ltp)}")
+    lines.extend(_chart_lines(focus, ltp, api_key))
+    lines.extend(_depth_lines(focus, exch, api_key))
+    lines.extend(_orderflow_lines(focus))
+    lines.extend(_chain_lines(focus, api_key))
+    lines.extend(_news_lines(focus))
+
+    # Scalper & Calendar
+    lines.append("")
+    lines.append("=== SCALPER & CALENDAR ===")
     lines.extend(_scalper_lines())
-    if focus:
-        lines.append(f"User focus symbol: {focus} (the operator's active chart)")
+    lines.extend(_calendar_lines())
+
+    lines.append(f"\nActive focus symbol for chart analysis: {focus}")
     return "\n".join(lines)
 
 
@@ -479,42 +829,107 @@ _KNOWN_ROOTS = [
     "GOLD", "SILVER", "COPPER", "ZINC",
 ]
 
-# English words that uppercase to a symbol-shaped token (WHAT, ARE, THE…).
-# A bare caps match that lands here is ignored rather than chased as a chain.
+# English words and trading terms that uppercase to a symbol-shaped token.
+# A bare caps match that lands here is ignored rather than chased as a ticker.
 _STOP_TOKENS = {
-    "WHAT", "WHATS", "WHY", "HOW", "THE", "AND", "FOR", "ARE", "YOU",
-    "YOUR", "NOW", "TODAY", "SEE", "CAN", "GET", "GIVE", "TELL", "SHOW",
-    "WITH", "FROM", "ABOUT", "PLEASE", "ANALYSE", "ANALYZE", "CHART",
-    "PRICE", "LEVEL", "LEVELS", "DATA", "TREND", "VIEW", "NEWS", "OM",
+    "WHAT", "WHATS", "WHY", "HOW", "WHEN", "WHERE", "WHO", "WHICH",
+    "THE", "AND", "FOR", "ARE", "YOU", "YOUR", "NOW", "TODAY", "SEE",
+    "CAN", "GET", "GIVE", "TELL", "SHOW", "WITH", "FROM", "ABOUT",
+    "PLEASE", "ANALYSE", "ANALYZE", "ANALYSING", "ANALYZING", "ANALYSIS",
+    "CHART", "CHARTS", "PRICE", "PRICES", "LEVEL", "LEVELS", "DATA",
+    "TREND", "TRENDS", "VIEW", "VIEWS", "NEWS", "OM", "LOADED", "SYMBOL",
+    "SYMBOLS", "CHECK", "CHECKING", "WATCHLIST", "LIST", "THIS", "THAT",
+    "CURRENT", "ACTIVE", "SELECTED", "FOCUS", "FEED", "LIVE", "MARKET",
+    "MARKETS", "STATUS", "UPDATE", "UPDATES", "REPORT", "REPORTS",
+    "SUMMARY", "IDEA", "IDEAS", "SETUP", "SETUPS", "SIGNAL", "SIGNALS",
+    "SCALPER", "SCALPING", "ADVISOR", "COMMENTARY", "TELEMETRY", "SQUAWK",
+    "ORDER", "ORDERS", "POSITION", "POSITIONS", "TRADE", "TRADES", "TRADING",
+    "BUY", "SELL", "LONG", "SHORT", "HOLD", "ENTRY", "EXIT", "TARGET",
+    "STOPLOSS", "STOP", "LOSS", "PROFIT", "INDICATOR", "INDICATORS",
+    "VOLUME", "VOLUMES", "TIMEFRAME", "TIMEFRAMES", "MINUTE", "MINUTES",
+    "DAILY", "WEEKLY", "MONTHLY", "INTRADAY", "BREAKOUT", "REVERSAL",
+    "SUPPORT", "RESISTANCE", "RANGE", "DEPTH", "ORDERFLOW", "OPTION",
+    "OPTIONS", "CHAIN", "STRIKE", "STRIKES", "EXPIRY", "EXPIRIES",
+    "CALL", "CALLS", "PUT", "PUTS", "ATM", "OTM", "ITM", "PCR", "DELTA",
+    "CVD", "VWAP", "RSI", "MACD", "SMA", "EMA", "BOLLINGER", "PIVOT", "PIVOTS",
+    "GOOD", "BAD", "BEST", "NEXT", "MOVE", "MOVES", "PREDICT", "PREDICTION",
+    "FORECAST", "RECOMMEND", "RECOMMENDATION", "SUGGEST", "SUGGESTION",
+    "HELLO", "HEY", "HI", "ASSISTANT", "AI", "FCC", "OPENALGO", "PLEASE",
+    "INPUT", "INPUTS", "IMPROVE", "UPDATE", "DESKTOP", "MOBILE", "BOTH",
+    "AUTO", "ARRANGE", "SECTIONS", "SECTION", "COLLAPSE", "DRAG", "DROP",
+    "REARRANGE", "SYNC", "WIDGET", "WIDGETS", "SELECTION", "DEFAULT", "ALWAYS",
 }
 
+_EXPLICIT_LOADED_PHRASES = (
+    "LOADED SYMBOL", "CURRENT SYMBOL", "ACTIVE SYMBOL", "THIS SYMBOL", "THE SYMBOL",
+    "LOADED CHART", "CURRENT CHART", "ACTIVE CHART", "THIS CHART", "THE CHART",
+    "SELECTED SYMBOL", "SELECTED CHART",
+)
 
-def resolve_focus(text: str) -> str | None:
-    """Best-effort focus symbol from the user's message: a known instrument
-    root mentioned anywhere wins; a bare symbol-shaped token is accepted only
-    when it is not a common English word."""
-    up = (text or "").upper()
+
+def resolve_focus(text: str, user_id: str | None = None) -> str | None:
+    """Best-effort focus symbol from the user's message:
+    1. If user explicitly refers to the loaded/current/active symbol or chart,
+       return None so caller falls back to active loaded symbol.
+    2. A known instrument root mentioned anywhere wins.
+    3. Any symbol from operator's watchlist mentioned in text wins.
+    4. A bare symbol-shaped token is accepted only when not a stop token."""
+    up = (text or "").upper().strip()
+    if not up:
+        return None
+
+    # 1. Explicit request for currently loaded/active chart symbol
+    for phrase in _EXPLICIT_LOADED_PHRASES:
+        if phrase in up:
+            return None
+
+    # 2. Known instrument roots
     for root in _KNOWN_ROOTS:
         if re.search(rf"\b{root}\b", up):
             return "NIFTY" if root == "NIFTY50" else ("BANKNIFTY" if root == "NIFTYBANK" else root)
-    m = re.search(r"\b([A-Z][A-Z&-]{2,14})\b", up)
-    if m and m.group(1) not in _STOP_TOKENS:
-        return m.group(1)
+
+    # 3. Watchlist symbols match
+    if user_id:
+        try:
+            wl = _watchlist_symbols(user_id)
+            for sym, _ in wl:
+                s_up = sym.upper()
+                if re.search(rf"\b{re.escape(s_up)}\b", up):
+                    return sym
+        except Exception:
+            pass
+
+    # 4. Bare candidate tokens
+    tokens = re.findall(r"\b([A-Z][A-Z0-9&-]{2,14})\b", up)
+    for tok in tokens:
+        if tok not in _STOP_TOKENS:
+            return tok
     return None
 
 
 def chat(messages: list[dict], model: str | None = None,
          use_project_context: bool = True, focus: str | None = None,
-         api_key: str | None = None) -> dict:
+         api_key: str | None = None, user_id: str | None = None) -> dict:
     """Grounded chat through the FCC proxy (Anthropic API with OpenAI fallback)."""
     if not FCC_ENABLED:
         raise RuntimeError("FCC integration is disabled (FCC_ENABLED=false)")
 
     if use_project_context and not focus and messages:
         focus = resolve_focus(next(
-            (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), ""))
+            (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), ""),
+            user_id=user_id)
 
-    sys_prompt = build_project_context(focus, api_key) if use_project_context else ""
+    if use_project_context and not focus:
+        with _auto_lock:
+            focus = _auto_state.get("symbol")
+        if not focus:
+            wl = _watchlist_symbols(user_id)
+            if wl:
+                focus = wl[0][0]
+        if not focus:
+            focus = "NIFTY"
+
+    sys_prompt = build_project_context(focus, api_key, user_id) if use_project_context else ""
     payload = [{"role": (m.get("role") or "user"), "content": (m.get("content") or "")}
                for m in (messages or [])]
     model_id = model or _default_model() or "claude-haiku-4-20250514"
@@ -643,57 +1058,64 @@ def _market_open_ist() -> bool:
 
 def _auto_loop() -> None:
     last_poll = 0.0
-    while True:
-        with _auto_lock:
-            if not _auto_state["enabled"]:
-                _auto_state["thread"] = None
-                return
-            symbol = str(_auto_state["symbol"])
-            interval = max(30, int(_auto_state["interval"] or 60))
-        err = ""
-        if _market_open_ist():
-            # Fast event scan: check for events every SQUAWK_SCAN_CADENCE_S
-            # independent of the LLM interval. The event engine inside
-            # generate_commentary gates LLM spend (silent when nothing new,
-            # per-family cooldowns otherwise), so bullets land as events happen.
+    current_sym = ""
+    try:
+        while True:
+            with _auto_lock:
+                if not _auto_state["enabled"]:
+                    return
+                symbol = str(_auto_state["symbol"]).upper().split(":")[-1]
+                interval = max(20, int(_auto_state["interval"] or 45))
+            err = ""
             now = time.time()
-            if now - last_poll >= SQUAWK_SCAN_CADENCE_S:
+            sym_changed = (symbol != current_sym)
+            if sym_changed or (now - last_poll >= interval):
                 last_poll = now
+                current_sym = symbol
                 try:
-                    generate_commentary(symbol=symbol, api_key=_stored_api_key())
+                    item = generate_commentary(symbol=symbol, api_key=_stored_api_key(), force=True)
+                    if item:
+                        logger.info("auto squawk produced bullet for %s: %s", symbol, item.get("headline"))
                 except Exception as e:  # noqa: BLE001
                     err = str(e)[:200]
                     logger.warning("auto squawk %s: %s", symbol, err)
                 with _auto_lock:
                     _auto_state["last_error"] = err
-                    if not err:
-                        _auto_state["last_ts"] = time.time()
-        # sleep in short slices so a disable is honoured quickly
-        deadline = time.time() + 1.0
-        while time.time() < deadline:
-            with _auto_lock:
-                if not _auto_state["enabled"]:
-                    _auto_state["thread"] = None
-                    _persist_auto_state()
-                    return
-            time.sleep(0.25)
+                    _auto_state["last_ts"] = time.time()
+
+            # sleep in short slices so a disable or symbol change is honoured quickly
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                with _auto_lock:
+                    if not _auto_state["enabled"]:
+                        _persist_auto_state()
+                        return
+                    if str(_auto_state["symbol"]).upper().split(":")[-1] != current_sym:
+                        break
+                time.sleep(0.25)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("unhandled error in _auto_loop: %s", e)
+    finally:
+        with _auto_lock:
+            _auto_state["thread"] = None
 
 
 def set_auto_squawk(enabled: bool, symbol: str | None = None,
                     interval: int | None = None) -> dict:
     """Start/stop the auto-squawk loop for a symbol.
 
-    No session timer: the loop runs until switched off (it pauses itself
-    outside market hours and survives restarts via the persisted state)."""
+    Always on: runs continuously for the active symbol and produces real-time
+    institutional trading bullets on cadence and on every symbol switch."""
     with _auto_lock:
         _auto_state["enabled"] = bool(enabled)
         if symbol:
             _auto_state["symbol"] = str(symbol).upper().split(":")[-1]
         if interval:
-            _auto_state["interval"] = max(30, int(interval))
+            _auto_state["interval"] = max(20, int(interval))
         if enabled:
             _auto_state["stopped_reason"] = ""
-        if enabled and not _auto_state["thread"]:
+        t = _auto_state.get("thread")
+        if enabled and (not t or not t.is_alive()):
             t = threading.Thread(target=_auto_loop, name="fcc-auto-squawk", daemon=True)
             _auto_state["thread"] = t
             t.start()
@@ -726,7 +1148,8 @@ def _resume_on_boot() -> None:
     symbol = str(saved.get("symbol") or "NIFTY") if isinstance(saved, dict) else "NIFTY"
     interval = max(30, int(saved.get("interval") or 60)) if isinstance(saved, dict) else 60
     with _auto_lock:
-        if _auto_state.get("enabled") and _auto_state.get("thread"):
+        t = _auto_state.get("thread")
+        if _auto_state.get("enabled") and t and t.is_alive():
             return  # this generation already runs a session
         if enabled:
             _auto_state.update({
@@ -745,7 +1168,8 @@ def auto_squawk_status() -> dict:
     _resume_on_boot()
     with _auto_lock:
         out = {k: v for k, v in _auto_state.items() if k != "thread"}
-        out["running"] = bool(_auto_state.get("thread"))
+        t = _auto_state.get("thread")
+        out["running"] = bool(t and t.is_alive())
         return out
 
 
@@ -784,7 +1208,7 @@ def _candles_for(symbol: str, exchange: str, api_key: str | None) -> list[float]
 
 
 def generate_commentary(symbol: str | None = None, model: str | None = None,
-                        api_key: str | None = None) -> dict:
+                        api_key: str | None = None, force: bool = False) -> dict | None:
     """Institutional squawk bullet for a symbol — telemetry first, LLM polish."""
     clean = (symbol or "NIFTY").upper().split(":")[-1]
     exch = _fo_exchange(clean)
@@ -886,6 +1310,150 @@ def generate_commentary(symbol: str | None = None, model: str | None = None,
             lk["brk"] = False  # fully reclaimed/lost again — re-arm
 
     # --- Trend: MA20 slope + higher-high structure ------------------------
+    # --- Classical Pivots & Support/Resistance levels -------------------
+    if daily and len(daily) >= 2:
+        _, po, ph, pl, pc = daily[-2]
+        pp = (ph + pl + pc) / 3
+        r1 = 2 * pp - pl
+        s1 = 2 * pp - ph
+        r2 = pp + (ph - pl)
+        s2 = pp - (ph - pl)
+        if ltp and r1 and abs(ltp - r1) / ltp <= 0.003:
+            _evt(f"PIVOT LEVEL: Testing R1 resistance ₹{_fmt(r1, 0)} — watch for rejection or breakout", cooldown=900)
+        elif ltp and s1 and abs(ltp - s1) / ltp <= 0.003:
+            _evt(f"PIVOT LEVEL: Testing S1 support ₹{_fmt(s1, 0)} — watch for bounce or breakdown", cooldown=900)
+
+    # --- Technical Indicators: MACD & Bollinger Bands -------------------
+    macd_res = _macd(closes) if len(closes) >= 35 else None
+    if macd_res:
+        macd_st = macd_res.get("status")
+        if macd_st in ("BULLISH_CROSS", "BEARISH_CROSS"):
+            _evt(f"MACD 5M: {macd_st.replace('_', ' ')} (Hist: {macd_res['hist']:+.2f}) — momentum expanding", cooldown=1200)
+
+    bb_res = _bollinger_bands(closes) if len(closes) >= 20 else None
+    if bb_res and bb_res.get("bandwidth_pct", 99) < 0.6:
+        _evt(f"BOLLINGER SQUEEZE: Volatility compressed ({bb_res['bandwidth_pct']:.2f}% bandwidth) — explosive move pending", cooldown=1800)
+
+    # --- Depth (Order Book) signals -------------------------------------
+    try:
+        from services.depth_service import get_depth
+        ok_d, resp_d, _ = get_depth(symbol=clean, exchange=exch, api_key=api_key or "")
+        if ok_d and isinstance(resp_d, dict):
+            dd = resp_d.get("data") or {}
+            tbq = float(dd.get("totalbuyqty") or 0)
+            tsq = float(dd.get("totalsellqty") or 0)
+            if tbq > 0 and tsq > 0:
+                d_ratio = tbq / tsq
+                if d_ratio >= 1.65:
+                    _evt(f"DEPTH PRESSURE: Strong buyer demand ({d_ratio:.1f}x bids over asks) — support cushion firming", cooldown=900)
+                elif d_ratio <= 0.6:
+                    _evt(f"DEPTH PRESSURE: Strong seller supply ({1/d_ratio:.1f}x asks over bids) — overhead supply active", cooldown=900)
+    except Exception as e:
+        logger.debug("depth event failed: %s", e)
+
+    # --- Orderflow & Volume Delta signals -------------------------------
+    try:
+        from services.orderflow_service import get_orderflow
+        res_of = get_orderflow(symbol=clean, timeframe="5m", n_bars=15)
+        if res_of and isinstance(res_of, dict):
+            ofs = res_of.get("summary") or {}
+            s_delta = ofs.get("session_delta", 0)
+            bias_of = ofs.get("delta_bias", "")
+            poc_val = ofs.get("poc", 0)
+            if "BUYER" in bias_of.upper():
+                _evt(f"ORDERFLOW: Positive volume delta (+{s_delta:,}) with aggressive buyer flow near POC ₹{_fmt(poc_val, 0)}", cooldown=900)
+            elif "SELLER" in bias_of.upper():
+                _evt(f"ORDERFLOW: Negative volume delta ({s_delta:,}) with aggressive seller flow near POC ₹{_fmt(poc_val, 0)}", cooldown=900)
+    except Exception as e:
+        logger.debug("orderflow event failed: %s", e)
+
+    # --- Scalper Advisor Signals ----------------------------------------
+    try:
+        from services.scalper_advisor_service import alert_history
+        hist = alert_history()
+        alerts = hist.get("alerts") or []
+        sym_alerts = [a for a in alerts if clean in (a.get("key") or a.get("symbol") or "").upper() and (a.get("status") or "").lower() == "active"]
+        if sym_alerts:
+            sa = sym_alerts[0]
+            al_side = sa.get("side") or "CE"
+            al_stk = sa.get("strike") or "ATM"
+            al_entry = float(sa.get("entry_premium") or 0)
+            al_cur = float(sa.get("current_premium") or al_entry or 0)
+            al_pnl = float(sa.get("pnl_pct") or 0)
+            al_tgt = float(sa.get("target_premium") or 0)
+            al_sl = float(sa.get("sl_premium") or 0)
+            al_risk = (sa.get("reversal_risk") or {}).get("label")
+            _evt(f"⚡ SCALPER ALERT: Active BUY {clean} {al_stk} {al_side} @ ₹{al_entry:.2f} (LTP ₹{al_cur:.2f}, P&L {al_pnl:+.1f}%) | Tgt ₹{al_tgt:.2f}, SL ₹{al_sl:.2f}", cooldown=600)
+            if al_risk and ("RISK" in al_risk.upper() or "REVERSAL" in al_risk.upper()):
+                _evt(f"⚠️ SCALPER WARNING: {al_risk} on {clean} {al_side} — trail stop loss closely", cooldown=900)
+    except Exception as e:
+        logger.debug("scalper event failed: %s", e)
+
+    # --- Market Brief & Macro Stance Confluence -------------------------
+    try:
+        from services.market_brief_service import market_brief
+        mb = market_brief()
+        mst = mb.get("session_stance") or {}
+        m_stance = (mst.get("stance") or "").upper()
+        if m_stance in ("BULLISH", "BEARISH"):
+            p_mst = prev.get("m_stance")
+            if m_stance != p_mst:
+                _evt(f"MACRO SESSION STANCE: Market overall stance is {m_stance} ({mst.get('phase_label') or mst.get('phase') or 'LIVE'})", cooldown=1800)
+                st["sig"]["m_stance"] = m_stance
+    except Exception as e:
+        logger.debug("market brief stance event failed: %s", e)
+
+    # --- Watchlist Breadth Context ---------------------------------------
+    try:
+        pairs = _watchlist_symbols(user_id)
+        if pairs:
+            from services.quotes_service import get_quotes
+            adv = dec = 0
+            for s_item, e_item in pairs[:15]:
+                try:
+                    ok_q, resp_q, _ = get_quotes(symbol=s_item, exchange=e_item, api_key=api_key or "")
+                    qd = resp_q.get("data") if ok_q and isinstance(resp_q, dict) else None
+                    if isinstance(qd, dict) and qd.get("ltp") is not None:
+                        cp = float(qd.get("pchg") or qd.get("chp") or 0)
+                        if cp > 0: adv += 1
+                        elif cp < 0: dec += 1
+                except Exception:
+                    continue
+            total_wl = adv + dec
+            if total_wl >= 4:
+                if adv / total_wl >= 0.75:
+                    _evt(f"WATCHLIST BREADTH: Broad bullish market surge ({adv}/{total_wl} green across watchlist)", cooldown=1800)
+                elif dec / total_wl >= 0.75:
+                    _evt(f"WATCHLIST BREADTH: Broad market risk-off selloff ({dec}/{total_wl} red across watchlist)", cooldown=1800)
+    except Exception as e:
+        logger.debug("watchlist breadth event failed: %s", e)
+
+    # --- News & Catalyst Drivers ----------------------------------------
+    try:
+        from services.market_news_service import fetch_symbol_news
+        n_res = fetch_symbol_news(clean, limit=2)
+        n_items = n_res.get("items") or []
+        if n_items:
+            first_n = n_items[0]
+            n_title = first_n.get("title", "")
+            if n_title:
+                _evt(f"NEWS CATALYST: {n_title[:85]}", cooldown=1800)
+    except Exception as e:
+        logger.debug("news event failed: %s", e)
+
+    # --- Economic Calendar ----------------------------------------------
+    try:
+        from services.plugin_calendar_service import economic_calendar
+        cal_res = economic_calendar()
+        c_events = cal_res.get("events") or []
+        for ce in c_events[:2]:
+            if ce.get("impact") in ("HIGH", "MEDIUM") or ce.get("event"):
+                _evt(f"CALENDAR EVENT: {ce.get('time', '')} {ce.get('currency', '')} {ce.get('event', '')} ({ce.get('impact', '')} Impact)", cooldown=3600)
+                break
+    except Exception as e:
+        logger.debug("calendar event failed: %s", e)
+
+    # --- Trend: MA20 slope + higher-high structure ------------------------
     if len(closes) >= 25:
         ma20 = sum(closes[-20:]) / 20
         ma20_prev = sum(closes[-25:-5]) / 20
@@ -955,10 +1523,16 @@ def generate_commentary(symbol: str | None = None, model: str | None = None,
 
     headline = f"{clean} ₹{_fmt(ltp)} ({chp:+.2f}%) · {bias.title()}"
 
-    # Nothing new? Stay SILENT — no bullet at all (the whole point of the
-    # event engine; callers must handle item=None).
+    # If no discrete event occurred, stay silent unless forced (auto loop or manual button)
     if not signals:
-        return None
+        if force:
+            signals = [
+                f"{clean} tracking at ₹{_fmt(ltp)} ({chp:+.2f}%) · 5m RSI {rsi if rsi is not None else 'N/A'} · Day Range ₹{_fmt(low)}-₹{_fmt(high)}"
+                + (f" · PCR {pcr}" if pcr is not None else "")
+                + (f" · Max Pain ₹{_fmt(max_pain, 0)}" if max_pain else "")
+            ]
+        else:
+            return None
     # Algorithmic tips: one bullet per NEW event, always actionable.
     tips = list(signals)
 
@@ -968,12 +1542,13 @@ def generate_commentary(symbol: str | None = None, model: str | None = None,
         try:
             sys_p = ("You are a trading desk tip generator for Indian F&O markets. "
                      "You receive ONLY the NEW events for a symbol plus current "
-                     "telemetry. Output 2-6 short trading-tip bullets (max 18 words "
-                     "each) with concrete ₹ levels where possible: entry/avoid/exit "
-                     "hints, what to watch next, risk note. Do NOT restate events "
-                     "that are not in the list; no disclaimers, no filler. Output "
-                     "strictly valid JSON: {\"headline\": str, \"tips\": [str], "
-                     "\"bias\": \"BULLISH\"|\"BEARISH\"|\"NEUTRAL\", \"tag\": str}.")
+                     "telemetry including Watchlist, Options Chain, Depth, Orderflow, "
+                     "Scalper alerts, Macro Brief, News, Calendar, and Technical Levels. "
+                     "Output 2-6 short trading-tip bullets (max 18 words each) with "
+                     "concrete ₹ levels where possible: entry/avoid/exit hints, what "
+                     "to watch next, risk note. Do NOT restate events that are not in the "
+                     "list; no disclaimers, no filler. Output strictly valid JSON: "
+                     "{\"headline\": str, \"tips\": [str], \"bias\": \"BULLISH\"|\"BEARISH\"|\"NEUTRAL\", \"tag\": str}.")
             user_p = (f"Symbol: {clean} ({exch})\n"
                       + (f"Now: LTP ₹{_fmt(ltp)} ({chp:+.2f}%), day H ₹{_fmt(high)} L ₹{_fmt(low)}\n" if ltp
                          else "Quote feed unavailable right now — do NOT invent or mention ₹ price levels; keep tips qualitative.\n")
@@ -1005,6 +1580,71 @@ def generate_commentary(symbol: str | None = None, model: str | None = None,
         "commentary": commentary, "bias": bias, "tag": "Trading Tips",
         "is_trigger": False, "triggers": [], "signals": signals,
         "metrics": {"ltp": ltp, "chp": chp, "rsi": rsi, "pcr": pcr},
+    })
+
+
+def scan_watchlist_commentary(user_id: str | None = None, api_key: str | None = None,
+                              model: str | None = None) -> dict:
+    """Scan all instruments across the operator's watchlist, synthesize their
+    momentum, scalper signals, and key levels, and emit a unified squawk bullet."""
+    pairs = _watchlist_symbols(user_id)
+    if not pairs:
+        pairs = list(_QUOTE_ROOTS)
+
+    from services.quotes_service import get_quotes
+    from services.scalper_advisor_service import alert_history
+
+    alerts = (alert_history().get("alerts") or [])
+    active_alerts = [a for a in alerts if (a.get("status") or "").lower() == "active"]
+    active_keys = {str(a.get("key") or a.get("symbol") or "").upper(): a for a in active_alerts}
+
+    adv = 0
+    dec = 0
+    bullets = []
+    top_movers = []
+
+    for sym, exch in pairs:
+        try:
+            ok, resp, _ = get_quotes(symbol=sym, exchange=exch, api_key=api_key or "")
+            data = resp.get("data") if ok and isinstance(resp, dict) else None
+            if isinstance(data, dict) and data.get("ltp") is not None:
+                ltp = float(data.get("ltp") or 0)
+                chp = float(data.get("pchg") or data.get("chp") or 0)
+                if chp > 0:
+                    adv += 1
+                elif chp < 0:
+                    dec += 1
+                top_movers.append((abs(chp), sym, ltp, chp))
+                # Check if scalper alert exists
+                if sym in active_keys:
+                    sa = active_keys[sym]
+                    bullets.append(f"⚡ {sym} Scalper BUY {sa.get('strike')} {sa.get('side')} active (P&L {sa.get('pnl_pct', 0):+.1f}%)")
+        except Exception:
+            continue
+
+    top_movers.sort(key=lambda x: x[0], reverse=True)
+    for _, s, p, c in top_movers[:4]:
+        bullets.append(f"{s}: ₹{_fmt(p)} ({c:+.2f}%)")
+
+    breadth_note = f"Watchlist Breadth: {adv} Advancing, {dec} Declining out of {len(pairs)} instruments"
+    bullets.insert(0, breadth_note)
+
+    overall_bias = "BULLISH" if adv > dec * 1.3 else ("BEARISH" if dec > adv * 1.3 else "NEUTRAL")
+    time_str = (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime("%d %b %H:%M")
+    headline = f"Watchlist Scan ({len(pairs)} Symbols) · {overall_bias.title()}"
+    commentary = "\n".join("• " + b for b in bullets)
+
+    return _store_commentary({
+        "timestamp": time_str,
+        "symbol": "WATCHLIST",
+        "headline": headline,
+        "commentary": commentary,
+        "bias": overall_bias,
+        "tag": "Watchlist Scan",
+        "is_trigger": False,
+        "triggers": [],
+        "signals": bullets,
+        "metrics": {"total": len(pairs), "advances": adv, "declines": dec},
     })
 
 

@@ -79,6 +79,7 @@ def fcc_chat():
             use_project_context=body.get("context", True) is not False,
             focus=focus,
             api_key=api_key,
+            user_id=_username_for_key(),
         )
         return jsonify({"status": "success", **result})
     except Exception as e:
@@ -98,6 +99,7 @@ def fcc_commentary():
         item = fcc.generate_commentary(
             symbol=body.get("symbol"), model=body.get("model"),
             api_key=_resolve_api_key(),
+            force=bool(body.get("force", True)),
         )
         if not item:
             return "", 204
@@ -138,6 +140,23 @@ def fcc_commentary_auto():
 @app_key_required
 def fcc_commentary_auto_status():
     return jsonify({"status": "success", "auto": fcc.auto_squawk_status()})
+
+
+@scalper_orderflow_bp.route("/fcc/commentary/scan-watchlist", methods=["POST"])
+@app_key_required
+def fcc_commentary_scan_watchlist():
+    """Scan and synthesize trading ideas across all watchlist symbols."""
+    try:
+        body = request.get_json(silent=True) or {}
+        items = fcc.scan_watchlist_commentary(
+            watchlist_symbols=body.get("symbols"),
+            model=body.get("model"),
+            api_key=_resolve_api_key(),
+        )
+        return jsonify({"status": "success", "items": items, "count": len(items)})
+    except Exception as e:
+        logger.exception("fcc scan watchlist commentary failed")
+        return jsonify({"status": "error", "message": str(e)[:300]}), 500
 
 
 @scalper_orderflow_bp.route("/fcc/lb-status", methods=["GET"])
