@@ -92,3 +92,56 @@ def test_non_dataframe_from_broker_is_reported_as_an_error(broker, malformed):
         "status": "error",
         "message": "Invalid data format returned from broker",
     }
+
+
+def test_invalid_candle_geometry_is_clamped(broker):
+    """High < max(open, close) and Low > min(open, close) are clamped."""
+    dirty_candles = [
+        # high (267.3) is lower than open (269.7)
+        {"timestamp": 1789011000, "open": 269.7, "high": 267.3, "low": 266.2, "close": 266.7, "volume": 100},
+        # low (102.0) is higher than close (95.0)
+        {"timestamp": 1789011300, "open": 100.0, "high": 105.0, "low": 102.0, "close": 95.0, "volume": 200},
+    ]
+    success, response, status = broker(pd.DataFrame(dirty_candles))
+
+    assert success is True
+    assert status == 200
+    records = response["data"]
+    assert len(records) == 2
+    # First candle: high clamped to max(open, close, high, low) == 269.7
+    assert records[0]["high"] == 269.7
+    assert records[0]["low"] == 266.2
+    # Second candle: low clamped to min(open, close, high, low) == 95.0
+    assert records[1]["low"] == 95.0
+    assert records[1]["high"] == 105.0
+
+
+def test_negative_volume_and_oi_clamped_to_zero(broker):
+    """Negative volume and oi values are clamped to 0."""
+    candles = [
+        {"timestamp": 1789011000, "open": 100.0, "high": 105.0, "low": 95.0, "close": 102.0, "volume": -50, "oi": -10},
+    ]
+    success, response, status = broker(pd.DataFrame(candles))
+
+    assert success is True
+    assert status == 200
+    record = response["data"][0]
+    assert record["volume"] == 0
+    assert record["oi"] == 0
+
+
+def test_non_finite_candle_rows_are_dropped(broker):
+    """Candle rows containing NaN or infinite values are dropped."""
+    candles = [
+        {"timestamp": 1789011000, "open": 100.0, "high": 105.0, "low": 95.0, "close": 102.0, "volume": 10},
+        {"timestamp": 1789011300, "open": float("nan"), "high": 105.0, "low": 95.0, "close": 102.0, "volume": 10},
+        {"timestamp": 1789011600, "open": 101.0, "high": float("inf"), "low": 95.0, "close": 102.0, "volume": 10},
+    ]
+    success, response, status = broker(pd.DataFrame(candles))
+
+    assert success is True
+    assert status == 200
+    records = response["data"]
+    assert len(records) == 1
+    assert records[0]["timestamp"] == 1789011000
+
