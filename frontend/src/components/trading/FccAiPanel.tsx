@@ -13,7 +13,7 @@
  * ships the same one, so both surfaces stay at feature parity.
  */
 
-import { Loader2, Send, Sparkles, Square, Radio } from 'lucide-react'
+import { Loader2, Send, Sparkles, Square, Radio, ListTree } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -88,7 +88,16 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
         fccFetch('/commentary/auto', {
           method: 'POST',
           body: JSON.stringify({ enabled: true, symbol: s }),
-        }).catch(() => {})
+        })
+          .then(() => {
+            // Give the server 1.5s to generate the instant bullet for the new symbol, then fetch history
+            setTimeout(() => {
+              fccFetch<{ history: CommentaryItem[] }>('/commentary/history?limit=30')
+                .then((d) => { if (d.history) setItems(d.history) })
+                .catch(() => {})
+            }, 1500)
+          })
+          .catch(() => {})
       }
     }
   }, [activeSymbol])
@@ -107,7 +116,7 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
       }
     }
     poll()
-    const timer = setInterval(poll, 12000)
+    const timer = setInterval(poll, 6000)
     return () => {
       alive = false
       clearInterval(timer)
@@ -130,7 +139,11 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
         .map((t) => ({ role: t.role, content: t.content }))
       const d = await fccFetch<{ content: string }>('/chat', {
         method: 'POST',
-        body: JSON.stringify({ messages: history, context: true }),
+        body: JSON.stringify({
+          messages: history,
+          context: true,
+          focus: symbol || (activeSymbol ? activeSymbol.split(':').pop() : undefined),
+        }),
       })
       setTurns((t) => {
         const next = [...t]
@@ -146,16 +159,36 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
     } finally {
       setBusy(false)
     }
-  }, [input, busy, turns])
+  }, [input, busy, turns, symbol, activeSymbol])
+
+  const [scanBusy, setScanBusy] = useState(false)
+  const scanWatchlist = useCallback(async () => {
+    setScanBusy(true)
+    try {
+      const d = await fccFetch<{ items: CommentaryItem[] }>('/commentary/scan-watchlist', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      })
+      if (d.items && d.items.length) {
+        setItems((prev) => [...d.items, ...prev])
+      }
+    } catch {
+      /* surfaced by the empty list */
+    } finally {
+      setScanBusy(false)
+    }
+  }, [])
 
   const generateCommentary = useCallback(async (sym: string) => {
     setLiveBusy(true)
     try {
       const d = await fccFetch<{ item: CommentaryItem }>('/commentary', {
         method: 'POST',
-        body: JSON.stringify({ symbol: sym }),
+        body: JSON.stringify({ symbol: sym, force: true }),
       })
-      setItems((prev) => [d.item, ...prev])
+      if (d.item) {
+        setItems((prev) => [d.item, ...prev.filter((p) => p.id !== d.item.id)])
+      }
     } catch {
       /* surfaced by the empty list */
     } finally {
@@ -226,15 +259,15 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
             <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
               <Sparkles className="h-8 w-8 text-muted-foreground/50" aria-hidden />
               <p className="text-sm font-medium">Grounded in live OpenAlgo data</p>
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                Quotes, option chains and scalper state are injected into every
-                turn. Try &ldquo;analyse NIFTY&rdquo;.
+              <p className="max-w-[240px] text-xs text-muted-foreground">
+                Ask about the loaded symbol ({symbol}), watchlist breadth, options OI, or trading setups.
               </p>
             </div>
           )}
-          {turns.map((t, i) => (
-            <div key={i} className={cn('max-w-[92%] rounded-lg border px-3 py-2 text-[13px] leading-relaxed whitespace-pre-wrap',
-              t.role === 'user' ? 'ml-auto border-primary/30 bg-primary/10' : 'border-border bg-accent/40',
+          {turns.map((t, idx) => (
+            <div key={idx} className={cn(
+              'rounded-lg px-3 py-2 text-xs leading-relaxed',
+              t.role === 'user' ? 'ml-6 bg-accent/60 text-foreground' : 'mr-2 border border-border bg-card text-card-foreground',
               t.error && 'border-destructive/40 text-destructive')}>
               {t.content || '…'}
             </div>
@@ -256,13 +289,20 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
               {liveBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Radio className="h-3.5 w-3.5" />}
               Squawk
             </Button>
+            <Button size="sm" variant="outline" className="h-8" disabled={scanBusy}
+              onClick={scanWatchlist} title="Scan Watchlist Symbols">
+              {scanBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ListTree className="h-3.5 w-3.5" />}
+              Scan List
+            </Button>
           </div>
           <div className="mb-2.5 flex items-center justify-between rounded bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
             <span className="flex items-center gap-1.5">
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
               SQUAWK ALWAYS ON ({symbol})
             </span>
-            <span className="text-[10px] text-muted-foreground font-normal">Live institutional feed</span>
+            <span className="text-[10px] text-muted-foreground font-normal">
+              {items.length > 0 ? `Updated ${items[0].timestamp}` : 'Running live feed…'}
+            </span>
           </div>
           {items.length === 0 && (
             <p className="px-1 text-xs text-muted-foreground">

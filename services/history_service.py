@@ -86,6 +86,12 @@ def _try_peer_history(
                         f"History {exchange}:{symbol} served by peer instance "
                         f"(local broker '{local_broker}' unusable)"
                     )
+                    try:
+                        df_peer = pd.DataFrame(body["data"])
+                        df_peer = _sanitize_candles_df(df_peer)
+                        body["data"] = df_peer.to_dict(orient="records")
+                    except Exception as e:
+                        logger.warning(f"Error sanitizing peer history: {e}")
                     return True, body, 200
                 return None
             logger.debug(f"Peer history {url} -> HTTP {resp.status_code}")
@@ -114,6 +120,48 @@ def _enforce_rate_limit():
     if elapsed < _MIN_HISTORY_INTERVAL:
         time.sleep(_MIN_HISTORY_INTERVAL - elapsed)
     _last_history_call = time.monotonic()
+
+def _sanitize_candles_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sanitize OHLCV candles DataFrame to ensure valid candlestick geometry:
+    1. Coerces price and timestamp columns to numeric; drops non-finite/NaN rows.
+    2. Clamps high = max(open, high, low, close).
+    3. Clamps low = min(open, high, low, close).
+    4. Ensures volume >= 0 and oi >= 0.
+    5. Deduplicates by timestamp and sorts chronologically.
+    """
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+
+    price_cols = [c for c in ["open", "high", "low", "close"] if c in df.columns]
+    for col in price_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").replace([float("inf"), float("-inf")], float("nan"))
+
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce").replace([float("inf"), float("-inf")], float("nan"))
+        df = df.dropna(subset=["timestamp"] + price_cols)
+        df["timestamp"] = df["timestamp"].astype("int64")
+    elif price_cols:
+        df = df.dropna(subset=price_cols)
+
+    if df.empty:
+        return df
+
+    if all(c in df.columns for c in ["open", "high", "low", "close"]):
+        df["high"] = df[["open", "high", "low", "close"]].max(axis=1)
+        df["low"] = df[["open", "high", "low", "close"]].min(axis=1)
+
+    if "volume" in df.columns:
+        df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).clip(lower=0)
+    if "oi" in df.columns:
+        df["oi"] = pd.to_numeric(df["oi"], errors="coerce").fillna(0).clip(lower=0)
+
+    if "timestamp" in df.columns:
+        df = df.sort_values("timestamp")
+
+    return df
 
 
 def validate_symbol_exchange(symbol: str, exchange: str) -> tuple[bool, str | None]:
@@ -223,6 +271,8 @@ def get_history_with_auth(
         if "oi" not in df.columns:
             df["oi"] = 0
 
+        df = _sanitize_candles_df(df)
+
         if df.empty:
             # Distinguish "contract exists but never trades intraday" from
             # "no data at all" so charts show an actionable error instead of
@@ -328,9 +378,11 @@ def get_history_from_db(
         if "oi" not in df.columns:
             df["oi"] = 0
 
+        df = _sanitize_candles_df(df)
+
         # Reorder columns to match API response format
         columns = ["timestamp", "open", "high", "low", "close", "volume", "oi"]
-        df = df[columns]
+        df = df[[c for c in columns if c in df.columns]]
 
         return True, {"status": "success", "data": df.to_dict(orient="records")}, 200
 

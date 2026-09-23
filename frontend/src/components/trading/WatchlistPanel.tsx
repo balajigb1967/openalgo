@@ -14,13 +14,17 @@
 
 import {
   ChevronDown,
+  ChevronRight,
   FolderPlus,
   GripVertical,
+  Loader2,
   MoreHorizontal,
   Plus,
   RefreshCw,
   Search,
+  Sparkles,
   Trash2,
+  Wand2,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -213,12 +217,45 @@ function readDisplay(): Display {
 
 export function itemSection(item: WatchlistItem): string {
   if (item.section && item.section.trim().length > 0) return item.section.trim()
+  return autoCategorizeItem(item)
+}
+
+export function autoCategorizeItem(item: WatchlistItem): string {
   const exch = (item.exchange || '').toUpperCase()
-  if (exch === 'GLOBAL') return 'Global'
-  if (exch === 'NSE_INDEX' || exch === 'BSE_INDEX') return 'Indices'
-  if (exch === 'MCX') return 'Commodities'
-  if (exch === 'CDS') return 'Currency'
-  if (exch === 'NSE' || exch === 'BSE') return 'Equities'
+  const sym = (item.symbol || '').toUpperCase()
+  if (exch === 'GLOBAL' || ['USOIL', 'BRENT', 'GOLD', 'SILVER', 'NATGAS', 'GIFTNIFTY', 'DXY', 'SPX'].includes(sym)) {
+    return 'Global'
+  }
+  if (
+    sym.endsWith('CE') ||
+    sym.endsWith('PE') ||
+    sym.includes(' CE') ||
+    sym.includes(' PE') ||
+    /\d+(CE|PE)$/.test(sym)
+  ) {
+    return 'Options'
+  }
+  if (
+    exch === 'NSE_INDEX' ||
+    exch === 'BSE_INDEX' ||
+    ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX', 'NIFTYNXT50'].includes(sym)
+  ) {
+    return 'Indices'
+  }
+  if (
+    exch === 'MCX' ||
+    ['CRUDEOIL', 'NATURALGAS', 'GOLD', 'GOLDM', 'SILVER', 'SILVERM', 'COPPER', 'ZINC', 'ALUMINIUM', 'LEAD'].some(
+      (k) => sym.startsWith(k)
+    )
+  ) {
+    return 'Commodities'
+  }
+  if (exch === 'CDS' || sym.includes('INR')) {
+    return 'Currency'
+  }
+  if (exch === 'NSE' || exch === 'BSE') {
+    return 'Equities'
+  }
   return 'Symbols'
 }
 
@@ -290,6 +327,16 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
    * header, so it does not light up while the row is over other rows.
    */
   const [overSection, setOverSection] = useState<string | null | undefined>(undefined)
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('oa-watchlist-collapsed') || '{}')
+    } catch {
+      return {}
+    }
+  })
+  const [dragSection, setDragSection] = useState<string | null>(null)
+  const [overSectionDrop, setOverSectionDrop] = useState<string | null>(null)
+  const [scanning, setScanning] = useState(false)
 
   /** One dialog drives create, rename and copy; `mode` says which. */
   const [nameDialog, setNameDialog] = useState<{
@@ -756,6 +803,86 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
     }
   }
 
+  const toggleSectionCollapse = (sectionName: string) => {
+    setCollapsedSections((prev) => {
+      const next = { ...prev, [sectionName]: !prev[sectionName] }
+      localStorage.setItem('oa-watchlist-collapsed', JSON.stringify(next))
+      return next
+    })
+  }
+
+  const autoArrangeSections = async () => {
+    if (!active || active.items.length === 0) return
+    const SECTION_ORDER = ['Indices', 'Commodities', 'Options', 'Equities', 'Global', 'Currency', 'Symbols']
+    const categorized = active.items.map((i) => ({
+      ...i,
+      section: autoCategorizeItem(i),
+    }))
+    categorized.sort((a, b) => {
+      const secA = a.section || 'Symbols'
+      const secB = b.section || 'Symbols'
+      const idxA = SECTION_ORDER.indexOf(secA) !== -1 ? SECTION_ORDER.indexOf(secA) : 999
+      const idxB = SECTION_ORDER.indexOf(secB) !== -1 ? SECTION_ORDER.indexOf(secB) : 999
+      if (idxA !== idxB) return idxA - idxB
+      return 0
+    })
+    setLists((prev) => prev.map((l) => (l.id === active.id ? { ...l, items: categorized } : l)))
+    setDisplay((prev) => ({ ...prev, sections: true }))
+    try {
+      await watchlistApi.reorderItems(active.id, categorized.map((i) => i.id))
+      for (const it of categorized) {
+        await watchlistApi.setItemSection(it.id, it.section)
+      }
+      showToast.success('Watchlist auto-arranged into sections')
+    } catch (e) {
+      showToast.error(watchlistError(e, 'Failed to save auto-arranged sections'))
+      await refresh(active.id).catch(() => {})
+    }
+  }
+
+  const moveSection = async (sourceSec: string, targetSec: string) => {
+    if (!active || sourceSec === targetSec) return
+    const sourceItems = active.items.filter((i) => itemSection(i) === sourceSec)
+    const otherItems = active.items.filter((i) => itemSection(i) !== sourceSec)
+    const targetIdx = otherItems.findIndex((i) => itemSection(i) === targetSec)
+    const newOrdered = [...otherItems]
+    if (targetIdx !== -1) {
+      newOrdered.splice(targetIdx, 0, ...sourceItems)
+    } else {
+      newOrdered.push(...sourceItems)
+    }
+    setLists((prev) => prev.map((l) => (l.id === active.id ? { ...l, items: newOrdered } : l)))
+    try {
+      await watchlistApi.reorderItems(active.id, newOrdered.map((i) => i.id))
+      showToast.success(`Rearranged section "${sourceSec}"`)
+    } catch (e) {
+      showToast.error(watchlistError(e, 'Could not rearrange sections'))
+      await refresh(active.id).catch(() => {})
+    }
+  }
+
+  const scanAllSymbols = async () => {
+    if (!items.length || scanning) return
+    setScanning(true)
+    try {
+      const res = await fetch('/plugins/fcc/commentary/scan-watchlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbols: items.map((i) => i.symbol) }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        showToast.success(`Scanned ${data.count || items.length} symbols with FCC AI`)
+      } else {
+        showToast.error('FCC AI scan failed')
+      }
+    } catch (e) {
+      showToast.error('FCC AI scan error')
+    } finally {
+      setScanning(false)
+    }
+  }
+
   /** File a row under `section` from the row menu — same persistence as the
    * drag path, but reachable without a drag: touch devices, keyboard users
    * and anyone who finds dropping on a header fiddly. Also used right after
@@ -884,12 +1011,12 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
    */
   const renderSections = useCallback(
     (rows: WatchlistItem[]): Array<
-      | { kind: 'section'; name: string | null; dim: boolean; count: number }
+      | { kind: 'section'; name: string | null; dim: boolean; count: number; collapsed: boolean }
       | { kind: 'row'; item: WatchlistItem; index: number }
     > => {
       if (!display.sections) return rows.map((item, index) => ({ kind: 'row' as const, item, index }))
       const out: Array<
-        | { kind: 'section'; name: string | null; dim: boolean; count: number }
+        | { kind: 'section'; name: string | null; dim: boolean; count: number; collapsed: boolean }
         | { kind: 'row'; item: WatchlistItem; index: number }
       > = []
       let current: string | null | undefined = undefined
@@ -899,13 +1026,17 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
           current = name
           let count = 0
           for (let j = i; j < rows.length && itemSection(rows[j]) === name; j++) count++
-          out.push({ kind: 'section', name, dim: false, count })
+          const collapsed = Boolean(name && collapsedSections[name])
+          out.push({ kind: 'section', name, dim: false, count, collapsed })
         }
-        out.push({ kind: 'row', item: rows[i], index: i })
+        const isCollapsed = Boolean(name && collapsedSections[name])
+        if (!isCollapsed) {
+          out.push({ kind: 'row', item: rows[i], index: i })
+        }
       }
       return out
     },
-    [display.sections]
+    [display.sections, collapsedSections]
   )
 
   /** A row as it renders — extracted so section headers can interleave. */
@@ -993,6 +1124,11 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
                     // click loads the international benchmark's dollar chart.
                     setSyncSymbol(`${item.exchange}:${item.symbol}`)
                     onPick({ symbol: item.symbol, exchange: item.exchange })
+                    fetch('/plugins/fcc/commentary/auto', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ enabled: true, symbol: item.symbol }),
+                    }).catch(() => {})
                   }}
                   onKeyDown={(e) => {
                     // Removing from the row itself is what lets the trash stay
@@ -1166,12 +1302,25 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
             >
               Rename...
             </DropdownMenuItem>
+            <DropdownMenuItem
+              disabled={!active || items.length === 0}
+              onSelect={() => void autoArrangeSections()}
+            >
+              Auto-arrange sections
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => fileRef.current?.click()}>
               Import list...
             </DropdownMenuItem>
             <DropdownMenuItem disabled={!active || items.length === 0} onSelect={exportList}>
               Export list...
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              disabled={!active || items.length === 0}
+              onSelect={() => void scanAllSymbols()}
+            >
+              Scan all symbols (FCC AI)
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
@@ -1236,6 +1385,30 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
           aria-label="Add section"
         >
           <FolderPlus className="h-4 w-4" />
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+          disabled={!active || items.length === 0}
+          onClick={() => void autoArrangeSections()}
+          title="Auto-arrange sections (Indices, Commodities, Options, Equities, Global)"
+          aria-label="Auto-arrange sections"
+        >
+          <Wand2 className="h-3.5 w-3.5" />
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 shrink-0 text-primary/80 hover:text-primary"
+          disabled={!items.length || scanning}
+          onClick={() => void scanAllSymbols()}
+          title="Scan all symbols with FCC AI"
+          aria-label="Scan all symbols with FCC AI"
+        >
+          {scanning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
         </Button>
 
         {/* What the rows show. Separate from the list menu beside it: that
@@ -1350,29 +1523,72 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
         ) : (
           renderSections(items).map((row) =>
             row.kind === 'section' ? (
-              // A header is a drop target too: dropping a row on it files the
-              // row under that section, which beats hunting for the boundary
-              // between two groups.
+              // Section header: draggable to rearrange sections, drop target for symbols,
+              // and clickable to collapse/expand.
               <div
                 key={`sec:${row.name ?? ''}`}
+                draggable={Boolean(row.name)}
+                onDragStart={(e) => {
+                  if (row.name) {
+                    e.dataTransfer.effectAllowed = 'move'
+                    e.dataTransfer.setData('text/plain', `section:${row.name}`)
+                    setDragSection(row.name)
+                  }
+                }}
+                onDragEnd={() => {
+                  setDragSection(null)
+                  setOverSectionDrop(null)
+                  setOverSection(undefined)
+                }}
                 onDragOver={(e) => {
                   e.preventDefault()
                   e.dataTransfer.dropEffect = 'move'
-                  setOverSection(row.name)
+                  if (dragSection && dragSection !== row.name) {
+                    setOverSectionDrop(row.name)
+                  } else if (dragId != null) {
+                    setOverSection(row.name)
+                  }
                 }}
-                onDragLeave={() => setOverSection((s) => (s === row.name ? undefined : s))}
+                onDragLeave={() => {
+                  setOverSectionDrop(null)
+                  setOverSection((s) => (s === row.name ? undefined : s))
+                }}
                 onDrop={(e) => {
                   e.preventDefault()
-                  void dropOnSection(row.name)
+                  if (dragSection && row.name && dragSection !== row.name) {
+                    const src = dragSection
+                    const tgt = row.name
+                    setDragSection(null)
+                    setOverSectionDrop(null)
+                    void moveSection(src, tgt)
+                  } else if (dragId != null) {
+                    void dropOnSection(row.name)
+                  }
                 }}
+                onClick={() => row.name && toggleSectionCollapse(row.name)}
                 className={cn(
-                  'sticky top-0 z-10 flex items-center gap-1.5 border-b bg-background/95 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground backdrop-blur',
+                  'sticky top-0 z-10 flex cursor-pointer select-none items-center gap-1.5 border-b bg-background/95 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground backdrop-blur transition-colors hover:bg-accent/40',
                   row.dim && 'opacity-70',
                   overSection === row.name &&
                     dragId != null &&
-                    'bg-accent text-foreground shadow-[inset_0_2px_0_0_var(--color-primary)]'
+                    'bg-accent text-foreground shadow-[inset_0_2px_0_0_var(--color-primary)]',
+                  overSectionDrop === row.name &&
+                    dragSection != null &&
+                    'bg-primary/20 text-foreground shadow-[inset_0_2px_0_0_var(--color-primary)]'
                 )}
               >
+                <span
+                  className="cursor-grab active:cursor-grabbing p-0.5 text-muted-foreground/40 hover:text-foreground"
+                  title="Drag to rearrange section"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <GripVertical className="h-3 w-3" />
+                </span>
+                {row.collapsed ? (
+                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform" />
+                ) : (
+                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform" />
+                )}
                 <span className="truncate">{row.dim ? 'Symbols' : row.name}</span>
                 <span className="ml-auto text-[10px] font-medium tabular-nums text-muted-foreground/70">
                   {row.count}
