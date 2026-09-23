@@ -11,6 +11,7 @@ Safe to re-run: existing alias rows are updated in place, and a root is
 re-pointed to a new near month as contracts roll.
 """
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -60,6 +61,14 @@ def run(engine) -> int:
                 ),
                 {"pat": root + "%FUT"},
             ).fetchall()
+            # Keep only true dated contracts of THIS root — the plain
+            # <ROOT><DD><MMM><YY>FUT form. Without the anchor, sibling
+            # products leak in: GOLD%FUT matches GOLDGUINEA…, SILVER%FUT
+            # matches SILVER100…, and the nearest-expiry pick then aliases
+            # GOLD to Gold Guinea and SILVER to Silver 100 (8g/100g vs 10g/1kg
+            # contracts — prices silently off by the size ratio).
+            dated_pat = re.compile(re.escape(root) + r"\d{2}[A-Z]{3}\d{2}FUT$")
+            rows = [r for r in rows if dated_pat.match(r[0])]
             # Keep only contracts whose parsed expiry is today or later, then
             # take the smallest — that is the near month.
             dated = []

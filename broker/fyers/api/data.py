@@ -601,6 +601,15 @@ class BrokerData:
                         error_msg = response.get("message", "Unknown error")
                         logger.error(f"Error for chunk {chunk_start} to {chunk_end}: {error_msg}")
 
+                        # 'no_data' is Fyers' definitive empty answer (e.g. an
+                        # untraded option contract) — not a transient failure.
+                        # Retrying it 3x with backoff burned ~90s per request,
+                        # which surfaced as mobile history timeouts. Skip the
+                        # chunk immediately.
+                        if response.get("s") == "no_data":
+                            current_start = current_end + pd.Timedelta(days=1)
+                            continue
+
                         if retry_count < max_retries:
                             retry_count += 1
                             logger.debug(f"Retrying... Attempt {retry_count} of {max_retries}")
