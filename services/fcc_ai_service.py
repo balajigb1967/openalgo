@@ -147,7 +147,42 @@ def _fmt(v: Any, dp: int = 2) -> str:
         return "N/A"
 
 
-def _live_quote_lines(api_key: str | None) -> list[str]:
+def _watchlist_symbols(user_id: str | None) -> list[tuple[str, str]]:
+    """Symbol/exchange pairs from the operator's watchlists, deduped.
+
+    The quotes block used to be a hardcoded handful of index/MCX roots, which
+    is why the telemetry went deaf for any instrument outside it (NATURALGAS
+    being the one that bit). The watchlist is the source of truth for what
+    the operator actually trades.
+    """
+    if not user_id:
+        return []
+    try:
+        from database.watchlist_db import get_watchlists
+    except Exception:
+        logger.exception("watchlist db unavailable for FCC context")
+        return []
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    try:
+        for wl in get_watchlists(user_id):
+            for item in wl.get("items") or []:
+                sym = str(item.get("symbol") or "").strip().upper()
+                exch = str(item.get("exchange") or "").strip().upper()
+                if not sym or not exch:
+                    continue
+                key = (sym, exch)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(key)
+    except Exception:
+        logger.exception("watchlist symbols for FCC context failed")
+    return out
+
+
+def _live_quote_lines(api_key: str | None, user_id: str | None = None,
+                      focus: str | None = None) -> list[str]:
     lines = []
     try:
         from services.quotes_service import get_quotes
@@ -156,13 +191,27 @@ def _live_quote_lines(api_key: str | None) -> list[str]:
             from restful_api_service import get_quotes  # type: ignore
         except Exception:
             return ["Live quotes unavailable (quotes service not importable)"]
-    for sym, exch in _QUOTE_ROOTS:
+    # Focus first, then everything the operator watches; the fixed roots are
+    # only a fallback when no watchlist exists yet.
+    rows: list[tuple[str, str]] = []
+    if focus:
+        f = focus.strip().upper()
+        rows.append((f, _fo_exchange(f)))
+    seen = {(s, e) for s, e in rows}
+    for pair in _watchlist_symbols(user_id):
+        if pair not in seen:
+            seen.add(pair)
+            rows.append(pair)
+    if not rows:
+        rows = list(_QUOTE_ROOTS)
+    rows = rows[:16]
+    for sym, exch in rows:
         try:
             ok, resp, _ = get_quotes(symbol=sym, exchange=exch, api_key=api_key or "")
             data = resp.get("data") if ok and isinstance(resp, dict) else None
             if isinstance(data, dict) and data.get("ltp") is not None:
                 chp = float(data.get("pchg") or data.get("chp") or 0)
-                lines.append(f"{sym} {_fmt(data.get('ltp'))} ({chp:+.2f}%)")
+                lines.append(f"{sym} [{exch}] {_fmt(data.get('ltp'))} ({chp:+.2f}%)")
         except Exception:
             continue
     return lines or ["Live quotes unavailable (no data)"]
@@ -435,17 +484,38 @@ def _scalper_lines() -> list[str]:
         return []
 
 
-def _focus_ltp(symbol: str, api_key: str | None) -> float:
+def _focus_ltp(symbol: str, api_key: str | None, user_id: str | None = None) -> float:
+    """Live LTP for the focus symbol, trying every exchange it might live on.
+
+    The watchlist's exchange for this symbol is tried first (the operator's
+    own tagging beats any mapping), then the symbol-service guess. A symbol
+    must never analyse without a price when a broker can quote it.
+    """
     try:
         from services.quotes_service import get_quotes
-        ok, resp, _ = get_quotes(symbol=symbol, exchange=_fo_exchange(symbol), api_key=api_key or "")
-        data = resp.get("data") if ok and isinstance(resp, dict) else None
-        return float((data or {}).get("ltp") or 0)
+        candidates: list[str] = []
+        for s, e in _watchlist_symbols(user_id):
+            if s.upper() == symbol.upper() and e not in candidates:
+                candidates.append(e)
+        mapped = _fo_exchange(symbol)
+        if mapped not in candidates:
+            candidates.append(mapped)
+        for exch in candidates:
+            try:
+                ok, resp, _ = get_quotes(symbol=symbol, exchange=exch, api_key=api_key or "")
+                data = resp.get("data") if ok and isinstance(resp, dict) else None
+                ltp = float((data or {}).get("ltp") or 0)
+                if ltp:
+                    return ltp
+            except Exception:
+                continue
+        return 0.0
     except Exception:
         return 0.0
 
 
-def build_project_context(focus: str | None = None, api_key: str | None = None) -> str:
+def build_project_context(focus: str | None = None, api_key: str | None = None,
+                          user_id: str | None = None) -> str:
     """Live OpenAlgo snapshot injected as the FCC system prompt."""
     if focus:
         focus = focus.split(":")[-1].strip().upper() or None
@@ -456,13 +526,15 @@ def build_project_context(focus: str | None = None, api_key: str | None = None) 
         "data is unavailable instead of inventing it. When the operator asks to analyse "
         "the chart or the market, analyse the focus symbol from the telemetry below.",
         "",
-        "Live quotes: " + "; ".join(_live_quote_lines(api_key)),
+        "Live quotes: " + "; ".join(_live_quote_lines(api_key, user_id, focus)),
     ]
     glob = _global_lines()
     if glob:
         lines.append("Global (dollar) references: " + "; ".join(glob))
     if focus:
-        ltp = _focus_ltp(focus, api_key)
+        ltp = _focus_ltp(focus, api_key, user_id)
+        if ltp:
+            lines.append(f"Focus price: {focus} LTP {_fmt(ltp)}")
         lines.extend(_chart_lines(focus, ltp, api_key))
         lines.extend(_chain_lines(focus, api_key))
     lines.extend(_scalper_lines())
@@ -505,7 +577,7 @@ def resolve_focus(text: str) -> str | None:
 
 def chat(messages: list[dict], model: str | None = None,
          use_project_context: bool = True, focus: str | None = None,
-         api_key: str | None = None) -> dict:
+         api_key: str | None = None, user_id: str | None = None) -> dict:
     """Grounded chat through the FCC proxy (Anthropic API with OpenAI fallback)."""
     if not FCC_ENABLED:
         raise RuntimeError("FCC integration is disabled (FCC_ENABLED=false)")
@@ -514,7 +586,7 @@ def chat(messages: list[dict], model: str | None = None,
         focus = resolve_focus(next(
             (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), ""))
 
-    sys_prompt = build_project_context(focus, api_key) if use_project_context else ""
+    sys_prompt = build_project_context(focus, api_key, user_id) if use_project_context else ""
     payload = [{"role": (m.get("role") or "user"), "content": (m.get("content") or "")}
                for m in (messages or [])]
     model_id = model or _default_model() or "claude-haiku-4-20250514"

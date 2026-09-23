@@ -79,6 +79,7 @@ def fcc_chat():
             use_project_context=body.get("context", True) is not False,
             focus=focus,
             api_key=api_key,
+            user_id=_username_for_key(),
         )
         return jsonify({"status": "success", **result})
     except Exception as e:

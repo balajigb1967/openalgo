@@ -1,27 +1,42 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
-  Bookmark,
-  Zap,
+  CalendarDays,
+  Check,
+  ChevronDown,
+  List,
+  Newspaper,
+  PanelRight,
+  Sparkles,
+  Table2,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useDefaultLayout } from 'react-resizable-panels'
-import { scalperApi, type ScalperAlert } from '@/api/scalper-orderflow'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useDefaultLayout, useGroupRef } from 'react-resizable-panels'
 import { scalpingApi } from '@/api/scalping'
 import { type QuotesData, tradingApi } from '@/api/trading'
-import { watchlistApi } from '@/api/watchlist'
 import { Navbar } from '@/components/layout/Navbar'
 import { DepthTable } from '@/components/scalping/DepthTable'
 import { ScalpChart } from '@/components/scalping/ScalpChart'
 import { SetSLDialog } from '@/components/scalping/SetSLDialog'
+import { OptionChainPanel } from '@/components/trading/OptionChainPanel'
+import { OrderflowPanel } from '@/components/trading/OrderflowPanel'
+import { MarketBriefPanel } from '@/components/trading/MarketBriefPanel'
+import { WatchlistPanel } from '@/components/trading/WatchlistPanel'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import {
   Popover,
+  PopoverAnchor,
   PopoverContent,
-  PopoverTrigger,
 } from '@/components/ui/popover'
 import {
   ResizableHandle,
@@ -52,14 +67,15 @@ import { priceDecimals } from '@/lib/scalpingPrice'
 import { buildPositionRows } from '@/lib/scalpingRows'
 import { mergeTick, type TickView } from '@/lib/scalpingTick'
 import {
+  getSyncState,
   getSyncTarget,
   type ScalperSyncState,
   type ScalperTarget,
   setSyncSymbol,
-  setSyncTarget,
   subscribeSync,
   subscribeSyncTarget,
 } from '@/lib/scalperSync'
+import type { SearchRow } from '@/lib/trading/terminal'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/authStore'
 import { useThemeStore } from '@/stores/themeStore'
@@ -74,6 +90,16 @@ import type {
   SelectedLeg,
 } from '@/types/scalping'
 import { showToast } from '@/utils/toast'
+
+const NewsPanel = lazy(() =>
+  import('@/components/trading/NewsPanel').then((m) => ({ default: m.NewsPanel }))
+)
+const CalendarPanel = lazy(() =>
+  import('@/components/trading/CalendarPanel').then((m) => ({ default: m.CalendarPanel }))
+)
+const FccAiPanel = lazy(() =>
+  import('@/components/trading/FccAiPanel').then((m) => ({ default: m.FccAiPanel }))
+)
 
 const DEFAULT_STRIKE_COUNT = 10
 const MAX_LOTS = 20
@@ -262,6 +288,74 @@ export default function Scalping() {
     storage: safeLayoutStorage,
   })
 
+  /**
+   * Live chart-height sync across columns.
+   *
+   * Each column owns a private chart/depth split, so dragging one column's
+   * handle left the other columns' charts at a different height. One
+   * column's layout is treated as the master: on drag, its chart fraction
+   * is fanned out to the sibling groups via their handles (setLayout
+   * normalizes percentages), so every chart resizes together. The suppress
+   * flag stops the fan-out from echoing back as further fan-outs.
+   */
+  const ceGroupRef = useGroupRef()
+  const spotGroupRef = useGroupRef()
+  const peGroupRef = useGroupRef()
+  const eqGroupRef = useGroupRef()
+  const suppressFanoutRef = useRef(false)
+  /**
+   * Which column's handle the user is dragging (set on handle pointer/key
+   * down, cleared on window release). Groups fire onLayoutChanged on mount
+   * too — gating the fan-out on an actual drag keeps restored layouts from
+   * stomping each other at boot.
+   */
+  const dragSourceRef = useRef<string | null>(null)
+  useEffect(() => {
+    const clear = () => {
+      dragSourceRef.current = null
+    }
+    window.addEventListener('pointerup', clear)
+    window.addEventListener('pointercancel', clear)
+    window.addEventListener('keyup', clear)
+    return () => {
+      window.removeEventListener('pointerup', clear)
+      window.removeEventListener('pointercancel', clear)
+      window.removeEventListener('keyup', clear)
+    }
+  }, [])
+  const syncChartHeights = useCallback(
+    (source: 'ce' | 'spot' | 'pe' | 'eq', layout: Record<string, number>) => {
+      if (suppressFanoutRef.current) return
+      suppressFanoutRef.current = true
+      try {
+        const chartPct = layout[`col-${source}-chart`]
+        if (chartPct == null) return
+        const groups: Record<string, typeof ceGroupRef> = {
+          ce: ceGroupRef,
+          spot: spotGroupRef,
+          pe: peGroupRef,
+          eq: eqGroupRef,
+        }
+        for (const [key, ref] of Object.entries(groups)) {
+          if (key === source) continue
+          const g = ref.current
+          if (!g) continue
+          const ids = g.getLayout()
+          const next: Record<string, number> = {}
+          for (const id of Object.keys(ids)) {
+            next[id] = id.endsWith('-chart') ? chartPct : 100 - chartPct
+          }
+          if (Object.keys(next).length) g.setLayout(next)
+        }
+      } finally {
+        requestAnimationFrame(() => {
+          suppressFanoutRef.current = false
+        })
+      }
+    },
+    [ceGroupRef, spotGroupRef, peGroupRef, eqGroupRef]
+  )
+
   // Exchange / segment
   const [exchange, setExchange] = useState<ScalpingExchange>('NFO')
   const [segment, setSegment] = useState<Segment>('OPTIONS')
@@ -287,8 +381,103 @@ export default function Scalping() {
   const [product, setProduct] = useState<ScalpingProduct>('NRML')
   const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null)
 
+  // Right sidebar (watchlist). Hidden by default: the scalper layout is
+  // dense, and a panel that eats 300px on first visit reads as broken. The
+  // choice persists, so a user who works with it open keeps it open.
+  const [showSidebar, setShowSidebar] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('oa-scalper-sidebar') === '1'
+    } catch {
+      return false
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem('oa-scalper-sidebar', showSidebar ? '1' : '0')
+    } catch {
+      // ignore
+    }
+  }, [showSidebar])
+
+  /** Which widget the sidebar hosts. Panel ids mirror /trading's rail. */
+  type SidePanelId = 'watchlist' | 'options' | 'orderflow' | 'brief' | 'news' | 'calendar' | 'fcc'
+  const SIDE_PANELS: Array<{ id: SidePanelId; label: string; icon: typeof List }> = [
+    { id: 'watchlist', label: 'Watchlist', icon: List },
+    { id: 'options', label: 'Option chain', icon: Table2 },
+    { id: 'orderflow', label: 'Orderflow', icon: Activity },
+    { id: 'brief', label: 'Market Brief', icon: Newspaper },
+    { id: 'news', label: 'News', icon: Newspaper },
+    { id: 'calendar', label: 'Calendar', icon: CalendarDays },
+    { id: 'fcc', label: 'FCC AI', icon: Sparkles },
+  ]
+  const [sidePanel, setSidePanel] = useState<SidePanelId>(() => {
+    try {
+      const saved = localStorage.getItem('oa-scalper-side-panel') as SidePanelId | null
+      if (saved && SIDE_PANELS.some((p) => p.id === saved)) return saved
+    } catch {
+      // ignore
+    }
+    return 'watchlist'
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem('oa-scalper-side-panel', sidePanel)
+    } catch {
+      // ignore
+    }
+  }, [sidePanel])
+  /**
+   * The focused symbol as `EXCHANGE:SYMBOL`, mirrored from the sync bus the
+   * same way /trading feeds its panels: panels highlight the charted row and
+   * depth/orderflow key off it.
+   */
+  const [syncSymbolState, setSyncSymbolState] = useState(() => getSyncState().symbol)
+  useEffect(
+    () => subscribeSync((s) => setSyncSymbolState(s.symbol)),
+    []
+  )
+  /**
+   * The watchlist search runs through the same REST gateway the chart panes
+   * use (public /api/v1, apikey in the body) — the same rows /trading's
+   * sidebar returns, so a pick lands identically on both pages.
+   */
+  const panelSearch = useCallback(
+    async (query: string, exchange?: string, limit = 30): Promise<SearchRow[]> => {
+      if (!apiKey || !query.trim()) return []
+      try {
+        const res = await fetch('/api/v1/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apikey: apiKey, query, ...(exchange ? { exchange } : {}) }),
+        })
+        const j = (await res.json().catch(() => ({}))) as { data?: SearchRow[] }
+        return (j.data || []).slice(0, limit)
+      } catch {
+        return []
+      }
+    },
+    [apiKey]
+  )
+
   // Charts
   const [showCharts, setShowCharts] = useState<boolean>(loadShowCharts)
+  // Depth panes follow the same pattern as the Chart toggle: on by default,
+  // and the choice persists. Only '0' hides — a missing key (or an older
+  // build's data) reads as shown.
+  const [showDepth, setShowDepth] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('oa-scalper-show-depth') !== '0'
+    } catch {
+      return true
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem('oa-scalper-show-depth', showDepth ? '1' : '0')
+    } catch {
+      // ignore
+    }
+  }, [showDepth])
   const [chartTf, setChartTf] = useState<string>(loadChartTf)
 
   // Predefined SL / Target
@@ -357,21 +546,6 @@ export default function Scalping() {
   useEffect(() => {
     setProduct(isEquityExch ? 'MIS' : 'NRML')
   }, [isEquityExch])
-
-  // Watchlists query for quick picker
-  const { data: watchlistData } = useQuery({
-    queryKey: ['scalping', 'watchlists'],
-    queryFn: () => watchlistApi.list(),
-  })
-  const watchlists = watchlistData ?? []
-
-  // Advisor alerts query for quick picker
-  const { data: advisorData } = useQuery({
-    queryKey: ['scalping', 'advisor'],
-    queryFn: () => scalperApi.getAdvisor(),
-    refetchInterval: 15000,
-  })
-  const activeAlerts: ScalperAlert[] = advisorData?.monitor?.alerts ?? []
 
   // Equity search
   const { data: eqSearchResp } = useQuery({
@@ -482,13 +656,49 @@ export default function Scalping() {
     }
   }, [optionsMode, instrument])
 
+  // ── Publish focus to the sync bus ────────────────────────────────────
+  /**
+   * The scalper is itself a sync source: the side panel (watchlist, option
+   * chain, orderflow, news) follows whatever the scalper has loaded, the
+   * same way /trading's panels follow the focused chart pane. Without this
+   * the chain panel stayed on whatever it last saved — its GOLD default —
+   * no matter what the scalper was trading. Trailing debounce: the chain
+   * resolves ATM in a burst, and only the settled symbol is worth a
+   * broadcast.
+   */
+  const focusSymbol = optionsMode
+    ? `${underlyingExch}:${underlyingSym}`
+    : singleLeg
+      ? `${singleLeg.exchange}:${singleLeg.symbol}`
+      : ceLeg
+        ? `${ceLeg.exchange}:${ceLeg.symbol}`
+        : ''
+  const publishRef = useRef<{ timer: number | null; last: string }>({ timer: null, last: '' })
+  useEffect(() => {
+    if (focusSymbol === publishRef.current.last) return
+    const t = window.setTimeout(() => {
+      publishRef.current.last = focusSymbol
+      setSyncSymbol(focusSymbol)
+    }, 300)
+    publishRef.current.timer = t
+    return () => {
+      if (publishRef.current.timer != null) window.clearTimeout(publishRef.current.timer)
+    }
+  }, [focusSymbol])
+
   // ── Sync with Watchlist & Scalper Advisor ───────────────────────────
   const applySyncSymbol = useCallback((s: ScalperSyncState) => {
     if (!s.symbol) return
     const rawExchange = s.symbol.includes(':') ? s.symbol.split(':')[0] : ''
     const rawSym = s.symbol.includes(':') ? s.symbol.split(':')[1] : s.symbol
     const upperExch = rawExchange.toUpperCase()
+    // GLOBAL rows (dollar benchmarks) have no Indian contract to trade; the
+    // scalper ignores them rather than mangling their exchange into NFO.
 
+    if (upperExch === 'GLOBAL') {
+      showSyncBanner(`Watchlist: ${rawSym} is a global instrument — nothing to scalp`)
+      return
+    }
     if (upperExch === 'NSE' || upperExch === 'BSE') {
       const isIndex =
         rawSym.includes('INDEX') ||
@@ -1052,8 +1262,14 @@ export default function Scalping() {
   )
 
   return (
-    <div className="h-screen w-full flex flex-col bg-background overflow-hidden select-none">
-      <Navbar />
+    // No overflow-hidden: the ribbon is now single-line (so it no longer
+    // doubles the page height on narrow windows), but short windows must
+    // still be able to scroll to the dock rather than have it amputated.
+    // h-screen stays: the resizable panes need a definite height.
+    <div className="h-screen w-full flex flex-col bg-background select-none">
+      {/* fluid: the page below is edge-to-edge, so the nav must match — a
+          container-capped navbar floats inset over a full-bleed terminal. */}
+      <Navbar fluid />
 
       {/* Sync / Reconnecting Banner */}
       {syncBanner ? (
@@ -1070,8 +1286,29 @@ export default function Scalping() {
       ) : null}
 
       {/* ── Compact Control Ribbon ─────────────────────────────────── */}
-      <div className="shrink-0 border-b border-border/70 bg-card/70 px-3 py-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs">
-        <div className="flex items-center gap-1.5">
+      {/* One line, horizontally scrollable. flex-wrap stacked the ribbon
+          into two or three rows on narrower windows, stealing 90px of chart
+          from a layout measured in pixels of price action; scrolling
+          sideways keeps every control reachable on one line. The sidebar
+          toggle sits OUTSIDE the scroller so it never scrolls away. */}
+      <div className="shrink-0 border-b border-border/70 bg-card/70 px-3 py-1.5 flex items-center text-xs">
+        {/* Sidebar toggle — first control on the ribbon, outside the
+            scrolling list: a page-level control belongs at the page edge,
+            where it can neither scroll away nor read as a scalper setting. */}
+        <Button
+          variant={showSidebar ? 'secondary' : 'ghost'}
+          size="sm"
+          onClick={() => setShowSidebar((v) => !v)}
+          className="h-7 px-1.5 text-xs shrink-0"
+          title={showSidebar ? 'Hide side panel' : 'Show side panel'}
+          aria-label={showSidebar ? 'Hide side panel' : 'Show side panel'}
+          aria-pressed={showSidebar}
+        >
+          <PanelRight className="h-3.5 w-3.5" />
+        </Button>
+        <div className="h-4 w-px shrink-0 bg-border/60 mx-1.5" />
+        <div className="flex items-center gap-x-3 gap-y-1.5 overflow-x-auto overflow-y-visible whitespace-nowrap [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden min-w-0 flex-1">
+        <div className="flex items-center gap-1.5 shrink-0">
           <span className="font-bold text-sm tracking-tight text-foreground flex items-center gap-1">
             <Activity className="h-4 w-4 text-primary" /> Scalper
           </span>
@@ -1090,10 +1327,10 @@ export default function Scalping() {
           )}
         </div>
 
-        <div className="h-4 w-px bg-border/60" />
+        <div className="h-4 w-px shrink-0 bg-border/60" />
 
         {/* Exchange */}
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
           <span className="text-[11px] text-muted-foreground">Exch</span>
           <Select value={exchange} onValueChange={(v) => setExchange(v as ScalpingExchange)}>
             <SelectTrigger className="h-7 w-16 text-xs px-1.5">
@@ -1110,7 +1347,7 @@ export default function Scalping() {
         </div>
 
         {/* Segment */}
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
           <span className="text-[11px] text-muted-foreground">Seg</span>
           <Select value={segment} onValueChange={(v) => setSegment(v as Segment)}>
             <SelectTrigger className="h-7 w-20 text-xs px-1.5">
@@ -1129,21 +1366,29 @@ export default function Scalping() {
           </Select>
         </div>
 
-        {/* Underlying / Symbol */}
+        {/* Underlying / Symbol. The result lists are portalled popovers
+            anchored to the input: the ribbon now scrolls horizontally, and an
+            absolutely-positioned list would have been clipped by it. */}
         {isEquityExch ? (
-          <div className="relative flex items-center gap-1">
+          <div className="flex items-center gap-1 shrink-0">
             <span className="text-[11px] text-muted-foreground">Stock</span>
-            <Input
-              value={instrument ? instrument.symbol : searchQuery}
-              placeholder="Search..."
-              className="h-7 w-28 text-xs font-mono px-2"
-              onChange={(e) => {
-                setInstrument(null)
-                setSearchQuery(e.target.value)
-              }}
-            />
-            {!instrument && equityResults.length > 0 && (
-              <div className="absolute top-8 left-10 z-50 max-h-48 w-44 overflow-auto rounded border bg-popover shadow-lg text-xs">
+            <Popover open={!instrument && equityResults.length > 0}>
+              <PopoverAnchor asChild>
+                <Input
+                  value={instrument ? instrument.symbol : searchQuery}
+                  placeholder="Search..."
+                  className="h-7 w-28 text-xs font-mono px-2"
+                  onChange={(e) => {
+                    setInstrument(null)
+                    setSearchQuery(e.target.value)
+                  }}
+                />
+              </PopoverAnchor>
+              <PopoverContent
+                align="start"
+                className="w-44 max-h-48 overflow-auto p-1 text-xs"
+                onOpenAutoFocus={(e) => e.preventDefault()}
+              >
                 {equityResults.slice(0, 15).map((r) => (
                   <button
                     type="button"
@@ -1157,25 +1402,31 @@ export default function Scalping() {
                     {r.symbol}
                   </button>
                 ))}
-              </div>
-            )}
+              </PopoverContent>
+            </Popover>
           </div>
         ) : (
-          <div className="relative flex items-center gap-1">
+          <div className="flex items-center gap-1 shrink-0">
             <span className="text-[11px] text-muted-foreground">Und</span>
-            <Input
-              value={underlyingOpen ? underlyingQuery : underlying}
-              placeholder="Underlying"
-              className="h-7 w-24 text-xs font-mono font-bold px-2"
-              onFocus={() => {
-                setUnderlyingQuery('')
-                setUnderlyingOpen(true)
-              }}
-              onChange={(e) => setUnderlyingQuery(e.target.value)}
-              onBlur={() => window.setTimeout(() => setUnderlyingOpen(false), 180)}
-            />
-            {underlyingOpen && underlyingMatches.length > 0 && (
-              <div className="absolute top-8 left-8 z-50 max-h-56 w-36 overflow-auto rounded border bg-popover shadow-lg text-xs">
+            <Popover open={underlyingOpen && underlyingMatches.length > 0}>
+              <PopoverAnchor asChild>
+                <Input
+                  value={underlyingOpen ? underlyingQuery : underlying}
+                  placeholder="Underlying"
+                  className="h-7 w-24 text-xs font-mono font-bold px-2"
+                  onFocus={() => {
+                    setUnderlyingQuery('')
+                    setUnderlyingOpen(true)
+                  }}
+                  onChange={(e) => setUnderlyingQuery(e.target.value)}
+                  onBlur={() => window.setTimeout(() => setUnderlyingOpen(false), 180)}
+                />
+              </PopoverAnchor>
+              <PopoverContent
+                align="start"
+                className="w-36 max-h-56 overflow-auto p-1 text-xs"
+                onOpenAutoFocus={(e) => e.preventDefault()}
+              >
                 {underlyingMatches.map((nm) => (
                   <button
                     type="button"
@@ -1194,14 +1445,14 @@ export default function Scalping() {
                     {nm}
                   </button>
                 ))}
-              </div>
-            )}
+              </PopoverContent>
+            </Popover>
           </div>
         )}
 
         {/* Expiry */}
         {optionsMode && (
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 shrink-0">
             <span className="text-[11px] text-muted-foreground">Exp</span>
             <Select value={expiry} onValueChange={setExpiry} disabled={!underlying}>
               <SelectTrigger className="h-7 w-24 text-xs px-1.5">
@@ -1219,7 +1470,7 @@ export default function Scalping() {
         )}
 
         {/* Lots / Shares */}
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
           <span className="text-[11px] text-muted-foreground">
             {segment === 'EQUITY' ? 'Qty' : 'Lots'}
           </span>
@@ -1264,7 +1515,7 @@ export default function Scalping() {
           </SelectContent>
         </Select>
 
-        <div className="h-4 w-px bg-border/60" />
+        <div className="h-4 w-px shrink-0 bg-border/60" />
 
         {/* Auto SL & Target */}
         <div className="flex items-center gap-1.5" title="Auto Stop-Loss on Entry">
@@ -1309,114 +1560,14 @@ export default function Scalping() {
           </button>
         </div>
 
-        {/* Right side: Watchlist, Advisor, Charts, Actions */}
-        <div className="ml-auto flex items-center gap-2">
-          {/* Watchlist Quick Picker */}
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button variant="outline" size="sm" className="h-7 px-2 text-xs gap-1 border-border/80">
-                <Bookmark className="h-3.5 w-3.5 text-amber-500" />
-                <span>Watchlist</span>
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent align="end" className="w-64 p-2 text-xs">
-              <div className="font-semibold mb-1 pb-1 border-b text-[11px] flex justify-between items-center">
-                <span>Select from Watchlist</span>
-                <span className="text-[10px] text-muted-foreground">{watchlists.length} lists</span>
-              </div>
-              <div className="max-h-60 overflow-y-auto space-y-1">
-                {watchlists.flatMap((w) => w.items ?? []).length === 0 ? (
-                  <div className="text-center py-3 text-muted-foreground text-[11px]">No watchlist items</div>
-                ) : (
-                  watchlists.map((w) => (
-                    <div key={w.id} className="space-y-0.5">
-                      <div className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider px-1 pt-1">
-                        {w.name}
-                      </div>
-                      {(w.items ?? []).map((item) => (
-                        <button
-                          type="button"
-                          key={item.id}
-                          className="w-full flex items-center justify-between px-1.5 py-1 rounded hover:bg-muted text-left font-mono text-xs"
-                          onClick={() => {
-                            setSyncSymbol(`${item.exchange}:${item.symbol}`)
-                          }}
-                        >
-                          <span className="font-medium">{item.symbol}</span>
-                          <span className="text-[10px] text-muted-foreground">{item.exchange}</span>
-                        </button>
-                      ))}
-                    </div>
-                  ))
-                )}
-              </div>
-            </PopoverContent>
-          </Popover>
-
-          {/* Scalper Advisor Alerts Popover */}
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button variant="outline" size="sm" className="h-7 px-2 text-xs gap-1 border-border/80 relative">
-                <Zap className="h-3.5 w-3.5 text-sky-500" />
-                <span>Advisor</span>
-                {activeAlerts.length > 0 && (
-                  <span className="ml-0.5 rounded-full bg-sky-500 px-1 text-[9px] font-bold text-white leading-tight">
-                    {activeAlerts.length}
-                  </span>
-                )}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent align="end" className="w-72 p-2 text-xs">
-              <div className="font-semibold mb-1 pb-1 border-b text-[11px] flex justify-between items-center">
-                <span>Scalper Advisor Alerts</span>
-                <span className="text-[10px] text-muted-foreground">{activeAlerts.length} active</span>
-              </div>
-              <div className="max-h-64 overflow-y-auto space-y-1">
-                {activeAlerts.length === 0 ? (
-                  <div className="text-center py-4 text-muted-foreground text-[11px]">No active advisor alerts</div>
-                ) : (
-                  activeAlerts.map((alert) => (
-                    <button
-                      type="button"
-                      key={alert.id}
-                      className="w-full flex flex-col p-1.5 rounded border border-border/50 hover:bg-muted text-left transition-colors"
-                      onClick={() => {
-                        setSyncTarget({
-                          key: alert.key,
-                          underlying: alert.key,
-                          exchange: alert.market ? (alert.market === 'NSE' ? 'NFO' : alert.market === 'BSE' ? 'BFO' : alert.market) : 'NFO',
-                          side: alert.side,
-                          strike: alert.strike ?? 0,
-                          source: 'alert',
-                        })
-                      }}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-xs text-foreground">{alert.key}</span>
-                        <span
-                          className={cn(
-                            'px-1 py-0.2 rounded text-[9px] font-bold',
-                            alert.side === 'CE' ? 'bg-emerald-500/15 text-emerald-600' : 'bg-rose-500/15 text-rose-600'
-                          )}
-                        >
-                          BUY {alert.side} {alert.strike ? `@${alert.strike}` : ''}
-                        </span>
-                      </div>
-                      <div className="text-[10px] text-muted-foreground flex justify-between mt-0.5">
-                        <span>Premium: ₹{alert.current_premium ?? alert.entry_premium ?? '—'}</span>
-                        <span className="text-sky-600 font-semibold">Click to sync</span>
-                      </div>
-                    </button>
-                  ))
-                )}
-              </div>
-            </PopoverContent>
-          </Popover>
-
+        {/* Right side: Charts, Actions */}
+        <div className="ml-auto flex items-center gap-2 shrink-0">
           {/* Charts Toggle */}
           <div className="flex items-center gap-1.5 pl-1">
             <span className="text-[11px] text-muted-foreground">Chart</span>
             <Switch checked={showCharts} onCheckedChange={setShowCharts} className="scale-75" />
+            <span className="text-[11px] text-muted-foreground pl-1">Depth</span>
+            <Switch checked={showDepth} onCheckedChange={setShowDepth} className="scale-75" />
             {showCharts && (
               <div className="inline-flex rounded border border-border/80 p-0.5 bg-muted/40">
                 {CHART_TIMEFRAMES.map((tf) => (
@@ -1435,7 +1586,7 @@ export default function Scalping() {
             )}
           </div>
 
-          <div className="h-4 w-px bg-border/60" />
+          <div className="h-4 w-px shrink-0 bg-border/60" />
 
           {/* MTM & Net */}
           <div className="flex items-center gap-2 font-mono text-xs">
@@ -1464,15 +1615,106 @@ export default function Scalping() {
             Cancel / F7
           </Button>
         </div>
+        </div>
       </div>
 
       {/* ── Main Area: Resizable Columns & Bottom Dock ──────────────── */}
+      <div className="flex flex-1 min-h-0">
+      {/* Row-flex, like /trading's main: each panel renders its own
+          PanelShell (no height of its own) and stretch sizes it to the
+          sidebar. A column-flex here would size panels by content and
+          re-amputate long watchlists below the fold. */}
+      {apiKey && showSidebar && (
+        <aside
+          aria-label="Scalper side panel"
+          className="relative flex shrink-0 flex-row items-stretch overflow-hidden border-l bg-background"
+        >
+          {/* Widget picker: the sidebar is one surface hosting any of the
+              /trading rail panels; each panel renders its own PanelShell
+              (draggable width, shared with /trading's sidebar width). */}
+          <div className="absolute right-2 top-2 z-20">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1 border-border/80 bg-background/95 px-2 text-xs shadow-sm"
+                  title="Choose side panel widget"
+                >
+                  {SIDE_PANELS.find((p) => p.id === sidePanel)?.label ?? 'Panel'}
+                  <ChevronDown className="h-3 w-3 opacity-60" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-44">
+                {SIDE_PANELS.map((p) => (
+                  <DropdownMenuItem
+                    key={p.id}
+                    onSelect={() => setSidePanel(p.id)}
+                    className="text-xs"
+                  >
+                    <p.icon className="mr-2 h-3.5 w-3.5" />
+                    <span className="flex-1">{p.label}</span>
+                    {sidePanel === p.id && <Check className="h-3.5 w-3.5 text-primary" />}
+                  </DropdownMenuItem>
+                ))
+                }
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onSelect={() => setShowSidebar(false)}
+                  className="text-xs text-muted-foreground"
+                >
+                  Hide panel
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+          {sidePanel === 'watchlist' && (
+            <WatchlistPanel
+              apiKey={apiKey}
+              onPick={(row) => {
+                // One publisher, every subscriber: setSyncSymbol is what the
+                // /trading panes broadcast through, and the scalper already
+                // listens to it — the same pipeline, just fed from here.
+                setSyncSymbol(`${row.exchange}:${row.symbol}`)
+              }}
+              search={panelSearch}
+              activeSymbol={syncSymbolState}
+            />
+          )}
+          {sidePanel === 'options' && (
+            <OptionChainPanel
+              apiKey={apiKey}
+              onPick={(row) => setSyncSymbol(`${row.exchange}:${row.symbol}`)}
+              activeSymbol={syncSymbolState}
+            />
+          )}
+          {sidePanel === 'orderflow' && (
+            <OrderflowPanel apiKey={apiKey} activeSymbol={syncSymbolState} />
+          )}
+          {sidePanel === 'brief' && <MarketBriefPanel apiKey={apiKey} />}
+          {sidePanel === 'news' && (
+            <Suspense fallback={null}>
+              <NewsPanel apiKey={apiKey} activeSymbol={syncSymbolState} />
+            </Suspense>
+          )}
+          {sidePanel === 'calendar' && (
+            <Suspense fallback={null}>
+              <CalendarPanel apiKey={apiKey} />
+            </Suspense>
+          )}
+          {sidePanel === 'fcc' && (
+            <Suspense fallback={null}>
+              <FccAiPanel activeSymbol={syncSymbolState} />
+            </Suspense>
+          )}
+        </aside>
+      )}
       <ResizablePanelGroup
         orientation="vertical"
         id="scalper-main-layout"
         defaultLayout={verticalLayout.defaultLayout}
         onLayoutChanged={verticalLayout.onLayoutChanged}
-        className="flex-1 min-h-0 overflow-hidden"
+        className="flex-1 min-w-0 min-h-0 overflow-hidden"
       >
         {/* Upper Resizable Trading Section */}
         <ResizablePanel
@@ -1529,7 +1771,11 @@ export default function Scalping() {
 
                   {/* Chart & Market Depth (Vertically Resizable) */}
                   {showCharts ? (
-                    <ResizablePanelGroup orientation="vertical" id="col-ce-inner" className="flex-1 min-h-0 my-1">
+                    <ResizablePanelGroup orientation="vertical" id="col-ce-inner" className="flex-1 min-h-0 my-1" groupRef={ceGroupRef}
+        onLayoutChanged={(l) => {
+          if (dragSourceRef.current === 'ce') syncChartHeights('ce', l)
+        }}
+      >
                       <ResizablePanel id="col-ce-chart" defaultSize="46%" minSize="20%" className="min-h-0 flex flex-col">
                         <div className="h-full min-h-0 rounded overflow-hidden border border-border/50 bg-background/50">
                           <ScalpChart
@@ -1540,7 +1786,18 @@ export default function Scalping() {
                           />
                         </div>
                       </ResizablePanel>
-                      <ResizableHandle withHandle orientation="horizontal" className="my-0.5" />
+                      <ResizableHandle
+                        withHandle
+                        orientation="horizontal"
+                        className="my-0.5"
+                        onPointerDown={() => {
+                          dragSourceRef.current = 'ce'
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key.startsWith('Arrow')) dragSourceRef.current = 'ce'
+                        }}
+                      />
+                      {showDepth && (
                       <ResizablePanel id="col-ce-depth" defaultSize="54%" minSize="25%" className="min-h-0 flex flex-col">
                         <div className="h-full min-h-0 flex flex-col overflow-hidden">
                           <div className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider mb-0.5 px-0.5 flex justify-between shrink-0">
@@ -1558,6 +1815,7 @@ export default function Scalping() {
                           </div>
                         </div>
                       </ResizablePanel>
+                      )}
                     </ResizablePanelGroup>
                   ) : (
                     <div className="flex-1 min-h-[70px] my-1 flex flex-col overflow-hidden">
@@ -1650,7 +1908,11 @@ export default function Scalping() {
 
                   {/* Chart & Market Depth (Vertically Resizable) */}
                   {showCharts ? (
-                    <ResizablePanelGroup orientation="vertical" id="col-spot-inner" className="flex-1 min-h-0 my-1">
+                    <ResizablePanelGroup orientation="vertical" id="col-spot-inner" className="flex-1 min-h-0 my-1" groupRef={spotGroupRef}
+        onLayoutChanged={(l) => {
+          if (dragSourceRef.current === 'spot') syncChartHeights('spot', l)
+        }}
+      >
                       <ResizablePanel id="col-spot-chart" defaultSize="46%" minSize="20%" className="min-h-0 flex flex-col">
                         <div className="h-full min-h-0 rounded overflow-hidden border border-border/50 bg-background/50">
                           <ScalpChart
@@ -1661,7 +1923,18 @@ export default function Scalping() {
                           />
                         </div>
                       </ResizablePanel>
-                      <ResizableHandle withHandle orientation="horizontal" className="my-0.5" />
+                      <ResizableHandle
+                        withHandle
+                        orientation="horizontal"
+                        className="my-0.5"
+                        onPointerDown={() => {
+                          dragSourceRef.current = 'spot'
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key.startsWith('Arrow')) dragSourceRef.current = 'spot'
+                        }}
+                      />
+                      {showDepth && (
                       <ResizablePanel id="col-spot-depth" defaultSize="54%" minSize="25%" className="min-h-0 flex flex-col">
                         <div className="h-full min-h-0 flex flex-col overflow-hidden">
                           <div className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider mb-0.5 px-0.5 flex justify-between shrink-0">
@@ -1679,6 +1952,7 @@ export default function Scalping() {
                           </div>
                         </div>
                       </ResizablePanel>
+                      )}
                     </ResizablePanelGroup>
                   ) : (
                     <div className="flex-1 min-h-[70px] my-1 flex flex-col overflow-hidden">
@@ -1759,7 +2033,11 @@ export default function Scalping() {
 
                   {/* Chart & Market Depth (Vertically Resizable) */}
                   {showCharts ? (
-                    <ResizablePanelGroup orientation="vertical" id="col-pe-inner" className="flex-1 min-h-0 my-1">
+                    <ResizablePanelGroup orientation="vertical" id="col-pe-inner" className="flex-1 min-h-0 my-1" groupRef={peGroupRef}
+        onLayoutChanged={(l) => {
+          if (dragSourceRef.current === 'pe') syncChartHeights('pe', l)
+        }}
+      >
                       <ResizablePanel id="col-pe-chart" defaultSize="46%" minSize="20%" className="min-h-0 flex flex-col">
                         <div className="h-full min-h-0 rounded overflow-hidden border border-border/50 bg-background/50">
                           <ScalpChart
@@ -1770,7 +2048,18 @@ export default function Scalping() {
                           />
                         </div>
                       </ResizablePanel>
-                      <ResizableHandle withHandle orientation="horizontal" className="my-0.5" />
+                      <ResizableHandle
+                        withHandle
+                        orientation="horizontal"
+                        className="my-0.5"
+                        onPointerDown={() => {
+                          dragSourceRef.current = 'pe'
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key.startsWith('Arrow')) dragSourceRef.current = 'pe'
+                        }}
+                      />
+                      {showDepth && (
                       <ResizablePanel id="col-pe-depth" defaultSize="54%" minSize="25%" className="min-h-0 flex flex-col">
                         <div className="h-full min-h-0 flex flex-col overflow-hidden">
                           <div className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider mb-0.5 px-0.5 flex justify-between shrink-0">
@@ -1788,6 +2077,7 @@ export default function Scalping() {
                           </div>
                         </div>
                       </ResizablePanel>
+                      )}
                     </ResizablePanelGroup>
                   ) : (
                     <div className="flex-1 min-h-[70px] my-1 flex flex-col overflow-hidden">
@@ -1883,7 +2173,11 @@ export default function Scalping() {
                   </div>
 
                   {showCharts ? (
-                    <ResizablePanelGroup orientation="vertical" id="col-eq-inner" className="flex-1 min-h-0 my-1">
+                    <ResizablePanelGroup orientation="vertical" id="col-eq-inner" className="flex-1 min-h-0 my-1" groupRef={eqGroupRef}
+        onLayoutChanged={(l) => {
+          if (dragSourceRef.current === 'eq') syncChartHeights('eq', l)
+        }}
+      >
                       <ResizablePanel id="col-eq-chart" defaultSize="50%" minSize="20%" className="min-h-0 flex flex-col">
                         <div className="h-full min-h-0 rounded overflow-hidden border border-border/50">
                           <ScalpChart
@@ -1894,7 +2188,18 @@ export default function Scalping() {
                           />
                         </div>
                       </ResizablePanel>
-                      <ResizableHandle withHandle orientation="horizontal" className="my-0.5" />
+                      <ResizableHandle
+                        withHandle
+                        orientation="horizontal"
+                        className="my-0.5"
+                        onPointerDown={() => {
+                          dragSourceRef.current = 'eq'
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key.startsWith('Arrow')) dragSourceRef.current = 'eq'
+                        }}
+                      />
+                      {showDepth && (
                       <ResizablePanel id="col-eq-depth" defaultSize="50%" minSize="25%" className="min-h-0 flex flex-col">
                         <div className="h-full min-h-0 flex flex-col overflow-hidden">
                           <span className="text-[10px] font-semibold text-muted-foreground uppercase mb-0.5 shrink-0">Market Depth</span>
@@ -1903,6 +2208,7 @@ export default function Scalping() {
                           </div>
                         </div>
                       </ResizablePanel>
+                      )}
                     </ResizablePanelGroup>
                   ) : (
                     <div className="flex-1 min-h-[90px] my-1 flex flex-col overflow-hidden">
@@ -2169,6 +2475,7 @@ export default function Scalping() {
         </Tabs>
       </ResizablePanel>
     </ResizablePanelGroup>
+      </div>
 
       {/* Set SL Dialog */}
       <SetSLDialog

@@ -303,6 +303,6 @@ describe('WatchlistPanel', () => {
     await screen.findByText('RELIANCE')
 
     const grids = container.querySelectorAll('[style*="grid-template-columns"]')
-    expect((grids[0] as HTMLElement).style.gridTemplateColumns).toBe('1fr 64px 16px')
+    expect((grids[0] as HTMLElement).style.gridTemplateColumns).toBe('16px 1fr 64px 16px')
   })
 })

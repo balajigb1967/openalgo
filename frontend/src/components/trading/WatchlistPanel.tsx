@@ -260,12 +260,13 @@ function symbolTint(symbol: string): string {
   return `hsl(${Math.abs(hash) % 360} 55% 45%)`
 }
 
-/** The row and its column header share this, so the two cannot drift apart. */
 /** The row and its header share this, so the two cannot drift apart. */
 function rowGrid(columns: typeof COLUMNS): string {
-  // 1fr for the symbol, each chosen column at its own width, 16px for the
-  // remove control.
-  return `1fr ${columns.map((c) => `${c.width}px`).join(' ')} 16px`
+  // 16px for the drag handle, 1fr for the symbol, each chosen column at its
+  // own width, 16px for the remove control. The handle is a real track: as a
+  // bare auto-placed child it consumed the 1fr track and shoved the symbol
+  // into the first numeric column.
+  return `16px 1fr ${columns.map((c) => `${c.width}px`).join(' ')} 16px`
 }
 
 export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) {
@@ -316,18 +317,20 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
   /**
    * The narrowest the panel can be drawn at with these columns chosen.
    *
-   * 16px of padding, 16px for the remove control, 6px between each cell, the
-   * columns themselves, and 96px left for the symbol -- enough for a
-   * BANKNIFTY and its exchange tag. Without a floor the symbol column
-   * absorbed every column added and collapsed to two letters.
+   * 16px of padding, 16px for the drag handle, 16px for the remove control,
+   * 6px between each cell, the columns themselves, and 96px left for the
+   * symbol -- enough for a BANKNIFTY and its exchange tag. Without a floor
+   * the symbol column absorbed every column added and collapsed to two
+   * letters.
    */
   const minWidth = useMemo(
     () =>
       96 +
       16 +
       16 +
+      16 +
       shownColumns.reduce((sum, c) => sum + c.width, 0) +
-      (shownColumns.length + 1) * 6,
+      (shownColumns.length + 2) * 6,
     [shownColumns]
   )
 
@@ -1310,6 +1313,7 @@ export function WatchlistPanel({ apiKey, onPick, search, activeSymbol }: Props) 
         className="grid shrink-0 gap-x-1.5 border-b px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70"
         style={{ gridTemplateColumns: gridTemplate }}
       >
+        <span aria-hidden className="w-4" />
         <span>Symbol</span>
         {shownColumns.map((column) => (
           <span key={column.id} className="text-right">
