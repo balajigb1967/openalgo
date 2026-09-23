@@ -381,7 +381,12 @@ def _mcx_cds_option_chain(underlying, exchange, expiry_ddmmmyy, strike_count, ap
         symbol_session.query(SymToken)
         .filter(
             SymToken.exchange == exchange,
-            SymToken.name == underlying,
+            # Option rows carry verbose names ("CRUDEOIL 15 Oct 26 8600 CE"),
+            # never the bare root — name == underlying matched nothing and
+            # emptied every MCX/CDS chain. Root-prefix on the name instead:
+            # "GOLD %" cannot collide with "GOLDM %" or "GOLDGUINEA %"
+            # because the delimiter space is part of the pattern.
+            SymToken.name.like(f"{underlying} %"),
             SymToken.instrumenttype.in_(("CE", "PE")),
         )
         .all()
