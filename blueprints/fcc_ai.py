@@ -164,11 +164,14 @@ def fcc_commentary_scan_watchlist():
                     user = verify_api_key(key)
                 except Exception:
                     user = None
-        items = fcc.scan_watchlist_commentary(
+        item = fcc.scan_watchlist_commentary(
             user_id=user,
             model=body.get("model"),
             api_key=_resolve_api_key(),
         )
+        # The service returns one commentary bullet (a dict); the desktop panel
+        # and the app both read `items` as a list of bullets.
+        items = [item] if isinstance(item, dict) else list(item or [])
         return jsonify({"status": "success", "items": items, "count": len(items)})
     except Exception as e:
         logger.exception("fcc scan watchlist commentary failed")
