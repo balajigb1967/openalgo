@@ -309,6 +309,7 @@ export function ScalperGrid({
           <div
             key={cell.id}
             className="flex min-h-0 min-w-0 flex-col rounded-md border border-border/80 bg-card p-1.5"
+            style={showCharts ? { gridRow: 'span 2' } : undefined}
           >
             {/* Header */}
             <div className="flex shrink-0 items-center gap-1.5 border-b border-border/50 pb-1">

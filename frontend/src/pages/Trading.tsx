@@ -1415,7 +1415,7 @@ function TradingWorkspace({ account }: { account: string | null }) {
               </div>
             ) : isScalperLayout && apiKey ? (
               <div className="flex h-full min-h-0 flex-col gap-1 p-2">
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1">
                   <div className="flex items-center gap-1">
                     <span className="text-[11px] text-muted-foreground">Exch</span>
                     <select
