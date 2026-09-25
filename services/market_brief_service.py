@@ -44,7 +44,11 @@ _BRIEF_INFLIGHT = [False]
 _NEWS_ENRICH_TTL = 900.0
 _NEWS_ENRICH_CACHE: dict = {}
 _NEWS_ENRICH_LOCK = threading.Lock()
-_NEWS_ENRICH_BUDGET = 25.0  # seconds for the whole enrichment call
+# The FCC proxy has a large fixed latency (~50s measured) regardless of
+# model, so the call only ever runs inside the background stale-while-
+# revalidate rebuild — never in the synchronous request path. Until the
+# model answers, headlines render raw.
+_NEWS_ENRICH_BUDGET = 110.0
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -595,16 +599,17 @@ def _geopolitical_section(commodities: list) -> dict:
     }
 
 
-def _enrich_news_with_fcc(news_items: list) -> list:
+def _enrich_news_with_fcc(news_items: list, allow_call: bool = True) -> list:
     """FCC-AI summaries + impact tags for the top brief headlines.
 
     Asks the local FCC proxy for, per headline, a <=60-word trader-focused
     summary and one of BULLISH/BEARISH/NEUTRAL. Results land as ai_summary +
     impact on each item (ai_ prefix avoids colliding with the RSS summary),
     cache per headline for 15 minutes, all missing headlines go in ONE model
-    call, and the call is bounded by _NEWS_ENRICH_BUDGET. Any failure — proxy
-    down, bad JSON, timeout — leaves the headlines raw, so the widget always
-    renders.
+    call, and the call is bounded by _NEWS_ENRICH_BUDGET. allow_call=False
+    (the synchronous build path) serves only what the cache already holds so
+    a request never waits on the model; the background rebuild enriches. Any
+    failure — proxy down, bad JSON, timeout — leaves headlines raw.
     """
     if not news_items:
         return news_items
@@ -621,8 +626,9 @@ def _enrich_news_with_fcc(news_items: list) -> list:
             hit = _NEWS_ENRICH_CACHE.get(key)
             if hit and now - hit[0] < _NEWS_ENRICH_TTL:
                 fresh[key] = hit[1]
-    todo = [it for it in news_items
-            if (it.get("title") or "")[:180] not in fresh]
+    todo = ([it for it in news_items
+             if (it.get("title") or "")[:180] not in fresh]
+            if allow_call else [])
 
     if todo:
         import json as _json
@@ -672,7 +678,7 @@ def _enrich_news_with_fcc(news_items: list) -> list:
                         continue
                     key = (todo[i].get("title") or "")[:180]
                     val = {"ai_summary": summ, "impact": imp}
-                    _NEWS_ENRICH_CACHE[key] = (now, val)
+                    _NEWS_ENRICH_CACHE[key] = (time.time(), val)
                     fresh[key] = val
 
     return [{**it, **fresh[(it.get("title") or "")[:180]]}
@@ -920,7 +926,7 @@ def _summary(indices, commodities, options, news_items, geo, cues, gameplan, ses
     return "\n".join(lines)
 
 
-def _build_brief() -> dict:
+def _build_brief(skip_ai: bool = False) -> dict:
     with ThreadPoolExecutor(max_workers=6) as ex:
         f_indices = ex.submit(_watch_batch, INDEX_WATCH)
         f_commodities = ex.submit(_watch_batch, COMMODITY_WATCH)
@@ -935,7 +941,7 @@ def _build_brief() -> dict:
         events = f_events.result()
         cues = f_cues.result()
 
-    news_items = _enrich_news_with_fcc(news_items)
+    news_items = _enrich_news_with_fcc(news_items, allow_call=not skip_ai)
 
     geopolitical = _geopolitical_section(commodities)
     gameplan = _intraday_gameplan_section(indices, options)
@@ -977,6 +983,8 @@ def market_brief(refresh: bool = False) -> dict:
 
             threading.Thread(target=_rebuild, daemon=True, name="brief-swr").start()
         return cached
-    res = _build_brief()
+    # Cold/stale build: fast, cache-only enrichment (no model wait); the
+    # background rebuild enriches the fresh headlines.
+    res = _build_brief(skip_ai=True)
     _BRIEF_CACHE.update(ts=now, data=res)
     return res
