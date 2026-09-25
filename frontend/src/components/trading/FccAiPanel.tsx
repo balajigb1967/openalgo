@@ -50,8 +50,29 @@ async function fccFetch<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })
-  if (!res.ok) throw new Error(`FCC ${res.status}`)
+  if (!res.ok) {
+    // Surface the server's actual error message (e.g. why a launch was
+    // refused) instead of a bare status code.
+    let msg = `FCC ${res.status}`
+    try {
+      const body = (await res.json()) as { message?: string }
+      if (body?.message) msg = body.message
+    } catch {
+      /* keep the status-code fallback */
+    }
+    throw new Error(msg)
+  }
   return res.json() as Promise<T>
+}
+
+/** Strip ANSI escapes and node CLI warnings from streamed agent output. */
+function cleanAgentOutput(raw: string): string {
+  return raw
+    // eslint-disable-next-line no-control-regex
+    .replace(/\u001b\[[0-9;?]*[a-zA-Z]|\u001b\][^\u0007]*\u0007/g, '')
+    .split('\n')
+    .filter((line) => !/Warning:|--trace-warnings|^\(node:/.test(line))
+    .join('\n')
 }
 
 export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
@@ -72,6 +93,9 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
   // agent
   const [agentOutput, setAgentOutput] = useState('')
   const [agentRun, setAgentRun] = useState<{ id: string; status: string } | null>(null)
+  const [agentInput, setAgentInput] = useState('')
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
+  const [launching, setLaunching] = useState(false)
 
   useEffect(() => {
     fccFetch<{ connected: boolean; models: string[]; agents_available: Record<string, boolean> }>('/status')
@@ -196,26 +220,31 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
     }
   }, [])
 
-  const runAgent = useCallback(async (agent: string) => {
-    const prompt = window.prompt(`Task for fcc-${agent}`)
-    if (!prompt) return
+  const runAgent = useCallback(async (agent: string, prompt: string) => {
+    const task = prompt.trim()
+    if (!task) return
+    setLaunching(true)
     try {
       const d = await fccFetch<{ run: { run_id: string } }>('/agent', {
         method: 'POST',
-        body: JSON.stringify({ agent, prompt }),
+        body: JSON.stringify({ agent, prompt: task }),
       })
       setAgentRun({ id: d.run.run_id, status: 'running' })
       setAgentOutput('')
+      setAgentInput('')
       const es = new EventSource(`${API}/agent/${d.run.run_id}/stream`)
       es.onmessage = (ev) => {
         const f = JSON.parse(ev.data) as { status: string; output: string; error?: string }
-        setAgentOutput(f.output || '')
+        setAgentOutput(cleanAgentOutput(f.output || ''))
         setAgentRun({ id: d.run.run_id, status: f.status })
         if (f.status !== 'running') es.close()
       }
       es.onerror = () => es.close()
     } catch (e) {
-      setAgentOutput(`Launch failed: ${e}`)
+      setAgentOutput(`Launch failed: ${e instanceof Error ? e.message : String(e)}`)
+      setAgentRun(null)
+    } finally {
+      setLaunching(false)
     }
   }, [])
 
@@ -326,39 +355,79 @@ export function FccAiPanel({ activeSymbol }: { activeSymbol?: string | null }) {
       )}
 
       {tab === 'agent' && (
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-          {agents.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              No FCC agents installed on the server. Install with{' '}
-              <code className="rounded bg-accent px-1">npm i -g free-claude-code</code>.
-            </p>
-          ) : (
-            <div className="flex flex-wrap gap-1.5">
-              {agents.map((a) => (
-                <Button key={a} size="sm" variant="secondary" className="h-7 text-[11px]"
-                  disabled={agentRun?.status === 'running'} onClick={() => runAgent(a)}>
-                  fcc-{a}
-                </Button>
-              ))}
-            </div>
-          )}
-          {agentRun && (
-            <div className="mt-3">
-              <div className="mb-1 flex items-center gap-2 text-[11px] text-muted-foreground">
-                <span className={cn('h-1.5 w-1.5 rounded-full',
-                  agentRun.status === 'running' ? 'animate-pulse bg-primary' : 'bg-muted-foreground')} />
-                run {agentRun.id} · {agentRun.status}
-                {agentRun.status === 'running' && (
-                  <button type="button" className="ml-auto text-destructive hover:underline" onClick={stopAgent}>
-                    <Square className="mr-1 inline h-3 w-3" />stop
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+            {agents.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                No FCC agents installed on the server. Install with{' '}
+                <code className="rounded bg-accent px-1">npm i -g free-claude-code</code>.
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {agents.map((a) => (
+                  <button
+                    key={a}
+                    type="button"
+                    onClick={() => setSelectedAgent(a)}
+                    className={cn(
+                      'rounded-md border px-2 py-1 text-[11px] transition-colors',
+                      selectedAgent === a
+                        ? 'border-primary bg-primary/10 text-foreground'
+                        : 'border-border text-muted-foreground hover:bg-accent/60'
+                    )}
+                  >
+                    fcc-{a}
                   </button>
-                )}
+                ))}
               </div>
-              <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap rounded-md bg-accent/30 p-2 text-[11px] leading-relaxed">
-                {agentOutput || '…'}
-              </pre>
+            )}
+            {agentRun && (
+              <div className="mt-3">
+                <div className="mb-1 flex items-center gap-2 text-[11px] text-muted-foreground">
+                  <span className={cn('h-1.5 w-1.5 rounded-full',
+                    agentRun.status === 'running' ? 'animate-pulse bg-primary' : 'bg-muted-foreground')} />
+                  run {agentRun.id} · {agentRun.status}
+                  {agentRun.status === 'running' && (
+                    <button type="button" className="ml-auto text-destructive hover:underline" onClick={stopAgent}>
+                      <Square className="mr-1 inline h-3 w-3" />stop
+                    </button>
+                  )}
+                </div>
+                <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap rounded-md bg-accent/30 p-2 text-[11px] leading-relaxed">
+                  {agentOutput || '…'}
+                </pre>
+              </div>
+            )}
+          </div>
+          <div className="shrink-0 border-t border-border px-3 py-2.5">
+            <div className="flex items-center gap-2">
+              <Input
+                value={agentInput}
+                onChange={(e) => setAgentInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    if (selectedAgent && !launching && agentRun?.status !== 'running') {
+                      runAgent(selectedAgent, agentInput)
+                    }
+                  }
+                }}
+                placeholder={selectedAgent
+                  ? `Task for fcc-${selectedAgent}…`
+                  : 'Pick an agent above, then type the task…'}
+                className="h-9 text-[13px]"
+                disabled={launching || agentRun?.status === 'running'}
+              />
+              <Button
+                size="icon"
+                className="h-9 w-9 shrink-0"
+                disabled={!selectedAgent || launching || agentRun?.status === 'running' || !agentInput.trim()}
+                onClick={() => selectedAgent && runAgent(selectedAgent, agentInput)}
+              >
+                {launching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              </Button>
             </div>
-          )}
+          </div>
         </div>
       )}
 
