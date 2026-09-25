@@ -67,6 +67,8 @@ export interface ScalperGridProps {
   onOrderResult?: (ok: boolean, message?: string) => void
   /** Fires on a fill and on Set-SL, so the host can open the SL dialog. */
   onSLRequest?: (leg: SelectedLeg, side: ScalpingAction, entry: number, qty: number) => void
+  /** A synced strike (watchlist click / advisor alert) to select once the chain resolves. */
+  pendingStrike?: { side: 'CE' | 'PE'; strike: number } | null
   compact?: boolean
 }
 
@@ -104,6 +106,7 @@ export function ScalperGrid({
   onClearSL,
   onOrderResult,
   onSLRequest,
+  pendingStrike,
   compact = false,
 }: ScalperGridProps) {
   const optionsMode = segment === 'OPTIONS'
@@ -139,12 +142,24 @@ export function ScalperGrid({
   const underlyingSym = chainResp?.underlying_symbol ?? underlying
   const underlyingExch = chainResp?.underlying_exchange ?? exchange
 
+  const pendingRef = useRef<{ side: 'CE' | 'PE'; strike: number } | null>(null)
+  useEffect(() => {
+    if (pendingStrike) pendingRef.current = pendingStrike
+  }, [pendingStrike])
+
   useEffect(() => {
     if (chainResp?.atm_strike == null || chain.length === 0) return
     const strikes = new Set(chain.map((r) => String(r.strike)))
     const atm = String(chainResp.atm_strike)
     setCeStrike((prev) => (prev && strikes.has(prev) ? prev : atm))
     setPeStrike((prev) => (prev && strikes.has(prev) ? prev : atm))
+    // A synced strike wins over the ATM default (advisor alert / watchlist pick).
+    const pend = pendingRef.current
+    if (pend && strikes.has(String(pend.strike))) {
+      if (pend.side === 'CE') setCeStrike(String(pend.strike))
+      else setPeStrike(String(pend.strike))
+      pendingRef.current = null
+    }
   }, [chainResp, chain])
 
   const ceLeg = useMemo(
@@ -279,9 +294,11 @@ export function ScalperGrid({
 
   const dec = (exch?: string) => priceDecimals(exch ?? exchange)
 
+  // h-full (not flex-1): the host may be a block container (/trading's pane),
+  // where flex-1 without a flex parent collapses instead of filling.
   return (
     <div
-      className="grid min-h-0 flex-1 gap-1.5"
+      className="grid h-full min-h-0 min-w-0 gap-1.5"
       style={{
         gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
         gridTemplateRows: showCharts ? 'minmax(0, 3fr) minmax(0, 2fr)' : 'minmax(0, 1fr)',

@@ -47,7 +47,9 @@ function SelectTrigger({
 function SelectContent({
   className,
   children,
-  position = 'item-aligned',
+  // 'popper', not the Radix default 'item-aligned': in dense toolbars the
+  // aligned mode computes against the trigger box and can close immediately.
+  position = 'popper',
   align = 'center',
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Content>) {

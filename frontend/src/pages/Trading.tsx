@@ -98,7 +98,12 @@ import { useWorkspaceAutosave } from '@/hooks/useWorkspaceAutosave'
 import { useWorkspaceGridTransition } from '@/hooks/useWorkspaceGridTransition'
 import type { AgentChartCommand } from '@/lib/agent/stream'
 import { LAYOUTS, LayoutIcon } from '@/lib/chart/layouts'
-import { setSyncSymbol, subscribeSyncTarget } from '@/lib/scalperSync'
+import {
+  parseSyncSymbol,
+  setSyncSymbol,
+  subscribeSync,
+  subscribeSyncTarget,
+} from '@/lib/scalperSync'
 import { clearLog, fetchLog, type LoggedFire } from '@/lib/trading/alertLog'
 import { alertRuntimeKey, removeWorkspaceAlertRuntime } from '@/lib/trading/alertRuntime'
 import type { PreparedChartGrid } from '@/lib/trading/preparedGrid'
@@ -250,6 +255,54 @@ function TradingWorkspace({ account }: { account: string | null }) {
   const [scalperLots, setScalperLots] = useState(1)
   const [scalperChartTf, setScalperChartTf] = useState('1m')
   const isScalperLayout = layoutId === 'scalper'
+
+  // ── Symbol sync for the scalper layout ───────────────────────────────
+  // Watchlist/option-chain picks on this page publish the focused pane's
+  // symbol; when the Scalper layout is active there is no chart pane to load,
+  // so the strip follows the same bus instead. A plain symbol sets the
+  // underlying; an option symbol (NIFTY29SEP2623100CE) also selects its strike.
+  const scalperPendingRef = useRef<{ side: 'CE' | 'PE'; strike: number } | null>(null)
+  useEffect(() => {
+    if (!isScalperLayout) return
+    return subscribeSync((s) => {
+      const parsed = parseSyncSymbol(s.symbol)
+      if (!parsed.root) return
+      const exch = (s.symbol.split(':')[0] ?? '').toUpperCase()
+      const mapToScalper = (x: string): ScalperExchange | null => {
+        if (x === 'NFO') return 'NFO'
+        if (x === 'BFO') return 'BFO'
+        if (x === 'MCX' || x === 'CDS') return x as ScalperExchange
+        if (x === 'NSE') return 'NFO'
+        if (x === 'BSE') return 'BFO'
+        if (x === 'NSE_INDEX') return 'NFO'
+        if (x === 'BSE_INDEX') return 'BFO'
+        return null
+      }
+      const target = mapToScalper(exch)
+      if (!target) return // GLOBAL rows and unknown venues are not scalpable
+      setScalperExchange(target)
+      setScalperUnderlying(parsed.root.toUpperCase())
+      if (parsed.optionType && parsed.strike != null) {
+        scalperPendingRef.current = { side: parsed.optionType, strike: parsed.strike }
+      }
+    })
+  }, [isScalperLayout])
+
+  // Advisor alerts / chart-target publishes drive the strip the same way.
+  useEffect(() => {
+    if (!isScalperLayout) return
+    return subscribeSyncTarget((t) => {
+      if (!t?.underlying && !t?.key) return
+      const exch = (t.exchange || '').toUpperCase()
+      if (exch === 'MCX' || exch === 'CDS') setScalperExchange(exch as ScalperExchange)
+      else if (exch === 'BFO' || exch === 'BSE') setScalperExchange('BFO')
+      else setScalperExchange('NFO')
+      setScalperUnderlying((t.underlying || t.key).toUpperCase())
+      if (t.side && t.strike > 0) {
+        scalperPendingRef.current = { side: t.side, strike: t.strike }
+      }
+    })
+  }, [isScalperLayout])
   const [sync, setSync] = useState<SyncState>(readSync)
   /**
    * One-Click for the whole workspace. Every pane follows it, like sync: the
@@ -1465,8 +1518,8 @@ function TradingWorkspace({ account }: { account: string | null }) {
                 </a>
               </div>
             ) : isScalperLayout && apiKey ? (
-              <div className="flex h-full flex-col gap-1 p-2">
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <div className="flex h-full min-h-0 flex-col gap-1 p-2">
+                <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1">
                   <div className="flex items-center gap-1">
                     <span className="text-[11px] text-muted-foreground">Exch</span>
                     <Select
@@ -1557,6 +1610,7 @@ function TradingWorkspace({ account }: { account: string | null }) {
                   lots={scalperLots}
                   product="NRML"
                   compact
+                  pendingStrike={scalperPendingRef.current}
                 />
               </div>
             ) : apiKey && wsUrl && linkGroup ? (
@@ -1932,6 +1986,7 @@ function ScalperGridStateful(props: {
   chartTf: string
   lots: number
   product: ScalpingProduct
+  pendingStrike?: { side: 'CE' | 'PE'; strike: number } | null
   compact?: boolean
 }) {
   const appMode = useThemeStore((s) => s.appMode)
