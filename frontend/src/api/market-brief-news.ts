@@ -37,6 +37,9 @@ export interface BriefNewsItem {
   link: string
   source: string
   summary?: string
+  /** FCC-AI generated: present only when the model answered for this story. */
+  ai_summary?: string
+  impact?: 'BULLISH' | 'BEARISH' | 'NEUTRAL'
 }
 
 export interface BriefEvent {

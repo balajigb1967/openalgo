@@ -36,6 +36,16 @@ _BRIEF_TTL = 30.0
 _BRIEF_STALE = 600.0
 _BRIEF_INFLIGHT = [False]
 
+# ---------------- FCC-AI news enrichment (summaries + impact) ----------------
+# The top brief headlines get a 60-word summary and an impact call generated
+# by the FCC proxy (the same free local gateway the live commentary uses).
+# Per-headline cache (15 min) so the 30s brief refresh never re-calls the
+# model; any failure leaves the raw headline untouched.
+_NEWS_ENRICH_TTL = 900.0
+_NEWS_ENRICH_CACHE: dict = {}
+_NEWS_ENRICH_LOCK = threading.Lock()
+_NEWS_ENRICH_BUDGET = 25.0  # seconds for the whole enrichment call
+
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -585,6 +595,91 @@ def _geopolitical_section(commodities: list) -> dict:
     }
 
 
+def _enrich_news_with_fcc(news_items: list) -> list:
+    """FCC-AI summaries + impact tags for the top brief headlines.
+
+    Asks the local FCC proxy for, per headline, a <=60-word trader-focused
+    summary and one of BULLISH/BEARISH/NEUTRAL. Results land as ai_summary +
+    impact on each item (ai_ prefix avoids colliding with the RSS summary),
+    cache per headline for 15 minutes, all missing headlines go in ONE model
+    call, and the call is bounded by _NEWS_ENRICH_BUDGET. Any failure — proxy
+    down, bad JSON, timeout — leaves the headlines raw, so the widget always
+    renders.
+    """
+    if not news_items:
+        return news_items
+    try:
+        from services.fcc_ai_service import FCC_BASE_URL, FCC_AUTH_TOKEN
+    except Exception:
+        return news_items
+
+    now = time.time()
+    fresh: dict = {}
+    with _NEWS_ENRICH_LOCK:
+        for it in news_items:
+            key = (it.get("title") or "")[:180]
+            hit = _NEWS_ENRICH_CACHE.get(key)
+            if hit and now - hit[0] < _NEWS_ENRICH_TTL:
+                fresh[key] = hit[1]
+    todo = [it for it in news_items
+            if (it.get("title") or "")[:180] not in fresh]
+
+    if todo:
+        import json as _json
+        listing = "\n".join(
+            f"{i + 1}. {it.get('title', '')}" for i, it in enumerate(todo[:5]))
+        prompt = (
+            "You are a financial news desk editor for Indian market traders. "
+            "For EACH numbered headline below, write a summary of at most 60 "
+            "words focused on what it means for Indian markets today, and tag "
+            "the impact on Indian equities as one of BULLISH, BEARISH or "
+            "NEUTRAL.\n\n"
+            f"{listing}\n\n"
+            "Reply with ONLY a JSON array, one object per headline, in order: "
+            '[{"n": 1, "summary": "...", "impact": "BULLISH|BEARISH|NEUTRAL"}]'
+        )
+        body = {"model": "claude-haiku-4-20250514", "max_tokens": 1600,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False}
+        parsed = None
+        try:
+            import urllib.request as _u
+            req = _u.Request(
+                f"{FCC_BASE_URL}/v1/messages",
+                data=_json.dumps(body).encode(), method="POST")
+            req.add_header("Content-Type", "application/json")
+            if FCC_AUTH_TOKEN:
+                req.add_header("Authorization", f"Bearer {FCC_AUTH_TOKEN}")
+            with _u.urlopen(req, timeout=_NEWS_ENRICH_BUDGET) as resp:
+                raw = _json.loads(resp.read().decode("utf-8", "ignore") or "{}")
+            content = "".join(b.get("text", "") for b in (raw.get("content") or [])
+                              if b.get("type") == "text")
+            m = re.search(r"\[.*\]", content, re.DOTALL)
+            if m:
+                parsed = _json.loads(m.group(0))
+        except Exception as e:
+            log.debug("fcc news enrichment failed: %s", e)
+            parsed = None
+
+        if isinstance(parsed, list):
+            with _NEWS_ENRICH_LOCK:
+                for i, obj in enumerate(parsed):
+                    if i >= len(todo) or not isinstance(obj, dict):
+                        continue
+                    summ = str(obj.get("summary") or "").strip()
+                    imp = str(obj.get("impact") or "").strip().upper()
+                    if not summ or imp not in ("BULLISH", "BEARISH", "NEUTRAL"):
+                        continue
+                    key = (todo[i].get("title") or "")[:180]
+                    val = {"ai_summary": summ, "impact": imp}
+                    _NEWS_ENRICH_CACHE[key] = (now, val)
+                    fresh[key] = val
+
+    return [{**it, **fresh[(it.get("title") or "")[:180]]}
+            if (it.get("title") or "")[:180] in fresh else it
+            for it in news_items]
+
+
 def _events_section(limit: int = 12) -> list:
     """Economic calendar events (TradingView econ API → faireconomy mirror),
     next 2 days first."""
@@ -839,6 +934,8 @@ def _build_brief() -> dict:
         news_items = f_news.result()
         events = f_events.result()
         cues = f_cues.result()
+
+    news_items = _enrich_news_with_fcc(news_items)
 
     geopolitical = _geopolitical_section(commodities)
     gameplan = _intraday_gameplan_section(indices, options)

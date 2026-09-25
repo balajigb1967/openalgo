@@ -242,10 +242,25 @@ export function MarketBriefPanel(_props: { apiKey: string }) {
 
             {data.news?.length > 0 && (
               <Section title="Headlines">
-                {data.news.slice(0, 4).map((n, i) => (
-                  <a key={i} href={n.link} target="_blank" rel="noreferrer" className="block py-0.5 text-[10px] leading-snug text-foreground hover:text-primary hover:underline">
-                    <span className="text-muted-foreground">{n.source}: </span>{n.title}
-                  </a>
+                {data.news.slice(0, 5).map((n, i) => (
+                  <div key={i} className="border-b border-border/40 py-1 last:border-b-0">
+                    <a href={n.link} target="_blank" rel="noreferrer" className="group flex items-start justify-between gap-1.5">
+                      <span className="text-[10px] leading-snug text-foreground group-hover:text-primary group-hover:underline">
+                        <span className="text-muted-foreground">{n.source}: </span>{n.title}
+                      </span>
+                      {n.impact && (
+                        <span className={cn('shrink-0 rounded px-1 py-px text-[8px] font-bold tracking-wide',
+                          n.impact === 'BULLISH' ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                          : n.impact === 'BEARISH' ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
+                          : 'bg-muted text-muted-foreground')}>
+                          {n.impact === 'BULLISH' ? '▲' : n.impact === 'BEARISH' ? '▼' : '='} {n.impact.slice(0, 4)}
+                        </span>
+                      )}
+                    </a>
+                    {n.ai_summary && (
+                      <p className="mt-0.5 line-clamp-3 text-[9px] leading-snug text-muted-foreground">{n.ai_summary}</p>
+                    )}
+                  </div>
                 ))}
               </Section>
             )}
