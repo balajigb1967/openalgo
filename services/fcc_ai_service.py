@@ -1463,11 +1463,17 @@ def generate_commentary(symbol: str | None = None, model: str | None = None,
     try:
         from services.plugin_calendar_service import economic_calendar
         cal_res = economic_calendar()
-        c_events = cal_res.get("events") or []
+        # economic_calendar() returns {upcoming, recent}; rows carry
+        # title/date/impact/currency — not events/event/time.
+        c_events = cal_res.get("upcoming") or []
         for ce in c_events[:2]:
-            if ce.get("impact") in ("HIGH", "MEDIUM") or ce.get("event"):
-                _evt(f"CALENDAR EVENT: {ce.get('time', '')} {ce.get('currency', '')} {ce.get('event', '')} ({ce.get('impact', '')} Impact)", cooldown=3600)
-                break
+            impact = str(ce.get("impact") or "").lower()
+            title = str(ce.get("title") or "").strip()
+            if not title or impact not in ("high", "medium"):
+                continue
+            when = str(ce.get("date") or "")[:16].replace("T", " ")
+            cur = str(ce.get("currency") or "").upper()
+            _evt(f"CALENDAR EVENT: {when} {cur} {title} ({impact} impact)", cooldown=3600)
     except Exception as e:
         logger.debug("calendar event failed: %s", e)
 
