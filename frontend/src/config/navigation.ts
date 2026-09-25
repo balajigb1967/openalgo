@@ -12,6 +12,7 @@ import {
   FileStack,
   FileText,
   FlaskConical,
+  GraduationCap,
   Gauge,
   Key,
   Layers,
@@ -47,6 +48,7 @@ export const navItems: NavItem[] = [
   { href: '/strategy', label: 'Strategies', icon: Boxes },
   { href: '/logs', label: 'Logs', icon: FileBarChart },
   { href: '/tools', label: 'Tools', icon: Wrench },
+  { href: '/academy', label: 'Academy', icon: GraduationCap },
 ]
 
 // Items shown in mobile bottom navigation
