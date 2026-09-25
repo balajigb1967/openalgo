@@ -1,4 +1,4 @@
-import { Crosshair, ExternalLink, LayoutGrid, Link2 as LinkIcon } from 'lucide-react'
+import { LayoutGrid, Link2 as LinkIcon } from 'lucide-react'
 import { type ChartObjects, createLinkGroup, type LinkGroup } from 'openalgo-charts'
 import type { WorkspaceDocument, WorkspacePayload } from 'openalgo-charts/workspace'
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
@@ -16,28 +16,10 @@ const FccAiPanel = lazy(() =>
 )
 
 // Market depth panel - shows real-time liquidity data
-const MarketDepthPanelContainer = lazy(() =>
-  import('@/components/trading/MarketDepthPanelContainer').then((m) => ({ default: m.MarketDepthPanelContainer }))
-)
-const ScalperAdvisorPanel = lazy(() =>
-  import('@/components/trading/ScalperAdvisorPanel').then((m) => ({ default: m.ScalperAdvisorPanel }))
-)
-const OrderflowPanel = lazy(() =>
-  import('@/components/trading/OrderflowPanel').then((m) => ({ default: m.OrderflowPanel }))
-)
-const MarketBriefPanel = lazy(() =>
-  import('@/components/trading/MarketBriefPanel').then((m) => ({ default: m.MarketBriefPanel }))
-)
-const NewsPanel = lazy(() =>
-  import('@/components/trading/NewsPanel').then((m) => ({ default: m.NewsPanel }))
-)
-const CalendarPanel = lazy(() =>
-  import('@/components/trading/CalendarPanel').then((m) => ({ default: m.CalendarPanel }))
-)
-// Embedded scalper terminal — overlays the chart grid like a third pane.
-const ScalperTerminal = lazy(() =>
-  import('@/components/scalping/ScalperTerminal').then((m) => ({ default: m.ScalperTerminal }))
-)
+
+
+
+
 
 import { AlertsPanel } from '@/components/trading/AlertsPanel'
 import { ChartPane } from '@/components/trading/ChartPane'
@@ -76,7 +58,7 @@ import { useWorkspaceAutosave } from '@/hooks/useWorkspaceAutosave'
 import { useWorkspaceGridTransition } from '@/hooks/useWorkspaceGridTransition'
 import type { AgentChartCommand } from '@/lib/agent/stream'
 import { LAYOUTS, LayoutIcon } from '@/lib/chart/layouts'
-import { setSyncSymbol, subscribeSyncTarget } from '@/lib/scalperSync'
+import { setSyncSymbol } from '@/lib/scalperSync'
 import { clearLog, fetchLog, type LoggedFire } from '@/lib/trading/alertLog'
 import { alertRuntimeKey, removeWorkspaceAlertRuntime } from '@/lib/trading/alertRuntime'
 import type { PreparedChartGrid } from '@/lib/trading/preparedGrid'
@@ -116,8 +98,7 @@ const PANEL_KEY = 'oa-trading-panel'
  * Buy button live because storage was cleared or blocked.
  */
 const ARMED_KEY = 'oa-trading-armed'
-/** Whether the embedded scalper terminal overlays the chart grid ('1'/'0'). */
-const SCALPER_KEY = 'oa-trading-scalper-terminal'
+
 /**
  * How many firings the session log keeps.
  *
@@ -152,14 +133,6 @@ function loggedToFire(row: LoggedFire): AlertFire {
 function readArmed(): boolean {
   try {
     return localStorage.getItem(ARMED_KEY) === '1'
-  } catch {
-    return false
-  }
-}
-
-function readScalperOpen(): boolean {
-  try {
-    return localStorage.getItem(SCALPER_KEY) === '1'
   } catch {
     return false
   }
@@ -239,17 +212,6 @@ function TradingWorkspace({ account }: { account: string | null }) {
   const [apiKey, setApiKey] = useState<string | null>(null)
   const [wsUrl, setWsUrl] = useState<string | null>(null)
   const [noApiKey, setNoApiKey] = useState(false)
-
-  /* ── embedded scalper terminal (overlays the chart grid) ─────────────── */
-  const [scalperOpen, setScalperOpen] = useState<boolean>(readScalperOpen)
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(SCALPER_KEY, scalperOpen ? '1' : '0')
-    } catch {
-      // Storage refused: the toggle still works for this visit.
-    }
-  }, [scalperOpen])
 
 
   /* ── one drawing rail for every pane ─────────────────────────────────── */
@@ -585,16 +547,7 @@ function TradingWorkspace({ account }: { account: string | null }) {
     [focusedPane, panelTarget, stopWorkspaceReplay]
   )
 
-  // Advisor/chart sync: when an alert/target is published from Scalper Advisor,
-  // ensure the terminal is open AND the focused chart pane loads that symbol.
-  useEffect(() => {
-    return subscribeSyncTarget((t) => {
-      setScalperOpen(true)
-      if (t?.underlying && t?.exchange) {
-        sendToFocusedPane({ symbol: t.underlying, exchange: t.exchange })
-      }
-    })
-  }, [sendToFocusedPane])
+
 
   /**
    * Whether any pane is replaying, or picking a bar to replay from. The
@@ -1266,56 +1219,6 @@ function TradingWorkspace({ account }: { account: string | null }) {
     </label>
   )
 
-  /**
-   * Scalper, beside the pickers for the same reason: a workspace control. The
-   * button lights while the terminal is open — Escape or its ✕ closes it —
-   * and the label mirrors One-Click's dropped-below-lg convention.
-   */
-  const scalperControl = (
-    <Button
-      variant="outline"
-      size="icon"
-      className={cn('h-8 w-8 shrink-0', scalperOpen && 'border-primary/50 text-primary')}
-      title={scalperOpen ? 'Close the scalper terminal' : 'Open the scalper terminal'}
-      aria-label="Scalper terminal"
-      aria-pressed={scalperOpen}
-      onClick={() => setScalperOpen((v) => !v)}
-    >
-      <Crosshair className="h-4 w-4" />
-    </Button>
-  )
-
-  /**
-   * Pop the terminal out into its own window — same component, same keys,
-   * same websocket, so a second monitor carries the scalper while the grid
-   * keeps every pane. Deliberately `window.open` rather than an in-app
-   * dialog: the point is a separate OS window that can be moved to another
-   * screen and keeps running beside the charts.
-   */
-  const scalperPopout = (
-    <Button
-      variant="outline"
-      size="icon"
-      className="h-8 w-8 shrink-0"
-      title="Pop out the scalper terminal"
-      aria-label="Pop out the scalper terminal"
-      onClick={() => {
-        const w = window.open('/scalper', 'oa-scalper', 'width=1280,height=860')
-        // Popup blockers swallow window.open silently — tell the operator
-        // instead of leaving a button that appears to do nothing.
-        if (!w) {
-          window.alert(
-            'The browser blocked the pop-out window. Allow pop-ups for this site and try again.'
-          )
-          return
-        }
-        w.focus()
-      }}
-    >
-      <ExternalLink className="h-4 w-4" />
-    </Button>
-  )
-
   const chartIds =
     workspace.current?.geometry.panes.map((pane) => pane.id) ??
     layout.cells.map((_, index) => `p${index}`)
@@ -1359,8 +1262,6 @@ function TradingWorkspace({ account }: { account: string | null }) {
       {workspaceMenu}
       <IndicatorTemplates key={account} {...workspaceCatalog} target={panelTarget} />
       {armedControl}
-      {scalperControl}
-      {scalperPopout}
     </>
   )
 
@@ -1423,11 +1324,6 @@ function TradingWorkspace({ account }: { account: string | null }) {
           <div className="relative min-h-0 min-w-0 flex-1">
             {/* Embedded scalper terminal — floats over the grid like a study
                 pane; the charts keep streaming underneath. */}
-            {scalperOpen && apiKey && wsUrl && (
-              <Suspense fallback={null}>
-                <ScalperTerminal apiKey={apiKey} wsUrl={wsUrl} armed={armed} onClose={() => setScalperOpen(false)} />
-              </Suspense>
-            )}
             {noApiKey ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
                 <p className="text-sm text-muted-foreground">No API key found for charting.</p>
@@ -1576,16 +1472,6 @@ function TradingWorkspace({ account }: { account: string | null }) {
               activeSymbol={paneSymbols[focusedPane] ?? null}
             />
           )}
-          {apiKey && wsUrl && panel === 'depth' && (
-            <Suspense fallback={null}>
-              <MarketDepthPanelContainer
-                apiKey={apiKey}
-                wsUrl={wsUrl}
-                exchange={(paneSymbols[focusedPane] ?? '').split(':')[0] ?? ''}
-                symbol={(paneSymbols[focusedPane] ?? '').split(':')[1] ?? ''}
-              />
-            </Suspense>
-          )}
           {apiKey && wsUrl && panel === 'alerts' && (
             <AlertsPanel
               view={paneAlerts[alertsPaneId] ?? null}
@@ -1595,35 +1481,6 @@ function TradingWorkspace({ account }: { account: string | null }) {
               onClearLog={clearAlertLog}
               revision={alertRevision}
             />
-          )}
-          {apiKey && wsUrl && panel === 'scalper' && (
-            <Suspense fallback={null}>
-              <ScalperAdvisorPanel
-                apiKey={apiKey}
-                activeSymbol={paneSymbols[focusedPane] ?? null}
-                onPick={sendToFocusedPane}
-              />
-            </Suspense>
-          )}
-          {apiKey && wsUrl && panel === 'orderflow' && (
-            <Suspense fallback={null}>
-              <OrderflowPanel apiKey={apiKey} activeSymbol={paneSymbols[focusedPane] ?? null} />
-            </Suspense>
-          )}
-          {apiKey && wsUrl && panel === 'brief' && (
-            <Suspense fallback={null}>
-              <MarketBriefPanel apiKey={apiKey} />
-            </Suspense>
-          )}
-          {apiKey && wsUrl && panel === 'news' && (
-            <Suspense fallback={null}>
-              <NewsPanel apiKey={apiKey} activeSymbol={paneSymbols[focusedPane] ?? null} />
-            </Suspense>
-          )}
-          {apiKey && wsUrl && panel === 'calendar' && (
-            <Suspense fallback={null}>
-              <CalendarPanel apiKey={apiKey} />
-            </Suspense>
           )}
           {apiKey && wsUrl && panel === 'agent' && (
              <Suspense fallback={null}>

@@ -8,7 +8,7 @@
  * closes it.
  */
 
-import { Activity, Bell, Bot, CalendarDays, Crosshair, Database, FileCode2, FlaskConical, List, Newspaper, Shapes, Sparkles, Table2 } from 'lucide-react'
+import { Activity, Bell, Bot, FileCode2, FlaskConical, List, Shapes, Sparkles, Table2 } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { cn } from '@/lib/utils'
 import { RAIL_BTN, RAIL_BTN_ON, RAIL_ICON_STROKE, RailTip } from './railStyles'
@@ -39,12 +39,6 @@ const PANELS = [
   // one panel whose rows are processes on the server rather than things in
   // this tab, and they outlive it.
   { id: 'strategies', label: 'Strategies', icon: Activity },
-  { id: 'depth', label: 'Depth', icon: Database },
-  { id: 'scalper', label: 'Scalper', icon: Crosshair },
-  { id: 'orderflow', label: 'Orderflow', icon: Activity },
-  { id: 'brief', label: 'Brief', icon: Newspaper },
-  { id: 'news', label: 'News', icon: Newspaper },
-  { id: 'calendar', label: 'Calendar', icon: CalendarDays },
   { id: 'agent', label: 'Assistant', icon: Bot },
   { id: 'fcc', label: 'FCC AI', icon: Sparkles },
 ] as const
