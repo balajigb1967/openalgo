@@ -499,6 +499,7 @@ def _overnight_cues_section() -> dict:
     return {
         "sentiment": sentiment,
         "summary": " ".join(summary_parts),
+        "summary_lines": summary_parts,
         "us_close": us_list,
         "asia_morning": asia_list,
         "europe_session": eu_list,
