@@ -14,6 +14,7 @@
 #
 # The proxy is a local service; it is never exposed by the app itself.
 
+import glob
 import json
 import logging
 import math
@@ -1668,9 +1669,13 @@ def _child_env() -> dict[str, str]:
     env = dict(os.environ)
     home = os.path.expanduser("~")
     extra = [os.path.expanduser("~/.local/bin")]
+    # node CLIs installed under ~/.local/opt/nodeXX/bin (dsh, pi, grok, opencode)
+    for opt_dir in sorted(glob.glob(os.path.join(home, ".local", "opt", "node*", "bin")), reverse=True):
+        extra.append(opt_dir)
+    # nvm-managed node, if present
     nvm_bins = os.path.join(home, ".nvm", "versions", "node")
     if os.path.isdir(nvm_bins):
-        for v in sorted(os.listdir(nvm_bins)):
+        for v in sorted(os.listdir(nvm_bins), reverse=True):
             extra.append(os.path.join(nvm_bins, v, "bin"))
     seen: set[str] = set()
     parts: list[str] = []
@@ -1757,7 +1762,8 @@ def agent_status(run_id: str) -> dict:
         run = _runs.get(run_id)
         if not run:
             raise KeyError(run_id)
-        return dict(run)
+        # _proc is a live Popen — never let it reach jsonify.
+        return {k: v for k, v in run.items() if k != "_proc"}
 
 
 def list_runs(limit: int = 20) -> list[dict]:
