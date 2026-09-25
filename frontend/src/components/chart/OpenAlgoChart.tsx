@@ -578,10 +578,15 @@ export function OpenAlgoChart({
       )}
       {compactTopbar && (
         <style>{`.oac-compact-host .oac-topbar .oac-pills,
-.oac-compact-host .oac-topbar .oac-topbar__type,
+.oac-compact-host .oac-topbar__type,
 .oac-compact-host .oac-topbar__theme,
 .oac-compact-host .oac-topbar__alerts,
-.oac-compact-host .oac-topbar__objects { display: none !important; }`}</style>
+.oac-compact-host .oac-topbar__objects,
+.oac-compact-host .oac-topbar__branding,
+/* The Indicators button has no stable class of its own; the compact strip
+   supplies its own Indicators/Objects/Alerts/Settings icons, so the topbar
+   keeps only the symbol search row. */
+.oac-compact-host .oac-topbar > button { display: none !important; }`}</style>
       )}
     </div>
   )
