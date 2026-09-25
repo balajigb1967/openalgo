@@ -115,6 +115,10 @@ const EXCHANGES: ScalpingExchange[] = ['NSE', 'BSE', 'NFO', 'BFO', 'MCX', 'CDS']
 const DEFAULT_UNDERLYING: Record<string, string> = {
   NFO: 'NIFTY',
   BFO: 'SENSEX',
+  // Equity exchanges trade index options on the F&O side (NFO/BFO chains);
+  // the default follows the index family of the exchange.
+  NSE: 'NIFTY',
+  BSE: 'SENSEX',
   MCX: 'CRUDEOIL',
   CDS: 'USDINR',
 }
@@ -360,7 +364,15 @@ export default function Scalping() {
   const [exchange, setExchange] = useState<ScalpingExchange>('NFO')
   const [segment, setSegment] = useState<Segment>('OPTIONS')
   const isEquityExch = isEquityExchange(exchange)
-  const optionsMode = !isEquityExch && segment === 'OPTIONS'
+  const optionsMode = segment === 'OPTIONS'
+  /**
+   * Exchange the option chain actually resolves against. NSE/BSE have no
+   * index-derivative contracts of their own — NIFTY/SENSEX options live on
+   * NFO/BFO — so in options mode the chain queries are remapped while the
+   * Exch selector keeps showing what the user picked. The chain response's
+   * fo_exchange/underlying_exchange fields keep the legs and spot feed honest.
+   */
+  const derivExchange: ScalpingExchange = isEquityExch ? (exchange === 'BSE' ? 'BFO' : 'NFO') : exchange
 
   // Underlying & strikes
   const [underlying, setUnderlying] = useState<string>(DEFAULT_UNDERLYING.NFO)
@@ -527,13 +539,26 @@ export default function Scalping() {
     }
   }, [chartTf])
 
-  // Exchange reset
+  // Exchange reset. The segment is kept when it exists on the new exchange
+  // (Options/Futures are valid everywhere), so flipping to BSE lands straight
+  // in a working SENSEX options chain instead of an empty equity view.
+  // Underlying MUST follow the exchange: NIFTY has no contracts on MCX/BFO,
+  // so carrying it across a switch pointed the expiry/chain queries at the
+  // wrong token universe — nothing resolved and every symbol on the new
+  // exchange rendered dead CE/PE columns. Watchlist/Advisor syncs set the
+  // exchange AND underlying together; the synced pair is honored instead of
+  // being stomped back to the default (see syncedPairRef below).
+  const syncedPairRef = useRef<{ exchange: ScalpingExchange; underlying: string } | null>(null)
   useEffect(() => {
     if (isEquityExch) {
-      setSegment('EQUITY')
+      setSegment((s) => (s === 'OPTIONS' || s === 'FUTURES' || s === 'EQUITY' ? s : 'EQUITY'))
     } else {
       setSegment((s) => (s === 'OPTIONS' || s === 'FUTURES' ? s : 'OPTIONS'))
-      setUnderlying((u) => u || DEFAULT_UNDERLYING[exchange] || 'NIFTY')
+    }
+    const pair = syncedPairRef.current
+    syncedPairRef.current = null
+    if (!(pair && pair.exchange === exchange)) {
+      setUnderlying(DEFAULT_UNDERLYING[exchange] ?? 'NIFTY')
     }
     setInstrument(null)
     setSearchQuery('')
@@ -544,23 +569,32 @@ export default function Scalping() {
   }, [exchange, isEquityExch])
 
   useEffect(() => {
-    setProduct(isEquityExch ? 'MIS' : 'NRML')
-  }, [isEquityExch])
+    setProduct(segment === 'EQUITY' ? 'MIS' : 'NRML')
+  }, [segment])
+
+  // A picked underlying must never be queried against a stale expiry: clearing
+  // it lets the expiry effect auto-select the new list's first row and re-key
+  // the chain query in the same pass.
+  useEffect(() => {
+    setExpiry('')
+    setCeStrike('')
+    setPeStrike('')
+  }, [underlying])
 
   // Equity search
   const { data: eqSearchResp } = useQuery({
     queryKey: ['scalping', 'eqsearch', exchange, searchQuery],
     queryFn: () => scalpingApi.search(exchange, searchQuery),
-    enabled: isEquityExch && searchQuery.trim().length >= 2,
+    enabled: segment === 'EQUITY' && searchQuery.trim().length >= 2,
   })
   const equityResults = eqSearchResp?.data ?? []
 
   // Underlyings list
   const undInstrumentType = segment === 'FUTURES' ? 'futures' : 'options'
   const { data: allUndResp } = useQuery({
-    queryKey: ['scalping', 'allunderlyings', exchange, undInstrumentType],
-    queryFn: () => scalpingApi.getAllUnderlyings(exchange, undInstrumentType),
-    enabled: !isEquityExch,
+    queryKey: ['scalping', 'allunderlyings', derivExchange, undInstrumentType],
+    queryFn: () => scalpingApi.getAllUnderlyings(derivExchange, undInstrumentType),
+    enabled: optionsMode || segment === 'FUTURES',
     staleTime: 5 * 60 * 1000,
   })
   const allUnderlyings = allUndResp?.data ?? []
@@ -572,8 +606,8 @@ export default function Scalping() {
 
   // Expiries
   const { data: expiryResp } = useQuery({
-    queryKey: ['scalping', 'expiry', exchange, underlying],
-    queryFn: () => scalpingApi.getExpiry(underlying, exchange, 'options'),
+    queryKey: ['scalping', 'expiry', derivExchange, underlying],
+    queryFn: () => scalpingApi.getExpiry(underlying, derivExchange, 'options'),
     enabled: optionsMode && !!underlying,
   })
   const expiries = expiryResp?.data ?? []
@@ -585,30 +619,32 @@ export default function Scalping() {
 
   // Option Chain
   const { data: chainResp } = useQuery({
-    queryKey: ['scalping', 'strikes', exchange, underlying, expiry],
-    queryFn: () => scalpingApi.getStrikes(underlying, exchange, expiry, DEFAULT_STRIKE_COUNT),
+    queryKey: ['scalping', 'strikes', derivExchange, underlying, expiry],
+    queryFn: () => scalpingApi.getStrikes(underlying, derivExchange, expiry, DEFAULT_STRIKE_COUNT),
     enabled: optionsMode && !!underlying && !!expiry,
   })
   const chain = useMemo(() => chainResp?.chain ?? [], [chainResp])
-  const foExchange = chainResp?.fo_exchange ?? exchange
+  const foExchange = chainResp?.fo_exchange ?? derivExchange
   const underlyingSym = chainResp?.underlying_symbol ?? underlying
-  const underlyingExch = chainResp?.underlying_exchange ?? exchange
+  const underlyingExch = chainResp?.underlying_exchange ?? derivExchange
 
   // Futures
   const { data: futResp } = useQuery({
-    queryKey: ['scalping', 'futures', exchange, underlying],
-    queryFn: () => scalpingApi.futures(underlying, exchange),
-    enabled: !isEquityExch && segment === 'FUTURES' && !!underlying,
+    queryKey: ['scalping', 'futures', derivExchange, underlying],
+    queryFn: () => scalpingApi.futures(underlying, derivExchange),
+    enabled: segment === 'FUTURES' && !!underlying,
   })
   const futContracts = futResp?.data ?? []
 
   useEffect(() => {
-    if (isEquityExch || segment !== 'FUTURES' || futContracts.length === 0) return
+    if (segment !== 'FUTURES' || futContracts.length === 0) return
     const stillValid = instrument && futContracts.some((c) => c.symbol === instrument.symbol)
     if (stillValid) return
     const c = futContracts[0]
-    setInstrument({ symbol: c.symbol, exchange, lotsize: c.lotsize, name: underlying })
-  }, [futContracts, isEquityExch, segment, instrument, exchange, underlying])
+    // Futures contracts trade on the derivative exchange — under NSE/BSE the
+    // instrument must carry NFO/BFO, not the picked equity exchange.
+    setInstrument({ symbol: c.symbol, exchange: derivExchange, lotsize: c.lotsize, name: underlying })
+  }, [futContracts, segment, instrument, derivExchange, underlying])
 
   // ATM / Pending strike resolution
   useEffect(() => {
@@ -707,9 +743,10 @@ export default function Scalping() {
         rawSym.includes('BANKNIFTY')
       if (isIndex) {
         const derivExch = upperExch === 'BSE' ? 'BFO' : 'NFO'
+        const root = s.root || (rawSym.includes('BANK') ? 'BANKNIFTY' : rawSym.includes('SENSEX') ? 'SENSEX' : 'NIFTY')
+        syncedPairRef.current = { exchange: derivExch, underlying: root.toUpperCase() }
         setExchange(derivExch)
         setSegment('OPTIONS')
-        const root = s.root || (rawSym.includes('BANK') ? 'BANKNIFTY' : rawSym.includes('SENSEX') ? 'SENSEX' : 'NIFTY')
         setUnderlying(root)
         showSyncBanner(`Watchlist: Synced index ${root} (${derivExch})`)
         return
@@ -727,6 +764,7 @@ export default function Scalping() {
     if (s.optionType && s.strike != null && s.strike > 0) {
       setSegment('OPTIONS')
       const root = s.root || cleanRoot(rawSym)
+      syncedPairRef.current = { exchange: derivExch, underlying: root.toUpperCase() }
       setUnderlying(root)
       pendingStrikeRef.current = { side: s.optionType, strike: s.strike, underlying: root.toUpperCase() }
       setSyncSeq((n) => n + 1)
@@ -737,6 +775,7 @@ export default function Scalping() {
     if (rawSym.toUpperCase().endsWith('FUT')) {
       setSegment('FUTURES')
       const root = s.root || cleanRoot(rawSym.replace(/FUT$/i, ''))
+      syncedPairRef.current = { exchange: derivExch, underlying: root.toUpperCase() }
       setUnderlying(root)
       showSyncBanner(`Watchlist: Synced future ${rawSym}`)
       return
@@ -744,6 +783,7 @@ export default function Scalping() {
 
     setSegment('OPTIONS')
     const root = s.root || cleanRoot(rawSym)
+    syncedPairRef.current = { exchange: derivExch, underlying: root.toUpperCase() }
     setUnderlying(root)
     showSyncBanner(`Watchlist: Synced underlying ${root}`)
   }, [showSyncBanner])
@@ -754,6 +794,7 @@ export default function Scalping() {
     const exch = (['NFO', 'BFO', 'MCX', 'CDS', 'NSE', 'BSE'].includes(t.exchange?.toUpperCase())
       ? t.exchange.toUpperCase()
       : 'NFO') as ScalpingExchange
+    syncedPairRef.current = { exchange: exch, underlying: und.toUpperCase() }
     setExchange(exch)
     setSegment('OPTIONS')
     setUnderlying(und)
@@ -1354,13 +1395,14 @@ export default function Scalping() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {isEquityExch ? (
+              {/* Index options on NSE/BSE trade on NFO/BFO; the chain queries
+                  are remapped for equity exchanges (derivExchange), so Options
+                  and Futures stay available everywhere — Equity only where
+                  shares actually trade. */}
+              <SelectItem value="OPTIONS" className="text-xs">Options</SelectItem>
+              <SelectItem value="FUTURES" className="text-xs">Futures</SelectItem>
+              {isEquityExch && (
                 <SelectItem value="EQUITY" className="text-xs">Equity</SelectItem>
-              ) : (
-                <>
-                  <SelectItem value="OPTIONS" className="text-xs">Options</SelectItem>
-                  <SelectItem value="FUTURES" className="text-xs">Futures</SelectItem>
-                </>
               )}
             </SelectContent>
           </Select>
@@ -1369,7 +1411,7 @@ export default function Scalping() {
         {/* Underlying / Symbol. The result lists are portalled popovers
             anchored to the input: the ribbon now scrolls horizontally, and an
             absolutely-positioned list would have been clipped by it. */}
-        {isEquityExch ? (
+        {segment === 'EQUITY' ? (
           <div className="flex items-center gap-1 shrink-0">
             <span className="text-[11px] text-muted-foreground">Stock</span>
             <Popover open={!instrument && equityResults.length > 0}>

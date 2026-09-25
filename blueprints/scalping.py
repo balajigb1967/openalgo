@@ -389,6 +389,7 @@ def _mcx_cds_option_chain(underlying, exchange, expiry_ddmmmyy, strike_count, ap
     from database.symbol import SymToken
     from database.symbol import db_session as symbol_session
     from services.quotes_service import get_quotes
+    from sqlalchemy import or_
 
     futs = (
         symbol_session.query(SymToken)
@@ -412,12 +413,17 @@ def _mcx_cds_option_chain(underlying, exchange, expiry_ddmmmyy, strike_count, ap
         symbol_session.query(SymToken)
         .filter(
             SymToken.exchange == exchange,
-            # Option rows carry verbose names ("CRUDEOIL 15 Oct 26 8600 CE"),
-            # never the bare root — name == underlying matched nothing and
-            # emptied every MCX/CDS chain. Root-prefix on the name instead:
-            # "GOLD %" cannot collide with "GOLDM %" or "GOLDGUINEA %"
-            # because the delimiter space is part of the pattern.
-            SymToken.name.like(f"{underlying} %"),
+            # Option rows carry the bare underlying root in `name` ("SILVER")
+            # once normalize_derivative_underlyings() has run at broker login —
+            # matching it exactly is the primary path. The verbose-description
+            # fallback ("SILVER 27 Oct 26 233000 PE") covers masters that
+            # predate normalization. A bare prefix match would collide with
+            # sibling products ("GOLD" vs "GOLDM"/"GOLDGUINEA"), so the space
+            # delimiter is part of the pattern.
+            or_(
+                SymToken.name == underlying,
+                SymToken.name.like(f"{underlying} %"),
+            ),
             SymToken.instrumenttype.in_(("CE", "PE")),
         )
         .all()
