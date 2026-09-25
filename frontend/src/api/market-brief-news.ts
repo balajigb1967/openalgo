@@ -79,6 +79,11 @@ export interface MarketBriefResponse {
   overnight_cues: {
     sentiment: string
     summary: string
+    us_close: BriefQuote[]
+    asia_morning: BriefQuote[]
+    europe_session: BriefQuote[]
+    gift_nifty: BriefQuote[]
+    indian_adrs: BriefQuote[]
     global_indices: BriefQuote[]
     macro_indicators: BriefQuote[]
     institutional_flow: { fii_net?: string; dii_net?: string; date?: string; net_bias?: string }

@@ -130,6 +130,9 @@ export function MarketBriefPanel(_props: { apiKey: string }) {
                   {cues?.sentiment}
                 </span>
               </div>
+              {cues?.summary && (
+                <p className="mt-1 text-[9px] leading-snug text-muted-foreground">{cues.summary}</p>
+              )}
               <div className="mt-1 flex items-center justify-between text-[10px] tabular-nums">
                 <span className="text-muted-foreground">FII / DII ({cues?.institutional_flow?.date?.slice(0, 6) ?? '—'})</span>
                 <span className="flex gap-2">
@@ -139,6 +142,37 @@ export function MarketBriefPanel(_props: { apiKey: string }) {
               </div>
               <div className="mt-0.5 text-[9px] text-muted-foreground">{cues?.institutional_flow?.net_bias}</div>
             </Section>
+
+            {(cues?.us_close?.length ?? 0) > 0 && (
+              <Section title="US Close (Overnight)">
+                {cues!.us_close.map((q) => <QuoteRow key={q.label} q={q} />)}
+              </Section>
+            )}
+            {(cues?.asia_morning?.length ?? 0) > 0 && (
+              <Section title="Asia Morning">
+                {cues!.asia_morning.map((q) => <QuoteRow key={q.label} q={q} />)}
+              </Section>
+            )}
+            {(cues?.europe_session?.length ?? 0) > 0 && (
+              <Section title="Europe">
+                {cues!.europe_session.map((q) => <QuoteRow key={q.label} q={q} />)}
+              </Section>
+            )}
+            {(cues?.gift_nifty?.length ?? 0) > 0 && (
+              <Section title="GIFT Nifty">
+                {cues!.gift_nifty.map((q) => <QuoteRow key={q.label} q={q} />)}
+              </Section>
+            )}
+            {(cues?.indian_adrs?.length ?? 0) > 0 && (
+              <Section title="Indian ADRs">
+                {cues!.indian_adrs.map((q) => <QuoteRow key={q.label} q={q} />)}
+              </Section>
+            )}
+            {(cues?.macro_indicators?.length ?? 0) > 0 && (
+              <Section title="Macro (10Y / DXY / USDINR)">
+                {cues!.macro_indicators.map((q) => <QuoteRow key={q.label} q={q} />)}
+              </Section>
+            )}
 
             <Section title="Indices">
               {data.indices.map((q) => <QuoteRow key={q.label} q={q} />)}
