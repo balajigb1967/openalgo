@@ -164,7 +164,17 @@ export function createScalperLiveFeed(): DataFeed {
           if (bar) bars.push(bar)
         }
         bars.sort((a, b) => a.time - b.time)
-        const last = bars[bars.length - 1]
+        let last = bars[bars.length - 1]
+        // Several brokers serve no history for thinly-traded option contracts
+        // even while quotes flow. Seed the forming bar from the REST quote
+        // snapshot so the canvas paints one live candle immediately instead
+        // of an empty "no bars" panel waiting for the next bucket.
+        if (!last && d.last_quote && d.last_quote.ltp > 0) {
+          const bucket = istBucket(undefined, req.interval)
+          const seeded = applyTick(undefined, bucket, d.last_quote.ltp, undefined)
+          forming.set(keyOf(req), seeded.bar)
+          return [seeded.out]
+        }
         if (last) {
           forming.set(keyOf(req), {
             bucket: last.time,

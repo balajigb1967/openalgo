@@ -26,7 +26,7 @@
  */
 
 import type { DataFeed, DataLoadingOptions, SeriesApi } from 'openalgo-charts'
-import { createWidget, type SymbolSearch, type Widget } from 'openalgo-charts/widget'
+import { createWidget, chartTypeChoices, chartTypeLabel, intervalLabel, type SymbolSearch, type Widget } from 'openalgo-charts/widget'
 import { useEffect, useRef, useState } from 'react'
 import { ensureCalendarIntervals, ensureInterval } from '@/lib/chart/intervalRegistry'
 import { buildChartTheme, volumeColor } from '@/lib/trading/chartTheme'
@@ -185,6 +185,14 @@ export interface OpenAlgoChartProps {
    */
   mobile?: 'auto' | 'always' | 'never'
   /**
+   * Replace the engine topbar with a host-drawn icon strip: one row of icon
+   * buttons (chart type dropdown, indicators, objects, alerts, settings) plus
+   * an interval dropdown. For hosts whose cell is too narrow for the full
+   * toolbar text. The engine topbar stays mounted for its symbol input but
+   * its type/pill controls are hidden by CSS when this is on.
+   */
+  compactTopbar?: boolean
+  /**
    * IANA zone the time axis labels in.
    *
    * The engine defaults to IST, which double-shifts a feed whose bar times are
@@ -240,6 +248,7 @@ export function OpenAlgoChart({
   indicators = true,
   mobile,
   timezone,
+  compactTopbar = false,
   className,
   onSymbolChange,
   onIntervalChange,
@@ -534,9 +543,159 @@ export function OpenAlgoChart({
   // The engine tracks its own container size, so there is no ResizeObserver
   // here. It needs a box with a real height to measure, which is what the
   // absolute fill gives it inside a flex parent that has min-h-0.
+  const [compactReady, setCompactReady] = useState(0)
+  useEffect(() => {
+    if (ready) setCompactReady((n) => n + 1)
+  }, [ready])
+
   return (
-    <div className={cn('relative min-h-0 flex-1 overflow-hidden', className)}>
+    <div className={cn('relative min-h-0 flex-1 overflow-hidden', compactTopbar && 'oac-compact-host', className)}>
       <div ref={hostRef} className="absolute inset-0" />
+      {compactTopbar && compactReady > 0 && (
+        <CompactTopbarControls
+          key={compactReady}
+          widgetRef={widgetRef}
+          intervals={intervals}
+          interval={interval}
+          onInterval={(code) => {
+            const widget = widgetRef.current
+            if (!widget) return
+            attempt(
+              () => widget.setInterval(code),
+              () => latest.current.onIntervalRejected?.(code)
+            )
+          }}
+          onChartType={(id) => {
+            const widget = widgetRef.current
+            if (!widget) return
+            attempt(
+              () => widget.setChartType(id),
+              () => {}
+            )
+            latest.current.onChartTypeChange?.(id)
+          }}
+        />
+      )}
+      {compactTopbar && (
+        <style>{`.oac-compact-host .oac-topbar .oac-pills,
+.oac-compact-host .oac-topbar .oac-topbar__type,
+.oac-compact-host .oac-topbar__theme,
+.oac-compact-host .oac-topbar__alerts,
+.oac-compact-host .oac-topbar__objects { display: none !important; }`}</style>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The compact topbar's host-drawn controls: an icon strip overlaid on the
+ * engine's symbol row. Buttons call the widget API directly (the same methods
+ * the engine's own toolbar calls), so behavior is identical — only the chrome
+ * is smaller. The interval is a dropdown because pills cost horizontal space
+ * the cells do not have.
+ */
+function CompactTopbarControls({
+  widgetRef,
+  intervals,
+  interval,
+  onInterval,
+  onChartType,
+}: {
+  widgetRef: React.MutableRefObject<Widget | null>
+  intervals?: readonly string[]
+  interval: string
+  onInterval: (code: string) => void
+  onChartType: (id: string) => void
+}) {
+  const widget = widgetRef.current
+  const [types, setTypes] = useState<string[]>([])
+  const [typeOpen, setTypeOpen] = useState(false)
+  const [currentType, setCurrentType] = useState(() => widget?.chartType() ?? 'candlestick')
+
+  useEffect(() => {
+    const w = widgetRef.current
+    if (!w) return
+    let off: (() => void) | undefined
+    try {
+      off = w.on('layout', (e) => {
+        if (e.chartType) setCurrentType(e.chartType)
+      })
+    } catch {
+      /* the chart may be gone before this mounts */
+    }
+    return () => off?.()
+  }, [widgetRef])
+
+  useEffect(() => {
+    try {
+      setTypes(chartTypeChoices())
+    } catch {
+      setTypes([])
+    }
+  }, [])
+
+  if (!widget) return null
+  const btn =
+    'oac-compact-btn flex h-6 w-6 items-center justify-center rounded border border-transparent text-[11px] leading-none hover:border-border hover:bg-muted'
+
+  return (
+    <div className="absolute right-1 top-1 z-20 flex items-center gap-0.5">
+      {intervals && intervals.length > 0 && (
+        <select
+          className="h-6 rounded border border-border bg-background px-1 text-[10px] font-semibold"
+          value={interval}
+          onChange={(e) => onInterval(e.target.value)}
+          title="Interval"
+        >
+          {intervals.map((code) => (
+            <option key={code} value={code}>
+              {intervalLabel(code)}
+            </option>
+          ))}
+        </select>
+      )}
+      <div className="relative">
+        <button
+          type="button"
+          className={btn}
+          title={`Chart type: ${chartTypeLabel(currentType)}`}
+          onClick={() => setTypeOpen((v) => !v)}
+        >
+          ▤
+        </button>
+        {typeOpen && (
+          <div className="absolute right-0 top-7 z-30 min-w-32 rounded border border-border bg-background p-0.5 shadow-md">
+            {types.map((t) => (
+              <button
+                key={t}
+                type="button"
+                className={cn(
+                  'block w-full rounded px-2 py-1 text-left text-[11px] hover:bg-muted',
+                  t === currentType && 'bg-muted font-semibold'
+                )}
+                onClick={() => {
+                  onChartType(t)
+                  setTypeOpen(false)
+                }}
+              >
+                {chartTypeLabel(t)}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      <button type="button" className={btn} title="Indicators" onClick={() => widget.openIndicatorPicker()}>
+        ƒx
+      </button>
+      <button type="button" className={btn} title="Objects" onClick={() => widget.openObjects()}>
+        ☰
+      </button>
+      <button type="button" className={btn} title="Alerts" onClick={() => widget.openAlerts()}>
+        🔔
+      </button>
+      <button type="button" className={btn} title="Chart settings" onClick={() => widget.openSettings()}>
+        ⚙
+      </button>
     </div>
   )
 }

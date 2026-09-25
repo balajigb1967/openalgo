@@ -77,44 +77,66 @@ try {
 
 /** Index/stock roots that trade weekly options on the F&O exchanges. */
 const MCX_ROOTS = [
-  'CRUDEOIL',
   'CRUDEOILMINI',
-  'GOLD',
-  'GOLDM',
+  'CRUDEOILM',
+  'CRUDEOIL',
   'GOLDGUINEA',
-  'SILVER',
-  'SILVERM',
+  'GOLDPETAL',
+  'GOLDMINI',
+  'GOLDM',
+  'GOLD',
   'SILVERMIC',
-  'COPPER',
-  'ZINC',
-  'LEAD',
-  'NICKEL',
-  'ALUMINIUM',
-  'NATURALGAS',
+  'SILVERMINI',
+  'SILVERM',
+  'SILVER',
   'NATURALGASMINI',
+  'NATGASMINI',
+  'NATURALGAS',
   'MENTHAOIL',
   'COTTONCANDY',
+  'ALUMINIUM',
+  'ALUMINI',
+  'COPPER',
+  'ZINCMINI',
+  'ZINC',
+  'LEADMINI',
+  'LEAD',
+  'NICKEL',
 ]
 
 export function rootOf(symbol: string): string {
   const s = symbol.toUpperCase()
-  // Known MCX family names first — CRUDEOILMINI must not shrink to CRUDEOIL.
+  // Known MCX family names first — longest form wins, so CRUDEOILM and
+  // CRUDEOILMINI must not shrink to CRUDEOIL (the list is ordered and the
+  // search is startsWith, so the sort order above is load-bearing).
   const mcx = MCX_ROOTS.find((r) => s.startsWith(r))
   if (mcx) return mcx
-  // Weekly options append date/offset tokens to the root; peel the common ones.
-  return s.replace(/(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}.*$/, '')
+  // Weekly options append date/offset tokens to the root; peel DDMMMYY and
+  // everything after it (NIFTY29SEP26 → NIFTY). Anchored on the day digits so
+  // the month's own digits are not left behind.
+  return s.replace(/\d{0,2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}.*$/, '')
 }
+
+/**
+ * Parse an OpenAlgo option symbol: [ROOT][DDMMMYY][STRIKE][CE|PE].
+ *
+ * The expiry is load-bearing in the grammar, not decoration: without reading
+ * it, `NIFTY29SEP2623150CE` is ambiguous about where the root ends and the
+ * strike begins (a naive trailing-digit run reads root `NIFTY29SEP` and strike
+ * `2623150`). Reading DDMMMYY first splits every part exactly.
+ */
+const OPTION_SYMBOL_PATTERN = /^(.+?)(\d{2}(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2})(\d+(?:\.\d+)?)(CE|PE)$/i
 
 export function parseSyncSymbol(symbol: string): ScalperSyncState {
   const sym = symbol.split(':')[1] ?? symbol
-  const m = sym.match(/^(.+?)(\d+(?:\.\d+)?)(CE|PE)$/)
+  const m = OPTION_SYMBOL_PATTERN.exec(sym)
   if (m) {
     return {
       symbol,
       optionSymbol: sym,
       root: m[1],
-      optionType: m[3] as 'CE' | 'PE',
-      strike: Number(m[2]),
+      optionType: m[4].toUpperCase() as 'CE' | 'PE',
+      strike: Number(m[3]),
     }
   }
   return { symbol, optionSymbol: '', root: sym ? rootOf(sym) : '', optionType: null, strike: null }
