@@ -280,3 +280,81 @@ def fcc_agent_stop(run_id: str):
         return jsonify({"status": "success"})
     except KeyError:
         return jsonify({"status": "error", "message": "run not found"}), 404
+
+
+# ---------------------------------------------------------------- FCC Academy
+
+from services import fcc_education_service as edu
+
+
+@scalper_orderflow_bp.route("/fcc/education/curriculum", methods=["GET"])
+@app_key_required
+def fcc_education_curriculum():
+    """Lesson index: id, title, subtitle, minutes, live flag."""
+    return jsonify({"status": "success", **edu.get_curriculum()})
+
+
+@scalper_orderflow_bp.route("/fcc/education/lesson/<lesson_id>", methods=["GET"])
+@app_key_required
+def fcc_education_lesson(lesson_id: str):
+    """One lesson: explanation + quiz + LIVE data snapshot for the requested
+    instrument (query: symbol, exchange — defaults to NIFTY)."""
+    try:
+        return jsonify({"status": "success", **edu.get_lesson(
+            lesson_id,
+            symbol=request.args.get("symbol"),
+            exchange=request.args.get("exchange"),
+            api_key=_resolve_api_key(),
+        )})
+    except KeyError:
+        return jsonify({"status": "error", "message": "unknown lesson"}), 404
+    except Exception as e:
+        logger.exception("fcc education lesson failed")
+        return jsonify({"status": "error", "message": str(e)[:300]}), 500
+
+
+@scalper_orderflow_bp.route("/fcc/education/quiz/<lesson_id>", methods=["POST"])
+@app_key_required
+def fcc_education_quiz(lesson_id: str):
+    """Grade an attempt. Body: {answers: {"0": 1, ...}} — indices per the
+    lesson's quiz block. Records progress for signed-in users."""
+    try:
+        body = request.get_json(silent=True) or {}
+        answers = body.get("answers") or {}
+        if not isinstance(answers, dict):
+            return jsonify({"status": "error", "message": "answers must be an object"}), 400
+        return jsonify({"status": "success", **edu.grade_quiz(
+            lesson_id, answers, user_id=_username_for_key())})
+    except KeyError:
+        return jsonify({"status": "error", "message": "unknown lesson"}), 404
+    except Exception as e:
+        logger.exception("fcc education quiz failed")
+        return jsonify({"status": "error", "message": str(e)[:300]}), 500
+
+
+@scalper_orderflow_bp.route("/fcc/education/ask", methods=["POST"])
+@app_key_required
+def fcc_education_ask():
+    """Ask the tutor. Body: {question, lesson?, symbol?, exchange?} — the
+    tutor teaches with the lesson's live snapshot in context."""
+    try:
+        body = request.get_json(silent=True) or {}
+        result = edu.ask_tutor(
+            str(body.get("question") or ""),
+            lesson_id=body.get("lesson"),
+            symbol=body.get("symbol"), exchange=body.get("exchange"),
+            api_key=_resolve_api_key(),
+        )
+        return jsonify({"status": "success", **result})
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        logger.exception("fcc education tutor failed")
+        return jsonify({"status": "error", "message": str(e)[:300]}), 502
+
+
+@scalper_orderflow_bp.route("/fcc/education/progress", methods=["GET"])
+@app_key_required
+def fcc_education_progress():
+    """Per-user completion map. API-key (mobile) callers are ephemeral."""
+    return jsonify({"status": "success", **edu.get_progress(_username_for_key())})
