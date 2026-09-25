@@ -208,6 +208,12 @@ def react_dashboard():
     return serve_react_app()
 
 
+# FCC Academy — live education (React page, src/pages/Academy.tsx)
+@react_bp.route("/academy")
+def react_academy():
+    return serve_react_app()
+
+
 # Trading pages
 @react_bp.route("/positions")
 def react_positions():
