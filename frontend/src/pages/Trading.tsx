@@ -1,4 +1,5 @@
-import { LayoutGrid, Link2 as LinkIcon } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
+import { Crosshair, ExternalLink, LayoutGrid, Link2 as LinkIcon } from 'lucide-react'
 import { type ChartObjects, createLinkGroup, type LinkGroup } from 'openalgo-charts'
 import type { WorkspaceDocument, WorkspacePayload } from 'openalgo-charts/workspace'
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
@@ -16,10 +17,28 @@ const FccAiPanel = lazy(() =>
 )
 
 // Market depth panel - shows real-time liquidity data
-
-
-
-
+const MarketDepthPanelContainer = lazy(() =>
+  import('@/components/trading/MarketDepthPanelContainer').then((m) => ({ default: m.MarketDepthPanelContainer }))
+)
+const ScalperAdvisorPanel = lazy(() =>
+  import('@/components/trading/ScalperAdvisorPanel').then((m) => ({ default: m.ScalperAdvisorPanel }))
+)
+const OrderflowPanel = lazy(() =>
+  import('@/components/trading/OrderflowPanel').then((m) => ({ default: m.OrderflowPanel }))
+)
+const MarketBriefPanel = lazy(() =>
+  import('@/components/trading/MarketBriefPanel').then((m) => ({ default: m.MarketBriefPanel }))
+)
+const NewsPanel = lazy(() =>
+  import('@/components/trading/NewsPanel').then((m) => ({ default: m.NewsPanel }))
+)
+const CalendarPanel = lazy(() =>
+  import('@/components/trading/CalendarPanel').then((m) => ({ default: m.CalendarPanel }))
+)
+// Embedded scalper terminal — overlays the chart grid like a third pane.
+const ScalperTerminal = lazy(() =>
+  import('@/components/scalping/ScalperTerminal').then((m) => ({ default: m.ScalperTerminal }))
+)
 
 import { AlertsPanel } from '@/components/trading/AlertsPanel'
 import { ChartPane } from '@/components/trading/ChartPane'
@@ -52,13 +71,34 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { Input } from '@/components/ui/input'
+import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import type { ScalpingAction, ScalpingProduct, SelectedLeg } from '@/types/scalping'
+import { scalpingApi } from '@/api/scalping'
+import { useThemeStore } from '@/stores/themeStore'
 import { useChartWorkspaceCatalog } from '@/hooks/useChartWorkspaceCatalog'
+import { SetSLDialog } from '@/components/scalping/SetSLDialog'
+import {
+  SCALPER_DEFAULT_UNDERLYING,
+  SCALPER_EXCHANGES,
+  ScalperGrid,
+  type ScalperExchange,
+  type ScalperSegment,
+} from '@/components/scalping/ScalperGrid'
+import { useTrailingSL } from '@/hooks/useTrailingSL'
 import { useWorkspaceAutosave } from '@/hooks/useWorkspaceAutosave'
 import { useWorkspaceGridTransition } from '@/hooks/useWorkspaceGridTransition'
 import type { AgentChartCommand } from '@/lib/agent/stream'
 import { LAYOUTS, LayoutIcon } from '@/lib/chart/layouts'
-import { setSyncSymbol } from '@/lib/scalperSync'
+import { setSyncSymbol, subscribeSyncTarget } from '@/lib/scalperSync'
 import { clearLog, fetchLog, type LoggedFire } from '@/lib/trading/alertLog'
 import { alertRuntimeKey, removeWorkspaceAlertRuntime } from '@/lib/trading/alertRuntime'
 import type { PreparedChartGrid } from '@/lib/trading/preparedGrid'
@@ -98,7 +138,8 @@ const PANEL_KEY = 'oa-trading-panel'
  * Buy button live because storage was cleared or blocked.
  */
 const ARMED_KEY = 'oa-trading-armed'
-
+/** Whether the embedded scalper terminal overlays the chart grid ('1'/'0'). */
+const SCALPER_KEY = 'oa-trading-scalper-terminal'
 /**
  * How many firings the session log keeps.
  *
@@ -133,6 +174,14 @@ function loggedToFire(row: LoggedFire): AlertFire {
 function readArmed(): boolean {
   try {
     return localStorage.getItem(ARMED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function readScalperOpen(): boolean {
+  try {
+    return localStorage.getItem(SCALPER_KEY) === '1'
   } catch {
     return false
   }
@@ -194,6 +243,13 @@ function TradingWorkspace({ account }: { account: string | null }) {
     const saved = localStorage.getItem(LAYOUT_KEY)
     return LAYOUTS.some((l) => l.id === saved) ? (saved as string) : 'single'
   })
+  /** State for the 'scalper' layout's CE/spot/PE strip (charts + depth + orders). */
+  const [scalperExchange, setScalperExchange] = useState<ScalperExchange>('NFO')
+  const [scalperSegment, setScalperSegment] = useState<ScalperSegment>('OPTIONS')
+  const [scalperUnderlying, setScalperUnderlying] = useState('NIFTY')
+  const [scalperLots, setScalperLots] = useState(1)
+  const [scalperChartTf, setScalperChartTf] = useState('1m')
+  const isScalperLayout = layoutId === 'scalper'
   const [sync, setSync] = useState<SyncState>(readSync)
   /**
    * One-Click for the whole workspace. Every pane follows it, like sync: the
@@ -212,6 +268,17 @@ function TradingWorkspace({ account }: { account: string | null }) {
   const [apiKey, setApiKey] = useState<string | null>(null)
   const [wsUrl, setWsUrl] = useState<string | null>(null)
   const [noApiKey, setNoApiKey] = useState(false)
+
+  /* ── embedded scalper terminal (overlays the chart grid) ─────────────── */
+  const [scalperOpen, setScalperOpen] = useState<boolean>(readScalperOpen)
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SCALPER_KEY, scalperOpen ? '1' : '0')
+    } catch {
+      // Storage refused: the toggle still works for this visit.
+    }
+  }, [scalperOpen])
 
 
   /* ── one drawing rail for every pane ─────────────────────────────────── */
@@ -547,7 +614,16 @@ function TradingWorkspace({ account }: { account: string | null }) {
     [focusedPane, panelTarget, stopWorkspaceReplay]
   )
 
-
+  // Advisor/chart sync: when an alert/target is published from Scalper Advisor,
+  // ensure the terminal is open AND the focused chart pane loads that symbol.
+  useEffect(() => {
+    return subscribeSyncTarget((t) => {
+      setScalperOpen(true)
+      if (t?.underlying && t?.exchange) {
+        sendToFocusedPane({ symbol: t.underlying, exchange: t.exchange })
+      }
+    })
+  }, [sendToFocusedPane])
 
   /**
    * Whether any pane is replaying, or picking a bar to replay from. The
@@ -1219,6 +1295,56 @@ function TradingWorkspace({ account }: { account: string | null }) {
     </label>
   )
 
+  /**
+   * Scalper, beside the pickers for the same reason: a workspace control. The
+   * button lights while the terminal is open — Escape or its ✕ closes it —
+   * and the label mirrors One-Click's dropped-below-lg convention.
+   */
+  const scalperControl = (
+    <Button
+      variant="outline"
+      size="icon"
+      className={cn('h-8 w-8 shrink-0', scalperOpen && 'border-primary/50 text-primary')}
+      title={scalperOpen ? 'Close the scalper terminal' : 'Open the scalper terminal'}
+      aria-label="Scalper terminal"
+      aria-pressed={scalperOpen}
+      onClick={() => setScalperOpen((v) => !v)}
+    >
+      <Crosshair className="h-4 w-4" />
+    </Button>
+  )
+
+  /**
+   * Pop the terminal out into its own window — same component, same keys,
+   * same websocket, so a second monitor carries the scalper while the grid
+   * keeps every pane. Deliberately `window.open` rather than an in-app
+   * dialog: the point is a separate OS window that can be moved to another
+   * screen and keeps running beside the charts.
+   */
+  const scalperPopout = (
+    <Button
+      variant="outline"
+      size="icon"
+      className="h-8 w-8 shrink-0"
+      title="Pop out the scalper terminal"
+      aria-label="Pop out the scalper terminal"
+      onClick={() => {
+        const w = window.open('/scalper', 'oa-scalper', 'width=1280,height=860')
+        // Popup blockers swallow window.open silently — tell the operator
+        // instead of leaving a button that appears to do nothing.
+        if (!w) {
+          window.alert(
+            'The browser blocked the pop-out window. Allow pop-ups for this site and try again.'
+          )
+          return
+        }
+        w.focus()
+      }}
+    >
+      <ExternalLink className="h-4 w-4" />
+    </Button>
+  )
+
   const chartIds =
     workspace.current?.geometry.panes.map((pane) => pane.id) ??
     layout.cells.map((_, index) => `p${index}`)
@@ -1262,6 +1388,8 @@ function TradingWorkspace({ account }: { account: string | null }) {
       {workspaceMenu}
       <IndicatorTemplates key={account} {...workspaceCatalog} target={panelTarget} />
       {armedControl}
+      {scalperControl}
+      {scalperPopout}
     </>
   )
 
@@ -1324,12 +1452,112 @@ function TradingWorkspace({ account }: { account: string | null }) {
           <div className="relative min-h-0 min-w-0 flex-1">
             {/* Embedded scalper terminal — floats over the grid like a study
                 pane; the charts keep streaming underneath. */}
+            {scalperOpen && apiKey && wsUrl && (
+              <Suspense fallback={null}>
+                <ScalperTerminal apiKey={apiKey} wsUrl={wsUrl} armed={armed} onClose={() => setScalperOpen(false)} />
+              </Suspense>
+            )}
             {noApiKey ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
                 <p className="text-sm text-muted-foreground">No API key found for charting.</p>
                 <a href="/apikey" className="text-sm font-medium text-primary underline">
                   Generate an API key
                 </a>
+              </div>
+            ) : isScalperLayout && apiKey ? (
+              <div className="flex h-full flex-col gap-1 p-2">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <div className="flex items-center gap-1">
+                    <span className="text-[11px] text-muted-foreground">Exch</span>
+                    <Select
+                      value={scalperExchange}
+                      onValueChange={(v) => {
+                        const exch = v as ScalperExchange
+                        setScalperExchange(exch)
+                        setScalperUnderlying(SCALPER_DEFAULT_UNDERLYING[exch] ?? 'NIFTY')
+                      }}
+                    >
+                      <SelectTrigger className="h-7 w-16 px-1.5 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {SCALPER_EXCHANGES.map((x) => (
+                          <SelectItem key={x} value={x} className="text-xs">
+                            {x}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="text-[11px] text-muted-foreground">Seg</span>
+                    <Select
+                      value={scalperSegment}
+                      onValueChange={(v) => setScalperSegment(v as ScalperSegment)}
+                    >
+                      <SelectTrigger className="h-7 w-20 px-1.5 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="OPTIONS" className="text-xs">Options</SelectItem>
+                        <SelectItem value="FUTURES" className="text-xs">Futures</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="text-[11px] text-muted-foreground">Und</span>
+                    <ScalperUnderlyingPicker
+                      exchange={scalperExchange}
+                      segment={scalperSegment}
+                      value={scalperUnderlying}
+                      onChange={setScalperUnderlying}
+                    />
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="text-[11px] text-muted-foreground">Lots</span>
+                    <div className="flex items-center rounded border border-border/80 bg-background">
+                      <button
+                        type="button"
+                        className="px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted"
+                        onClick={() => setScalperLots((n) => Math.max(1, n - 1))}
+                      >
+                        −
+                      </button>
+                      <span className="w-6 text-center font-mono text-xs font-bold tabular-nums">
+                        {scalperLots}
+                      </span>
+                      <button
+                        type="button"
+                        className="px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted"
+                        onClick={() => setScalperLots((n) => Math.min(20, n + 1))}
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                  <Select value={scalperChartTf} onValueChange={setScalperChartTf}>
+                    <SelectTrigger className="h-7 w-16 px-1.5 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {['1m', '5m', '15m'].map((tf) => (
+                        <SelectItem key={tf} value={tf} className="text-xs">
+                          {tf}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <ScalperGridStateful
+                  apiKey={apiKey}
+                  exchange={scalperExchange}
+                  segment={scalperSegment}
+                  underlying={scalperUnderlying}
+                  chartTf={scalperChartTf}
+                  lots={scalperLots}
+                  product="NRML"
+                  compact
+                />
               </div>
             ) : apiKey && wsUrl && linkGroup ? (
               <div className="relative h-full">
@@ -1472,6 +1700,16 @@ function TradingWorkspace({ account }: { account: string | null }) {
               activeSymbol={paneSymbols[focusedPane] ?? null}
             />
           )}
+          {apiKey && wsUrl && panel === 'depth' && (
+            <Suspense fallback={null}>
+              <MarketDepthPanelContainer
+                apiKey={apiKey}
+                wsUrl={wsUrl}
+                exchange={(paneSymbols[focusedPane] ?? '').split(':')[0] ?? ''}
+                symbol={(paneSymbols[focusedPane] ?? '').split(':')[1] ?? ''}
+              />
+            </Suspense>
+          )}
           {apiKey && wsUrl && panel === 'alerts' && (
             <AlertsPanel
               view={paneAlerts[alertsPaneId] ?? null}
@@ -1481,6 +1719,35 @@ function TradingWorkspace({ account }: { account: string | null }) {
               onClearLog={clearAlertLog}
               revision={alertRevision}
             />
+          )}
+          {apiKey && wsUrl && panel === 'scalper' && (
+            <Suspense fallback={null}>
+              <ScalperAdvisorPanel
+                apiKey={apiKey}
+                activeSymbol={paneSymbols[focusedPane] ?? null}
+                onPick={sendToFocusedPane}
+              />
+            </Suspense>
+          )}
+          {apiKey && wsUrl && panel === 'orderflow' && (
+            <Suspense fallback={null}>
+              <OrderflowPanel apiKey={apiKey} activeSymbol={paneSymbols[focusedPane] ?? null} />
+            </Suspense>
+          )}
+          {apiKey && wsUrl && panel === 'brief' && (
+            <Suspense fallback={null}>
+              <MarketBriefPanel apiKey={apiKey} />
+            </Suspense>
+          )}
+          {apiKey && wsUrl && panel === 'news' && (
+            <Suspense fallback={null}>
+              <NewsPanel apiKey={apiKey} activeSymbol={paneSymbols[focusedPane] ?? null} />
+            </Suspense>
+          )}
+          {apiKey && wsUrl && panel === 'calendar' && (
+            <Suspense fallback={null}>
+              <CalendarPanel apiKey={apiKey} />
+            </Suspense>
           )}
           {apiKey && wsUrl && panel === 'agent' && (
              <Suspense fallback={null}>
@@ -1585,6 +1852,137 @@ function TradingWorkspace({ account }: { account: string | null }) {
           />
         )}
       </div>
+    </>
+  )
+}
+
+/** Underlying search for the scalper preset — lists every F&O root on the exchange. */
+function ScalperUnderlyingPicker({
+  exchange,
+  segment,
+  value,
+  onChange,
+}: {
+  exchange: ScalperExchange
+  segment: ScalperSegment
+  value: string
+  onChange: (v: string) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [open, setOpen] = useState(false)
+  const instrumenttype = segment === 'FUTURES' ? 'futures' : 'options'
+  const { data } = useQuery({
+    queryKey: ['scalpergrid', 'allunderlyings', exchange, instrumenttype],
+    queryFn: () => scalpingApi.getAllUnderlyings(exchange, instrumenttype),
+    staleTime: 5 * 60 * 1000,
+  })
+  const all: string[] = data?.data ?? []
+  const q = query.trim().toUpperCase()
+  const matches = (q ? all.filter((u) => u.toUpperCase().includes(q)) : all).slice(0, 100)
+  return (
+    <Popover
+      open={open && matches.length > 0}
+      onOpenChange={(o) => {
+        setOpen(o)
+        if (o) setQuery('')
+      }}
+    >
+      <PopoverAnchor asChild>
+        <Input
+          value={open ? query : value}
+          placeholder="Underlying"
+          className="h-7 w-24 px-2 font-mono text-xs font-bold"
+          onFocus={() => {
+            setQuery('')
+            setOpen(true)
+          }}
+          onChange={(e) => setQuery(e.target.value)}
+          onBlur={() => window.setTimeout(() => setOpen(false), 180)}
+        />
+      </PopoverAnchor>
+      <PopoverContent align="start" className="max-h-56 w-36 overflow-auto p-1 text-xs">
+        {matches.map((nm) => (
+          <button
+            key={nm}
+            type="button"
+            className={`block w-full px-2 py-1 text-left font-mono hover:bg-muted ${nm === value ? 'bg-muted' : ''}`}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              onChange(nm)
+              setOpen(false)
+            }}
+          >
+            {nm}
+          </button>
+        ))}
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+/**
+ * The scalper preset's grid plus its SL dialog and book wiring. Lives outside
+ * the Trading component so its hooks don't re-render the workspace on ticks.
+ */
+function ScalperGridStateful(props: {
+  apiKey: string
+  exchange: ScalperExchange
+  segment: ScalperSegment
+  underlying: string
+  chartTf: string
+  lots: number
+  product: ScalpingProduct
+  compact?: boolean
+}) {
+  const appMode = useThemeStore((s) => s.appMode)
+  const { slMap, setSL, clearSL } = useTrailingSL(appMode)
+  const [slDialog, setSlDialog] = useState<{
+    leg: SelectedLeg
+    side: ScalpingAction
+    entry: number
+    qty: number
+  } | null>(null)
+
+  return (
+    <>
+      <ScalperGrid
+        {...props}
+        armed
+        showCharts
+        slMap={slMap}
+        onSetSL={setSL}
+        onClearSL={clearSL}
+        onOrderResult={(ok, message) => {
+          if (ok) showToast.success('Order placed', 'orders')
+          else showToast.error(message ?? 'Order failed', 'orders')
+        }}
+        onSLRequest={(leg, side, entry, qty) => setSlDialog({ leg, side, entry, qty })}
+      />
+      <SetSLDialog
+        open={!!slDialog}
+        onOpenChange={(o) => {
+          if (!o) setSlDialog(null)
+        }}
+        leg={slDialog?.leg ?? null}
+        product={props.product}
+        side={slDialog?.side ?? 'BUY'}
+        entryPrice={slDialog?.entry ?? 0}
+        quantity={slDialog?.qty ?? 0}
+        ltp={slDialog?.entry}
+        existing={
+          slDialog
+            ? slMap[`${slDialog.leg.exchange}:${slDialog.leg.symbol}:${props.product}`]
+            : undefined
+        }
+        onSave={(sl) => {
+          setSL(sl)
+          setSlDialog(null)
+        }}
+        onClear={() => {
+          if (slDialog) clearSL(slDialog.leg.symbol, slDialog.leg.exchange, props.product)
+          setSlDialog(null)
+        }}
+      />
     </>
   )
 }

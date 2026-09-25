@@ -61,6 +61,7 @@ describe('RightRail', () => {
     expect(isPanelId('watchlist')).toBe(true)
     expect(isPanelId('objects')).toBe(true)
     expect(isPanelId('alerts')).toBe(true)
+    expect(isPanelId('depth')).toBe(true)
     expect(isPanelId(null)).toBe(false)
   })
 })

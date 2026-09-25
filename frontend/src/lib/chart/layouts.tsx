@@ -67,6 +67,17 @@ export const LAYOUTS: LayoutPreset[] = [
     cells: ['a', 'b', 'c', 'd', 'e', 'f'],
   },
   {
+    // Not a chart grid: one CE / spot / PE strip with matching depth and
+    // Buy/Sell controls, driven by the scalper ribbon the page renders for it.
+    // Must never be first in this list -- LAYOUTS[0] is the fallback preset.
+    id: 'scalper',
+    label: 'Scalper',
+    cols: '1fr 1fr 1fr',
+    rows: '3fr 2fr',
+    areas: '"a b c" "a b c"',
+    cells: ['a'],
+  },
+  {
     id: 'grid8',
     label: '4 × 2',
     cols: '1fr 1fr 1fr 1fr',
