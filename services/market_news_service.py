@@ -22,6 +22,11 @@ import requests
 
 log = logging.getLogger("services.market_news")
 
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
 FEEDS = [
     ("Economic Times", "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"),
     ("Mint", "https://www.livemint.com/rss/markets"),
@@ -40,11 +45,6 @@ _TV_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Referer": "https://www.tradingview.com/",
 }
-
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-)
 
 _CACHE = {"ts": 0, "data": []}
 _CACHE_TTL = 120
