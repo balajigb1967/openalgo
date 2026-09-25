@@ -1487,6 +1487,24 @@ function TradingWorkspace({ account }: { account: string | null }) {
                       </option>
                     ))}
                   </select>
+                  {/* Exit door: the regular layout picker lives inside each
+                      chart pane's toolbar, which the scalper preset replaces
+                      entirely — without this there is no way back to a chart
+                      layout once Scalper is selected. */}
+                  <div className="flex items-center gap-1">
+                    <span className="text-[11px] text-muted-foreground">Layout</span>
+                    <select
+                      className="h-7 rounded border border-border bg-background px-1.5 text-xs font-semibold"
+                      value="scalper"
+                      onChange={(e) => changeLayout(e.target.value)}
+                    >
+                      {LAYOUTS.map((l) => (
+                        <option key={l.id} value={l.id}>
+                          {l.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 <ScalperGridStateful
                   apiKey={apiKey}
