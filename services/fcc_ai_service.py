@@ -1710,7 +1710,46 @@ def _launcher_path(agent: str) -> str | None:
 
 
 def list_agents() -> dict:
-    return {a: bool(_launcher_path(a)) for a in FCC_AGENTS}
+    # freebuff is listed only when its launcher exists AND it can actually run
+    # headless — the TUI-only CLI cannot be driven by the agent runner.
+    return {a: bool(_launcher_path(a)) and a != "freebuff" for a in FCC_AGENTS}
+
+
+# Per-agent headless argv builders. Each FCC launcher wraps a different CLI
+# with its own print-mode syntax; forcing one claude-style command line onto
+# all of them broke everything except claude itself (codex needs a subcommand,
+# antigravity's -p swallows the next flag, pi/dsh reject claude's permission
+# flag, opencode v2 uses `run`). freebuff is interactive-only.
+def _agent_argv(agent: str, launcher: str, prompt: str,
+                model: str | None) -> list[str]:
+    if agent == "claude":
+        argv = [launcher, "-p", "--dangerously-skip-permissions"]
+        if model:
+            argv += ["--model", model]
+        return argv + [prompt]
+    if agent == "codex":
+        argv = [launcher, "exec", "--dangerously-bypass-approvals-and-sandbox"]
+        if model:
+            argv += ["-m", model]
+        return argv + [prompt]
+    if agent == "opencode":
+        return [launcher, "run", prompt]
+    if agent == "grok":
+        return [launcher, "-p", prompt]
+    if agent == "dsh":
+        return [launcher, "--profile", "headless", prompt]
+    if agent == "pi":
+        argv = [launcher, "--print"]
+        if model:
+            argv += ["--model", model]
+        return argv + [prompt]
+    if agent == "antigravity":
+        argv = [launcher, "--dangerously-skip-permissions", "-p"]
+        if model:
+            argv += ["--model", model]
+        return argv + [prompt]
+    # Unknown agent: claude-style as a best effort.
+    return [launcher, "-p", "--dangerously-skip-permissions", prompt]
 
 
 def agent_status(run_id: str) -> dict:
@@ -1753,6 +1792,8 @@ def run_agent(agent: str, prompt: str, cwd: str | None = None,
     launcher = _launcher_path(agent)
     if not launcher:
         raise FileNotFoundError(f"fcc-{agent} launcher not found on this machine")
+    if agent == "freebuff":
+        raise ValueError("freebuff runs interactively only and has no headless mode")
     if not prompt or not prompt.strip():
         raise ValueError("prompt is required")
 
@@ -1765,12 +1806,7 @@ def run_agent(agent: str, prompt: str, cwd: str | None = None,
             "ended_ts": None, "error": None,
         }
 
-    cmd = [launcher]
-    if agent not in ("dsh", "freebuff"):
-        cmd += ["-p", "--dangerously-skip-permissions"]
-        if model:
-            cmd += ["--model", model]
-    cmd += [prompt]
+    cmd = _agent_argv(agent, launcher, prompt, model)
 
     def _worker():
         try:
