@@ -179,6 +179,19 @@ export interface OpenAlgoChartProps {
   statusline?: boolean
   /** The top bar's Indicators button. */
   indicators?: boolean
+  /**
+   * Narrow-controls mode. 'never' keeps the full topbar in small hosts (the
+   * scalper cells); the engine default 'auto' swaps to the mobile shell there.
+   */
+  mobile?: 'auto' | 'always' | 'never'
+  /**
+   * IANA zone the time axis labels in.
+   *
+   * The engine defaults to IST, which double-shifts a feed whose bar times are
+   * already IST wall time (the scalping history route bakes UTC+5:30 in), so
+   * the scalper passes 'UTC' and the shifted epochs read as true IST wall time.
+   */
+  timezone?: string
   className?: string
   onSymbolChange?: (symbol: string, exchange: string) => void
   onIntervalChange?: (interval: string) => void
@@ -225,6 +238,8 @@ export function OpenAlgoChart({
   rail = true,
   statusline = true,
   indicators = true,
+  mobile,
+  timezone,
   className,
   onSymbolChange,
   onIntervalChange,
@@ -353,6 +368,8 @@ export function OpenAlgoChart({
         rail,
         statusline,
         indicators,
+        ...(mobile ? { mobile } : {}),
+        ...(timezone ? { timezone } : {}),
         ...(p.intervals ? { intervals: p.intervals } : {}),
         ...(p.symbolSearch ? { symbolSearch: p.symbolSearch } : {}),
         ...(persistKey ? { persist: persistKey } : {}),

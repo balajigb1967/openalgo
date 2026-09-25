@@ -61,6 +61,14 @@ export function ScalperOpenAlgoChart({
       statusline={false}
       indicators
       className="h-full"
+      // Narrow cells would trigger the engine's mobile shell (auto activates
+      // at 640px, and every scalper cell is narrower than that), which swaps
+      // the topbar for a bottom Studies/Objects/More bar. Keep the full topbar.
+      mobile="never"
+      // The scalping history route bakes IST (+5:30) into bar times, so the
+      // epochs are IST wall time; labelling them in IST again double-shifted
+      // every axis label five and a half hours late (16:02 instead of 10:32).
+      timezone="UTC"
       onIntervalChange={onIntervalChange}
       onData={(e: ChartDataEvent) => {
         // The engine draws its own "No bars" state; nothing to add here, but
