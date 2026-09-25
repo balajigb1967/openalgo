@@ -43,12 +43,12 @@ const MAX_WIDTH = 520
  */
 const SHARED_WIDTH_KEY = 'oa-trading-panel-width'
 
-function readWidth(storageKey: string, fallback: number): number {
+function readWidth(storageKey: string, fallback: number, ceiling: number): number {
   const shared = Number(localStorage.getItem(SHARED_WIDTH_KEY))
-  if (Number.isFinite(shared) && shared >= MIN_WIDTH && shared <= MAX_WIDTH) return shared
+  if (Number.isFinite(shared) && shared >= MIN_WIDTH && shared <= ceiling) return shared
   // One-time migration: adopt the widest per-panel width anyone had saved.
   const own = Number(localStorage.getItem(storageKey))
-  if (Number.isFinite(own) && own >= MIN_WIDTH && own <= MAX_WIDTH) {
+  if (Number.isFinite(own) && own >= MIN_WIDTH && own <= ceiling) {
     localStorage.setItem(SHARED_WIDTH_KEY, String(own))
     return own
   }
@@ -73,6 +73,15 @@ interface Props {
    * silently ruining the one column every row is identified by.
    */
   minWidth?: number
+  /**
+   * The widest this panel may be dragged.
+   *
+   * Raised only by a panel whose content is the thing being worked on rather
+   * than a view of the market. While a trader is writing a script the panel is
+   * the point of the page and the chart is the reference, which is the reverse
+   * of the assumption behind the shared ceiling.
+   */
+  maxWidth?: number
   children: ReactNode
 }
 
@@ -82,16 +91,18 @@ export function PanelShell({
   storageKey,
   defaultWidth = 340,
   minWidth,
+  maxWidth,
   children,
 }: Props) {
   const floor = Math.max(MIN_WIDTH, minWidth ?? 0)
-  const [width, setWidth] = useState(() => readWidth(storageKey, defaultWidth))
+  const ceiling = Math.max(floor, maxWidth ?? MAX_WIDTH)
+  const [width, setWidth] = useState(() => readWidth(storageKey, defaultWidth, ceiling))
 
   // Grow to the floor when it rises, but never shrink back: a user who
   // widened the panel and then removed a column keeps the width they chose.
   useEffect(() => {
-    setWidth((w) => (w < floor ? Math.min(MAX_WIDTH, floor) : w))
-  }, [floor])
+    setWidth((w) => (w < floor ? Math.min(ceiling, floor) : w))
+  }, [floor, ceiling])
   const [dragging, setDragging] = useState(false)
   const widthRef = useRef(width)
   widthRef.current = width
@@ -133,7 +144,7 @@ export function PanelShell({
       const onMove = (e: PointerEvent) => {
         // The panel is on the right, so dragging left makes it wider.
         const next = startWidth + (startX - e.clientX)
-        setWidth(Math.min(MAX_WIDTH, Math.max(floor, next)))
+        setWidth(Math.min(ceiling, Math.max(floor, next)))
       }
       const onUp = () => {
         setDragging(false)
@@ -157,7 +168,7 @@ export function PanelShell({
     },
     // floor: a drag started before a column change must clamp to the new
     // minimum, not the one that was live when the pointer went down.
-    [persist, floor]
+    [persist, floor, ceiling]
   )
 
   return (
@@ -178,13 +189,13 @@ export function PanelShell({
         aria-label={`Resize ${label.toLowerCase()}`}
         aria-valuenow={width}
         aria-valuemin={floor}
-        aria-valuemax={MAX_WIDTH}
+        aria-valuemax={ceiling}
         tabIndex={0}
         onPointerDown={startResize}
         onKeyDown={(e) => {
           const step = e.key === 'ArrowLeft' ? 16 : e.key === 'ArrowRight' ? -16 : 0
           if (!step) return
-          setWidth((w) => Math.min(MAX_WIDTH, Math.max(floor, w + step)))
+          setWidth((w) => Math.min(ceiling, Math.max(floor, w + step)))
           e.preventDefault()
         }}
         // Held-arrow auto-repeat fires about thirty times a second, so the

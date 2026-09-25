@@ -25,7 +25,7 @@
  * the user just set up.
  */
 
-import type { DataFeed, SeriesApi } from 'openalgo-charts'
+import type { DataFeed, DataLoadingOptions, SeriesApi } from 'openalgo-charts'
 import { createWidget, type SymbolSearch, type Widget } from 'openalgo-charts/widget'
 import { useEffect, useRef, useState } from 'react'
 import { ensureCalendarIntervals, ensureInterval } from '@/lib/chart/intervalRegistry'
@@ -200,6 +200,14 @@ export interface OpenAlgoChartProps {
   onIntervalRejected?: (interval: string) => void
   /** The live handle, for a host toolbar driving settings, indicators or objects. */
   onReady?: (widget: Widget | null) => void
+  /**
+   * Repair driven by the stream, for a host that pushes live bars into
+   * `widget.dataController` itself: a refresh after each bar closes, one when
+   * a bucket is skipped, each fetching only the tail. The history poll stays
+   * closed whatever is passed here, so a host that pushes nothing still gets a
+   * chart that never touches the network after a load.
+   */
+  loading?: Pick<DataLoadingOptions, 'refreshOnBarClose' | 'refreshOnGap' | 'refreshWindowBars'>
 }
 
 export function OpenAlgoChart({
@@ -224,6 +232,7 @@ export function OpenAlgoChart({
   onData,
   onIntervalRejected,
   onReady,
+  loading,
 }: OpenAlgoChartProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const widgetRef = useRef<Widget | null>(null)
@@ -257,6 +266,7 @@ export function OpenAlgoChart({
     onData,
     onIntervalRejected,
     onReady,
+    loading,
   })
   latest.current = {
     dataEndsAt,
@@ -272,6 +282,7 @@ export function OpenAlgoChart({
     onData,
     onIntervalRejected,
     onReady,
+    loading,
   }
 
   useEffect(() => {
@@ -282,6 +293,18 @@ export function OpenAlgoChart({
     const offs: Array<() => void> = []
 
     const build = async () => {
+      // The built-in studies live in their own tier and the widget does not
+      // pull it: on the base tier alone `registeredIndicators()` answers 0, and
+      // 102 once this import has run. Without it a host that offers an
+      // indicator picker opens an empty one on any install that happens to have
+      // no indicator modules of its own, because the loader below returns early
+      // when it finds none. Built-ins first, so a user module reusing a
+      // built-in id overrides it rather than the reverse.
+      try {
+        await import('openalgo-charts/indicators')
+      } catch {
+        // A chart without studies is still a chart.
+      }
       // User indicator modules register into the engine's global registry, so
       // this only has to succeed once per session and the loader de-duplicates
       // concurrent callers. It is documented never to throw; the guard is here
@@ -309,8 +332,10 @@ export function OpenAlgoChart({
       const widget = createWidget(host, {
         feed,
         loading: {
+          ...p.loading,
           // The controller's history-repair poll. Zero closes it, which is what
           // makes this chart genuinely static rather than quietly refreshing.
+          // After the spread on purpose: no host reopens it.
           pollIntervalMs: 0,
           // Read through the ref so a symbol change moves the horizon without
           // rebuilding the chart. See `dataEndsAt` for why both clocks matter.

@@ -206,7 +206,7 @@ function AdviceCard({
           onClick={() => onSync({ key: adv.key, market: adv.market, side: adv.side, strike: adv.strike })}
           title="Click to sync chart & squawk"
         >
-          {adv.armed && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-emerald-500" title="Monitor armed" />}
+          {adv.armed && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-emerald-500" title="Monitor on" />}
           <span className="text-[11px] font-semibold text-foreground truncate">{adv.name}</span>
           {adv.spot !== null && (
             <span className="text-[10px] text-muted-foreground tabular-nums">
@@ -377,7 +377,7 @@ function MonitorTab({ armedMap, alerts, onDisarm, onCloseAlert, onSync, onRevise
         </div>
       ))}
       {entries.length > 0 && (
-        <div className="pt-0.5 text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">Armed positions ({entries.length})</div>
+        <div className="pt-0.5 text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">Active positions ({entries.length})</div>
       )}
       {entries.map(([key, p]) => {
         const pnl = p.pnl_pct ?? 0
