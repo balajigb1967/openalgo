@@ -31,6 +31,16 @@ FEEDS = [
     ("CNBC Markets", "https://www.cnbc.com/id/10000664/device/rss/rss.html"),
 ]
 
+# TradingView's global headlines stream (no symbol filter): the same wire the
+# symbol news route uses, queried without a ticker. Fast, JSON, and updates
+# minute-by-minute with wire headlines (Reuters etc. via TradingView).
+_TV_HEADLINES_URL = "https://news-headlines.tradingview.com/v2/headlines?client=web&lang=en"
+_TV_HEADERS = {
+    "User-Agent": _UA,
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.tradingview.com/",
+}
+
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -92,12 +102,54 @@ def _parse_feed(name: str, url: str) -> list:
     return out
 
 
+def _tv_general_headlines(limit: int = 25) -> list:
+    """TradingView's global headline wire (no symbol filter), as articles."""
+    out = []
+    try:
+        r = requests.get(_TV_HEADLINES_URL, headers=_TV_HEADERS, timeout=8)
+        if r.status_code == 200:
+            for it in (r.json().get("items") or [])[:limit]:
+                title = (it.get("title") or "").strip()
+                if not title:
+                    continue
+                provider_name, provider_cat = _resolve_provider(it)
+                pub_ts = int(it.get("published", 0) or 0)
+                link = it.get("link") or (f"https://www.tradingview.com{it['storyPath']}" if it.get("storyPath") else "")
+                out.append({
+                    "id": it.get("id") or str(pub_ts),
+                    "title": title,
+                    "summary": "",
+                    "link": link or "https://www.tradingview.com/news/",
+                    "source": provider_name,
+                    "provider_key": re.sub(r"[^a-z0-9]", "", provider_name.lower()),
+                    "category": provider_cat,
+                    "published": pub_ts,
+                    "urgency": it.get("urgency", 2),
+                    "symbols": [s.get("symbol", "").upper() for s in it.get("relatedSymbols", []) if s.get("symbol")],
+                    "sentiment": sentiment_of(title, ""),
+                })
+    except Exception as e:
+        log.warning("TradingView general headlines failed: %s", e)
+    return out
+
+
 def fetch_news(limit=60, refresh=False) -> dict:
-    """All feeds merged, deduped, newest-first (cached 2 min)."""
+    """All feeds merged, deduped, newest-first (cached 2 min).
+
+    TradingView's wire headlines are merged in alongside the RSS feeds so the
+    panel (desktop and mobile, which shares these routes) gets wire-speed
+    global headlines, not just the Indian RSS cycle."""
     if not refresh and _CACHE["data"] and time.time() - _CACHE["ts"] < _CACHE_TTL:
         return {"source": "rss", "articles": _CACHE["data"][:limit]}
     articles = []
     seen = set()
+    # TradingView first: freshest wire copy wins the dedupe.
+    for a in _tv_general_headlines(25):
+        t = a["title"].lower()
+        if t in seen:
+            continue
+        seen.add(t)
+        articles.append(a)
     for name, url in FEEDS:
         try:
             for a in _parse_feed(name, url):

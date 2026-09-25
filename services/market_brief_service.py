@@ -90,10 +90,37 @@ INDEX_WATCH = [
     ("SENSEX", "BSE:SENSEX"),
 ]
 COMMODITY_WATCH = [
-    ("GOLD", "MCX:GOLD"),
-    ("SILVER", "MCX:SILVER"),
-    ("CRUDE OIL", "MCX:CRUDEOIL"),
-    ("NATURAL GAS", "MCX:NATURALGAS"),
+    ("GOLD", "MCX:GOLD1!"),
+    ("SILVER", "MCX:SILVER1!"),
+    ("CRUDE OIL", "MCX:CRUDEOIL1!"),
+    ("NATURAL GAS", "MCX:NATURALGAS1!"),
+    ("COPPER", "MCX:COPPER1!"),
+    ("BRENT", "TVC:USOIL"),
+    ("SPOT GOLD", "TVC:GOLD"),
+]
+
+# Overnight/Global section. Tickers verified against TradingView's scanner
+# from this deployment (bare TVC:DJI / bare MCX names do NOT resolve; the
+# continuous-futures and DJ: forms do).
+GLOBAL_INDICES_WATCH = [
+    ("GIFT NIFTY", "NSEIX:NIFTY1!"),
+    ("DOW JONES", "DJ:DJI"),
+    ("S&P 500", "SP:SPX"),
+    ("NASDAQ 100", "NASDAQ:NDX"),
+    ("NIKKEI 225", "TVC:NI225"),
+    ("HANG SENG", "HSI:HSI"),
+    ("DAX", "XETR:DAX"),
+    ("FTSE 100", "TVC:UKX"),
+    ("CAC 40", "TVC:CAC40"),
+]
+
+# Indian ADRs on US exchanges — overnight read on how Indian names closed in
+# New York (Infy/WIT/HDB/IBN are the liquid ones; INDY/INDA are ETFs).
+INDIAN_ADR_WATCH = [
+    ("INFOSYS ADR (INFY)", "NYSE:INFY"),
+    ("WIPRO ADR (WIT)", "NYSE:WIT"),
+    ("HDFC BANK ADR (HDB)", "NYSE:HDB"),
+    ("ICICI BANK ADR (IBN)", "NYSE:IBN"),
 ]
 
 MACRO_RATES = [
@@ -343,46 +370,118 @@ def _options_section() -> dict:
 
 # ---------------- Overnight cues / geo / events ------------------------------
 def _overnight_cues_section() -> dict:
-    us_mkts = [
-        ("GIFT NIFTY", "NSEIX:NIFTY1!"), ("DOW JONES", "TVC:DJI"),
-        ("S&P 500", "SP:SPX"), ("NASDAQ 100", "NASDAQ:NDX"),
-        ("NIKKEI 225", "TVC:NI225"), ("HANG SENG", "TVC:HSI"),
-    ]
+    """The full global picture, session-phase aware:
+
+    - how the US closed overnight (Dow/S&P/Nasdaq final prints),
+    - how Asia started this morning (Nikkei/Hang Seng),
+    - how Europe is trading during Indian market hours (Dax/FTSE/CAC),
+    - what GIFT Nifty indicates for the Indian open,
+    - how the Indian ADRs performed overnight in New York.
+
+    Every section is computed from live TradingView scans, so the numbers move
+    with the session instead of repeating a constant paragraph. US/EU indices
+    only carry their "close" when the exchange is shut; the narrative flags
+    live sessions as trading now.
+    """
+    us = [("DOW JONES", "DJ:DJI"), ("S&P 500", "SP:SPX"), ("NASDAQ 100", "NASDAQ:NDX")]
+    asia = [("NIKKEI 225", "TVC:NI225"), ("HANG SENG", "HSI:HSI")]
+    europe = [("DAX", "XETR:DAX"), ("FTSE 100", "TVC:UKX"), ("CAC 40", "TVC:CAC40")]
+    gift = [("GIFT NIFTY", "NSEIX:NIFTY1!")]
+    adrs = list(INDIAN_ADR_WATCH)
     macro_items = [
         ("US 10Y YIELD", "TVC:US10Y"), ("DOLLAR INDEX (DXY)", "TVC:DXY"),
         ("BRENT CRUDE", "TVC:USOIL"), ("SPOT GOLD", "TVC:GOLD"), ("USD / INR", "FX_IDC:USDINR"),
     ]
-    batch = _tv_batch_quotes([s for _, s in us_mkts + macro_items])
+    batch = _tv_batch_quotes(
+        [s for _, s in us + asia + europe + gift + adrs + macro_items]
+    )
 
     def _pack(pairs):
-        return [{"name": n, "symbol": s, "ltp": (batch.get(s) or {}).get("ltp"),
+        return [{"label": n, "name": (batch.get(s) or {}).get("name") or n, "symbol": s,
+                 "ltp": (batch.get(s) or {}).get("ltp"),
                  "ch": (batch.get(s) or {}).get("ch"), "chp": (batch.get(s) or {}).get("chp")}
                 for n, s in pairs]
 
-    cues_list = _pack(us_mkts)
+    us_list = _pack(us)
+    asia_list = _pack(asia)
+    eu_list = _pack(europe)
+    gift_list = _pack(gift)
+    adr_list = _pack(adrs)
     macro_list = _pack(macro_items)
     flows = _flows_section()
 
-    def _chp(name):
-        return next((c.get("chp") or 0.0 for c in cues_list if c["name"] == name), 0.0)
+    # Session phases in IST drive which narrative each region gets.
+    now_ist = datetime.now(_IST)
+    wd = now_ist.weekday()
+    ist_t = now_ist.time()
+    us_weekday = now_ist.astimezone(timezone(timedelta(hours=-5))).weekday() < 5
+    us_open = us_weekday and (dtime(9, 30) <= ist_t <= dtime(16, 0)) is False and (ist_t >= dtime(19, 0) or ist_t <= dtime(1, 30))
+    # India hours: 09:15-15:30. Europe opens 12:30 IST (CET 08:00), closes 19:30 IST.
+    india_open = wd < 5 and dtime(9, 15) <= ist_t <= dtime(15, 30)
+    europe_open = wd < 5 and dtime(12, 30) <= ist_t <= dtime(19, 30)
+    asia_open = wd < 5 and dtime(5, 30) <= ist_t <= dtime(11, 30)
 
-    gift = _chp("GIFT NIFTY")
-    pos = sum(1 for c in cues_list if (c.get("chp") or 0) > 0)
-    neg = sum(1 for c in cues_list if (c.get("chp") or 0) < 0)
-    if gift > 0.3 or pos >= 4:
+    def _avg(lst):
+        vals = [c.get("chp") for c in lst if c.get("chp") is not None]
+        return sum(vals) / len(vals) if vals else None
+
+    us_avg = _avg(us_list)
+    asia_avg = _avg(asia_list)
+    eu_avg = _avg(eu_list)
+    gift_chp = (gift_list[0].get("chp") if gift_list else None) or 0.0
+
+    def _mkt_line(label, lst, live, closed_text, live_text):
+        vals = [c for c in lst if c.get("chp") is not None]
+        if not vals:
+            return f"{label}: quotes unavailable right now."
+        parts = [f"{c['name']} {c['ltp']:,.1f} ({c['chp']:+.2f}%)" for c in vals]
+        return f"{label} ({live_text if live else closed_text}): " + ", ".join(parts) + "."
+
+    us_line = _mkt_line("🇺🇸 US CLOSE (overnight)", us_list, us_open, "final prints", "trading now")
+    asia_line = _mkt_line("🌏 ASIA MORNING", asia_list, asia_open, "latest prints", "trading now")
+    if not europe_open:
+        eu_line = "🇪🇺 EUROPE: markets shut — opens 12:30 IST; US close and GIFT Nifty are the guide until then."
+    else:
+        eu_line = _mkt_line("🇪🇺 EUROPE (trading now)", eu_list, True, "", "session underway")
+
+    gift_narr = (
+        f"GIFT Nifty ({gift_chp:+.2f}%) " + (
+            "points to a firm positive open for Indian bourses." if gift_chp > 0.25
+            else "signals a soft/negative open for Indian bourses." if gift_chp < -0.25
+            else "indicates a flat-to-range open for Indian bourses."
+        )
+    )
+    adr_vals = [c for c in adr_list if c.get("chp") is not None]
+    if adr_vals:
+        adr_best = max(adr_vals, key=lambda c: c["chp"])
+        adr_worst = min(adr_vals, key=lambda c: c["chp"])
+        adr_line = ("🇮🇳 INDIAN ADRs (overnight NY): "
+                    + ", ".join(f"{c['name'].split(' ADR')[0]} {c['chp']:+.2f}%" for c in adr_vals)
+                    + f". Best: {adr_best['name'].split(' ADR')[0]} ({adr_best['chp']:+.2f}%), "
+                    + f"weakest: {adr_worst['name'].split(' ADR')[0]} ({adr_worst['chp']:+.2f}%).")
+    else:
+        adr_line = "🇮🇳 INDIAN ADRs: overnight quotes unavailable."
+
+    summary_parts = [us_line, asia_line, eu_line, adr_line, gift_narr]
+
+    pos = sum(1 for c in us_list + asia_list if (c.get("chp") or 0) > 0)
+    neg = sum(1 for c in us_list + asia_list if (c.get("chp") or 0) < 0)
+    if gift_chp > 0.3 or (us_avg or 0) > 0.4:
         sentiment = "BULLISH 🟢"
-        tone = f"GIFT Nifty ({'+' if gift > 0 else ''}{gift:.2f}%) indicates strong opening momentum for Indian bourses."
-    elif gift < -0.3 or neg >= 4:
+    elif gift_chp < -0.3 or (us_avg or 0) < -0.4:
         sentiment = "BEARISH 🔴"
-        tone = f"GIFT Nifty ({gift:.2f}%) signals soft opening pressure amidst global headwinds."
     else:
         sentiment = "RANGEBOUND / MIXED ⚖️"
-        tone = f"GIFT Nifty ({'+' if gift > 0 else ''}{gift:.2f}%) signals a steady opening for Indian bourses."
 
     return {
         "sentiment": sentiment,
-        "summary": f"Global markets trade with a {sentiment.lower()} tone. {tone}",
-        "global_indices": cues_list,
+        "summary": " ".join(summary_parts),
+        "us_close": us_list,
+        "asia_morning": asia_list,
+        "europe_session": eu_list,
+        "gift_nifty": gift_list,
+        "indian_adrs": adr_list,
+        "global_indices": _pack(GLOBAL_INDICES_WATCH),
         "macro_indicators": macro_list,
         "institutional_flow": {
             "fii_net": flows.get("fii_net"), "dii_net": flows.get("dii_net"),
@@ -665,7 +764,16 @@ def _summary(indices, commodities, options, news_items, geo, cues, gameplan, ses
     if cues and cues.get("sentiment"):
         lines += ["🌍 **OVERNIGHT GLOBAL CUES & MACRO TONE**",
                   f"• **Sentiment**: {cues.get('sentiment')} — {cues.get('summary', '')}",
-                  f"• **Institutional Flows**: FII Net {cues.get('institutional_flow', {}).get('fii_net', '--')} · DII Net {cues.get('institutional_flow', {}).get('dii_net', '--')}", ""]
+                  f"• **Institutional Flows**: FII Net {cues.get('institutional_flow', {}).get('fii_net', '--')} · DII Net {cues.get('institutional_flow', {}).get('dii_net', '--')}",
+                  ""]
+        for sec, title in (("us_close", "US close (overnight)"), ("asia_morning", "Asia morning"),
+                           ("europe_session", "Europe"), ("indian_adrs", "Indian ADRs (overnight)"),
+                           ("gift_nifty", "GIFT Nifty")):
+            rows = cues.get(sec) or []
+            if rows:
+                lines.append(f"**{title}**")
+                lines += [_line(q) for q in rows]
+                lines.append("")
     lines.append("**INDICES**")
     lines += [_line(q) for q in indices]
     lines += ["", "**COMMODITIES**"]

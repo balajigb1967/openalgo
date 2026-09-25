@@ -145,11 +145,27 @@ def fcc_commentary_auto_status():
 @scalper_orderflow_bp.route("/fcc/commentary/scan-watchlist", methods=["POST"])
 @app_key_required
 def fcc_commentary_scan_watchlist():
-    """Scan and synthesize trading ideas across all watchlist symbols."""
+    """Scan and synthesize trading ideas across all watchlist symbols.
+
+    The watchlist is always resolved server-side: from the browser session for
+    the desktop client, or (for the app, which authenticates by API key) from
+    the user that key belongs to. A client-supplied symbol list is not an
+    input — the previous forwarding of `watchlist_symbols` into the service
+    raised TypeError (500, surfaced as "FCC-AI scan failed") and allowed a
+    caller to scan symbols not on any watchlist."""
     try:
         body = request.get_json(silent=True) or {}
+        user = flask_session.get("user")
+        if not user:
+            key = request.headers.get("X-API-KEY") or request.args.get("apikey")
+            if key:
+                try:
+                    from database.auth_db import verify_api_key
+                    user = verify_api_key(key)
+                except Exception:
+                    user = None
         items = fcc.scan_watchlist_commentary(
-            watchlist_symbols=body.get("symbols"),
+            user_id=user,
             model=body.get("model"),
             api_key=_resolve_api_key(),
         )

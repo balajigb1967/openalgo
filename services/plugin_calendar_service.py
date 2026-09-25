@@ -65,7 +65,13 @@ def _fetch_economic_events() -> List[dict]:
 
 
 def economic_calendar(refresh: bool = False, limit: int = 40) -> Dict[str, Any]:
-    """This week's macro events, next-up first. Cached 10 minutes."""
+    """This week's macro events, next-up first. Cached 10 minutes.
+
+    The upstream (faireconomy/ForexFactory) rate-limits per IP after frequent
+    polls and answers 429 with an HTML page for a while afterwards. A failed
+    fetch therefore returns the last good snapshot flagged stale (so panels
+    keep showing events) instead of an empty list that blanks them; the cache
+    is only overwritten by a successful fetch."""
     with _LOCK:
         if not refresh and _ECON_CACHE["data"] and time.time() - _ECON_CACHE["ts"] < _ECON_TTL:
             return _ECON_CACHE["data"]
@@ -76,6 +82,17 @@ def economic_calendar(refresh: bool = False, limit: int = 40) -> Dict[str, Any]:
     past = [e for e in events if e["date"] and e["date"] < now_iso]
     upcoming.sort(key=lambda e: (e["date"], -e["impact_rank"]))
     past.sort(key=lambda e: e["date"], reverse=True)
+
+    if not events:
+        # 429/upstream down: serve the last good data rather than an empty
+        # calendar. Mark it so the UI can grey it out; an empty historical
+        # cache falls through to the empty success below.
+        with _LOCK:
+            if _ECON_CACHE["data"]:
+                stale = dict(_ECON_CACHE["data"])
+                stale["stale"] = True
+                stale["stale_min"] = round((time.time() - _ECON_CACHE["ts"]) / 60)
+                return stale
 
     data = {
         "status": "success",

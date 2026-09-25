@@ -19,7 +19,9 @@ Endpoints (all under /plugins/):
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 
+import pytz
 from flask import Blueprint, jsonify, request
 from flask import session as flask_session
 
@@ -64,6 +66,8 @@ def app_key_required(fn):
 
 
 logger = get_logger(__name__)
+
+_IST_TZ = pytz.timezone("Asia/Kolkata")
 
 scalper_orderflow_bp = Blueprint(
     "scalper_orderflow_bp", __name__, url_prefix="/plugins"
@@ -341,6 +345,126 @@ def news_symbol_route():
     except Exception as e:
         logger.exception(f"symbol news failed: {e}")
         return jsonify({"status": "error", "message": f"Symbol news failed: {e}"}), 500
+
+
+# ---------------------------------------------------------------------------
+# Chart history for the mobile app (server-capped, like the desktop scalper
+# route). /api/v1/history asks the broker for arbitrary multi-week windows,
+# which is the slowest call in the app and the one that times out over the
+# tunnel; this route caps the window server-side (1m=1 trading day, 5m=3,
+# 15m=9, D=90) and reuses the same warm path the desktop charts run on.
+# ---------------------------------------------------------------------------
+@scalper_orderflow_bp.route("/chart/history", methods=["GET"])
+@app_key_required
+def chart_history_mobile_route():
+    """Capped candles for the most recent N trading days at the interval.
+
+    Same shape as /scalping/api/history (candles in IST-shifted epoch seconds,
+    last_quote seed when the broker serves none) so one feed contract serves
+    both platforms. apikey may arrive via the X-API-KEY header (app) or the
+    apikey query parameter.
+    """
+    api_key = (request.headers.get("X-API-KEY")
+               or request.args.get("apikey") or "").strip()
+    if not api_key:
+        return jsonify({"status": "error", "message": "API key required"}), 401
+
+    symbol = (request.args.get("symbol", "") or "").strip().upper()[:50]
+    exchange = (request.args.get("exchange", "") or "").strip().upper()[:20]
+    if not symbol or not exchange:
+        return jsonify({"status": "error", "message": "symbol and exchange are required"}), 400
+
+    # Reuse the desktop scalper route's helpers (IST shift, trading-day caps,
+    # quote seeding) so both platforms serve one candle contract.
+    from blueprints.scalping import (
+        IST_OFFSET_SECONDS,
+        _last_quote_snapshot,
+    )
+
+    interval = (request.args.get("interval", "5m") or "5m").strip()
+    keep_days = {"1m": 1, "5m": 3, "15m": 9, "D": 90}.get(interval, 3)
+    today = datetime.now(_IST_TZ).date()
+    start_date = (today - timedelta(days=keep_days * 2 + 5)).strftime("%Y-%m-%d")
+    end_date = today.strftime("%Y-%m-%d")
+
+    from services.history_service import get_history
+
+    try:
+        success, response, status_code = get_history(
+            symbol=symbol,
+            exchange=exchange,
+            interval=interval,
+            start_date=start_date,
+            end_date=end_date,
+            api_key=api_key,
+        )
+    except Exception as e:
+        logger.exception(f"mobile chart history error for {symbol}.{exchange}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+    if not success:
+        message = response.get("message") if isinstance(response, dict) else str(response)
+        msg_str = (message or "").lower()
+        if status_code == 404 or "no data" in msg_str or "not found" in msg_str or "error for chunk" in msg_str:
+            return jsonify({
+                "status": "success", "symbol": symbol, "exchange": exchange,
+                "interval": interval, "date": None, "candles": [],
+                "last_quote": _last_quote_snapshot(symbol, exchange, api_key),
+            }), 200
+        return jsonify({"status": "error", "message": message or "History fetch failed"}), status_code
+
+    rows = response.get("data", []) if isinstance(response, dict) else []
+    by_date: dict[str, list] = {}
+    for r in rows:
+        ts = r.get("timestamp")
+        if ts is None:
+            continue
+        try:
+            ts = int(float(ts))
+        except (TypeError, ValueError):
+            continue
+        ist_dt = datetime.fromtimestamp(ts, tz=pytz.utc).astimezone(_IST_TZ)
+        by_date.setdefault(ist_dt.strftime("%Y-%m-%d"), []).append((ts, r))
+
+    if not by_date:
+        return jsonify({
+            "status": "success", "symbol": symbol, "exchange": exchange,
+            "interval": interval, "date": None, "candles": [],
+            "last_quote": _last_quote_snapshot(symbol, exchange, api_key),
+        }), 200
+
+    selected_dates = sorted(by_date.keys())[-keep_days:]
+    day_rows: list = []
+    for dkey in selected_dates:
+        day_rows.extend(by_date[dkey])
+    day_rows.sort(key=lambda x: x[0])
+
+    candles = []
+    for ts, r in day_rows:
+        bar_time = ((ts + IST_OFFSET_SECONDS) // 60) * 60
+        try:
+            candles.append({
+                "time": bar_time,
+                "open": float(r.get("open", 0)),
+                "high": float(r.get("high", 0)),
+                "low": float(r.get("low", 0)),
+                "close": float(r.get("close", 0)),
+                "volume": float(r.get("volume", 0) or 0),
+            })
+        except (TypeError, ValueError):
+            continue
+
+    latest_date = selected_dates[-1]
+    return jsonify({
+        "status": "success",
+        "symbol": symbol,
+        "exchange": exchange,
+        "interval": interval,
+        "date": latest_date,
+        "candles": candles,
+        "count": len(candles),
+        "last_quote": _last_quote_snapshot(symbol, exchange, api_key),
+    })
 
 
 # ---------------------------------------------------------------------------

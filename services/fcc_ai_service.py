@@ -1430,6 +1430,9 @@ def generate_commentary(symbol: str | None = None, model: str | None = None,
         logger.debug("watchlist breadth event failed: %s", e)
 
     # --- News & Catalyst Drivers ----------------------------------------
+    # Two wires: symbol headlines (TradingView + keyword RSS) and the general
+    # TradingView wire. Either can raise an alert; both are cooldown-gated so
+    # the same headline never spams the squawk.
     try:
         from services.market_news_service import fetch_symbol_news
         n_res = fetch_symbol_news(clean, limit=2)
@@ -1438,9 +1441,23 @@ def generate_commentary(symbol: str | None = None, model: str | None = None,
             first_n = n_items[0]
             n_title = first_n.get("title", "")
             if n_title:
-                _evt(f"NEWS CATALYST: {n_title[:85]}", cooldown=1800)
+                _evt(f"NEWS CATALYST [{clean}]: {n_title[:85]}", cooldown=1800)
     except Exception as e:
         logger.debug("news event failed: %s", e)
+    try:
+        from services.market_news_service import fetch_news
+        general = (fetch_news(15).get("articles") or [])
+        high_urg = [a for a in general if (a.get("urgency") or 2) <= 1 or (a.get("category") in ("", "markets"))]
+        if high_urg:
+            g = high_urg[0]
+            g_title = (g.get("title") or "").strip()
+            g_src = g.get("source") or "Wire"
+            if g_title:
+                sent = (g.get("sentiment") or "").upper()
+                sent_tag = f" ({sent})" if sent in ("BULLISH", "BEARISH") else ""
+                _evt(f"NEWS ALERT [{g_src}]{sent_tag}: {g_title[:80]}", cooldown=1200)
+    except Exception as e:
+        logger.debug("general news alert failed: %s", e)
 
     # --- Economic Calendar ----------------------------------------------
     try:
