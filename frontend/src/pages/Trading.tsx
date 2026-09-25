@@ -67,8 +67,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { Input } from '@/components/ui/input'
-import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { Switch } from '@/components/ui/switch'
 import type { ScalpingAction, ScalpingProduct, SelectedLeg } from '@/types/scalping'
 import { scalpingApi } from '@/api/scalping'
@@ -1799,7 +1797,11 @@ function TradingWorkspace({ account }: { account: string | null }) {
   )
 }
 
-/** Underlying search for the scalper preset — lists every F&O root on the exchange. */
+/**
+ * Underlying picker for the scalper preset — a native select of every F&O
+ * root on the exchange. Deliberately not a Radix Popover + input: in this
+ * dense toolbar the popover dismissed on open and could never be used.
+ */
 function ScalperUnderlyingPicker({
   exchange,
   segment,
@@ -1811,8 +1813,6 @@ function ScalperUnderlyingPicker({
   value: string
   onChange: (v: string) => void
 }) {
-  const [query, setQuery] = useState('')
-  const [open, setOpen] = useState(false)
   const instrumenttype = segment === 'FUTURES' ? 'futures' : 'options'
   const { data } = useQuery({
     queryKey: ['scalpergrid', 'allunderlyings', exchange, instrumenttype],
@@ -1820,46 +1820,19 @@ function ScalperUnderlyingPicker({
     staleTime: 5 * 60 * 1000,
   })
   const all: string[] = data?.data ?? []
-  const q = query.trim().toUpperCase()
-  const matches = (q ? all.filter((u) => u.toUpperCase().includes(q)) : all).slice(0, 100)
   return (
-    <Popover
-      open={open && matches.length > 0}
-      onOpenChange={(o) => {
-        setOpen(o)
-        if (o) setQuery('')
-      }}
+    <select
+      className="h-7 w-32 rounded border border-border bg-background px-1.5 font-mono text-xs font-bold"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
     >
-      <PopoverAnchor asChild>
-        <Input
-          value={open ? query : value}
-          placeholder="Underlying"
-          className="h-7 w-24 px-2 font-mono text-xs font-bold"
-          onFocus={() => {
-            setQuery('')
-            setOpen(true)
-          }}
-          onChange={(e) => setQuery(e.target.value)}
-          onBlur={() => window.setTimeout(() => setOpen(false), 180)}
-        />
-      </PopoverAnchor>
-      <PopoverContent align="start" className="max-h-56 w-36 overflow-auto p-1 text-xs">
-        {matches.map((nm) => (
-          <button
-            key={nm}
-            type="button"
-            className={`block w-full px-2 py-1 text-left font-mono hover:bg-muted ${nm === value ? 'bg-muted' : ''}`}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => {
-              onChange(nm)
-              setOpen(false)
-            }}
-          >
-            {nm}
-          </button>
-        ))}
-      </PopoverContent>
-    </Popover>
+      {!all.includes(value) && <option value={value}>{value}</option>}
+      {all.map((u) => (
+        <option key={u} value={u}>
+          {u}
+        </option>
+      ))}
+    </select>
   )
 }
 

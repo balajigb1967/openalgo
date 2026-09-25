@@ -16,13 +16,6 @@ import { DepthTable } from '@/components/scalping/DepthTable'
 import { ScalpChart } from '@/components/scalping/ScalpChart'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { useMarketData } from '@/hooks/useMarketData'
 import { findLegSL, type SLState } from '@/hooks/useTrailingSL'
 import { priceDecimals } from '@/lib/scalpingPrice'
@@ -294,14 +287,13 @@ export function ScalperGrid({
 
   const dec = (exch?: string) => priceDecimals(exch ?? exchange)
 
-  // flex-1 under a flex host (/trading's preset wrapper), h-full elsewhere —
-  // both without stretching: min-h-0 lets the charts row shrink to fit.
+  // Always flex-1: every host (the /scalping page and /trading's preset
+  // wrapper) is a flex column whose ribbon is a sibling, so the grid must
+  // size to the REMAINING space. h-full would add the ribbon height on top
+  // and clip the depth row off the bottom.
   return (
     <div
-      className={cn(
-        'grid min-h-0 min-w-0 gap-1.5',
-        compact ? 'h-full' : 'flex-1'
-      )}
+      className="grid min-h-0 min-w-0 flex-1 gap-1.5"
       style={{
         gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
         gridTemplateRows: showCharts ? 'minmax(0, 3fr) minmax(0, 2fr)' : 'minmax(0, 1fr)',
@@ -331,26 +323,18 @@ export function ScalperGrid({
                 {isCe ? 'CE' : isPe ? 'PE' : cell.id === 'spot' ? 'SPOT' : 'FUT'}
               </span>
               {optionsMode && (isCe || isPe) ? (
-                <Select
+                <select
+                  className="h-6 w-32 rounded border border-border bg-background px-1 font-mono text-xs font-bold"
                   value={isCe ? ceStrike : peStrike}
-                  onValueChange={isCe ? setCeStrike : setPeStrike}
                   disabled={chain.length === 0}
+                  onChange={(e) => (isCe ? setCeStrike : setPeStrike)(e.target.value)}
                 >
-                  <SelectTrigger className="h-6 w-32 px-1.5 font-mono text-xs font-bold">
-                    <SelectValue placeholder="Strike" />
-                  </SelectTrigger>
-                  <SelectContent className="max-h-60 text-xs">
-                    {chain.map((r) => (
-                      <SelectItem
-                        key={`${cell.id}-${r.strike}`}
-                        value={String(r.strike)}
-                        className="font-mono text-xs"
-                      >
-                        {r.strike}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  {chain.map((r) => (
+                    <option key={`${cell.id}-${r.strike}`} value={String(r.strike)}>
+                      {r.strike}
+                    </option>
+                  ))}
+                </select>
               ) : (
                 <span className="truncate font-mono text-xs font-semibold" title={cell.symbol}>
                   {cell.label}

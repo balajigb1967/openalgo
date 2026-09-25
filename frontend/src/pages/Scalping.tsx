@@ -547,18 +547,20 @@ export default function Scalping() {
 
           <div className="flex items-center gap-1">
             <span className="text-[11px] text-muted-foreground">Und</span>
-            <Select value={underlying} onValueChange={setUnderlying}>
-              <SelectTrigger className="h-7 w-28 text-xs font-mono px-1.5">
-                <SelectValue placeholder="Underlying" />
-              </SelectTrigger>
-              <SelectContent className="max-h-64">
-                {allUnderlyings.map((u) => (
-                  <SelectItem key={u} value={u} className="text-xs font-mono">
-                    {u}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <select
+              className="h-7 w-32 rounded border border-border bg-background px-1.5 font-mono text-xs font-bold"
+              value={underlying}
+              onChange={(e) => setUnderlying(e.target.value)}
+            >
+              {!allUnderlyings.includes(underlying) && (
+                <option value={underlying}>{underlying}</option>
+              )}
+              {allUnderlyings.map((u) => (
+                <option key={u} value={u}>
+                  {u}
+                </option>
+              ))}
+            </select>
           </div>
 
           {optionsMode && (
