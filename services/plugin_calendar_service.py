@@ -12,6 +12,8 @@ Market calendar plugin service — economic events + exchange holidays.
 """
 
 import datetime
+import json
+import os
 import threading
 import time
 from typing import Any, Dict, List
@@ -31,7 +33,38 @@ _LOCK = threading.Lock()
 _ECON_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
 _HOLIDAY_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
 _ECON_TTL = 600.0        # 10 min — events change a few times a day
+_ECON_FAIL_COOLDOWN = 300.0  # after a failed fetch, wait 5 min before retrying upstream
 _HOLIDAY_TTL = 21600.0   # 6 h — holiday lists move once a year
+
+# Disk mirror of the last good snapshot so a restart (or a long upstream
+# outage) still has events to show. Lives in the app's db/ directory.
+_CACHE_FILE = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "db", "calendar_cache.json")
+)
+_LAST_FAIL = {"ts": 0.0}
+
+
+def _load_disk_cache() -> None:
+    """Restore the last good snapshot from disk if memory is empty."""
+    if _ECON_CACHE["data"]:
+        return
+    try:
+        with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+            blob = json.load(f)
+        if isinstance(blob, dict) and (blob.get("upcoming") or blob.get("recent")):
+            _ECON_CACHE["ts"] = float(blob.get("ts") or 0.0)
+            _ECON_CACHE["data"] = blob
+    except Exception:
+        pass
+
+
+def _save_disk_cache(data: Dict[str, Any]) -> None:
+    try:
+        os.makedirs(os.path.dirname(_CACHE_FILE), exist_ok=True)
+        with open(_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception as e:
+        log.debug("calendar disk cache write failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -68,31 +101,31 @@ def economic_calendar(refresh: bool = False, limit: int = 40) -> Dict[str, Any]:
     """This week's macro events, next-up first. Cached 10 minutes.
 
     The upstream (faireconomy/ForexFactory) rate-limits per IP after frequent
-    polls and answers 429 with an HTML page for a while afterwards. A failed
-    fetch therefore returns the last good snapshot flagged stale (so panels
-    keep showing events) instead of an empty list that blanks them; the cache
-    is only overwritten by a successful fetch."""
+    polls and answers 429 with an HTML page for a while afterwards. Rules:
+      - a failed fetch NEVER overwrites the last good snapshot (memory or disk);
+      - after a failure we cool down 5 minutes before hitting upstream again,
+        so panel auto-refresh cannot keep tripping the rate limit;
+      - the last good snapshot is mirrored to db/calendar_cache.json so it
+        survives restarts."""
     with _LOCK:
+        _load_disk_cache()
         if not refresh and _ECON_CACHE["data"] and time.time() - _ECON_CACHE["ts"] < _ECON_TTL:
             return _ECON_CACHE["data"]
+        cooling = time.time() - _LAST_FAIL["ts"] < _ECON_FAIL_COOLDOWN
+
+    if cooling:
+        return _stale_payload()
 
     events = _fetch_economic_events()
+    if not events:
+        _LAST_FAIL["ts"] = time.time()
+        return _stale_payload()
+
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     upcoming = [e for e in events if e["date"] and e["date"] >= now_iso]
     past = [e for e in events if e["date"] and e["date"] < now_iso]
     upcoming.sort(key=lambda e: (e["date"], -e["impact_rank"]))
     past.sort(key=lambda e: e["date"], reverse=True)
-
-    if not events:
-        # 429/upstream down: serve the last good data rather than an empty
-        # calendar. Mark it so the UI can grey it out; an empty historical
-        # cache falls through to the empty success below.
-        with _LOCK:
-            if _ECON_CACHE["data"]:
-                stale = dict(_ECON_CACHE["data"])
-                stale["stale"] = True
-                stale["stale_min"] = round((time.time() - _ECON_CACHE["ts"]) / 60)
-                return stale
 
     data = {
         "status": "success",
@@ -104,7 +137,27 @@ def economic_calendar(refresh: bool = False, limit: int = 40) -> Dict[str, Any]:
     with _LOCK:
         _ECON_CACHE["ts"] = time.time()
         _ECON_CACHE["data"] = data
+        _save_disk_cache(data)
     return data
+
+
+def _stale_payload() -> Dict[str, Any] | None:
+    """Serve the last good snapshot (memory first, then disk), flagged stale."""
+    with _LOCK:
+        _load_disk_cache()
+        if _ECON_CACHE["data"]:
+            stale = dict(_ECON_CACHE["data"])
+            stale["stale"] = True
+            stale["stale_min"] = round(max(0.0, time.time() - _ECON_CACHE["ts"]) / 60)
+            return stale
+    return {
+        "status": "success",
+        "upcoming": [],
+        "recent": [],
+        "total": 0,
+        "ts": time.time(),
+        "stale": True,
+    }
 
 
 # ---------------------------------------------------------------------------
