@@ -44,43 +44,66 @@ _UA = (
 # ---------------- TradingView scanner batch quotes --------------------------
 _SCANNER_URL = "https://scanner.tradingview.com/global/scan2"
 
+# Tickers that intermittently serve an empty row from the global scanner map
+# to a reliable mirror; a second batch call backfills them.
+_TICKER_FALLBACKS = {
+    "TVC:USOIL": "NYMEX:BZ1!",  # Brent continuous
+}
+
 
 def _tv_batch_quotes(tickers: list) -> dict:
-    """One TradingView scanner POST for a list of tickers: {TVSYM: quote}."""
+    """One TradingView scanner POST for a list of tickers: {TVSYM: quote}.
+
+    Tickers with no row in the response get retried via _TICKER_FALLBACKS so
+    a single flaky symbol cannot blank its row in the brief."""
     if not tickers:
         return {}
-    try:
-        body = {
-            "symbols": {"tickers": tickers, "query": {"types": []}},
-            "columns": ["name", "close", "open", "high", "low", "change", "change_abs", "volume"],
-            "range": [0, len(tickers)],
-        }
-        r = requests.post(_SCANNER_URL, json=body, headers={"User-Agent": _UA}, timeout=10)
-        if r.status_code != 200:
+
+    def _scan(syms: list) -> dict:
+        if not syms:
             return {}
-        j = r.json()
-        fields = j.get("fields") or []
-        out = {}
-        for item in j.get("symbols") or []:
-            f = item.get("f") or []
-            d = dict(zip(fields, f))
-            if d.get("close") is None:
-                continue
-            chp = d.get("change")
-            out[item.get("s")] = {
-                "ltp": round(d["close"], 2),
-                "open": round(d["open"], 2) if d.get("open") is not None else None,
-                "high": round(d["high"], 2) if d.get("high") is not None else None,
-                "low": round(d["low"], 2) if d.get("low") is not None else None,
-                "ch": round(d["change_abs"], 2) if d.get("change_abs") is not None else None,
-                "chp": round(chp, 2) if chp is not None else None,
-                "volume": d.get("volume"),
-                "name": d.get("name") or item.get("s"),
+        try:
+            body = {
+                "symbols": {"tickers": syms, "query": {"types": []}},
+                "columns": ["name", "close", "open", "high", "low", "change", "change_abs", "volume"],
+                "range": [0, len(syms)],
             }
-        return out
-    except Exception as e:
-        log.debug("TV scanner batch failed: %s", e)
-        return {}
+            r = requests.post(_SCANNER_URL, json=body, headers={"User-Agent": _UA}, timeout=10)
+            if r.status_code != 200:
+                return {}
+            j = r.json()
+            fields = j.get("fields") or []
+            out = {}
+            for item in j.get("symbols") or []:
+                f = item.get("f") or []
+                d = dict(zip(fields, f))
+                if d.get("close") is None:
+                    continue
+                chp = d.get("change")
+                out[item.get("s")] = {
+                    "ltp": round(d["close"], 2),
+                    "open": round(d["open"], 2) if d.get("open") is not None else None,
+                    "high": round(d["high"], 2) if d.get("high") is not None else None,
+                    "low": round(d["low"], 2) if d.get("low") is not None else None,
+                    "ch": round(d["change_abs"], 2) if d.get("change_abs") is not None else None,
+                    "chp": round(chp, 2) if chp is not None else None,
+                    "volume": d.get("volume"),
+                    "name": d.get("name") or item.get("s"),
+                }
+            return out
+        except Exception as e:
+            log.debug("TV scanner batch failed: %s", e)
+            return {}
+
+    out = _scan(list(tickers))
+    missing = [t for t in tickers if t not in out]
+    fb = {t: _TICKER_FALLBACKS[t] for t in missing if t in _TICKER_FALLBACKS}
+    if fb:
+        got = _scan(list(fb.values()))
+        for orig, alt in fb.items():
+            if alt in got:
+                out[orig] = got[alt]
+    return out
 
 
 INDEX_WATCH = [
