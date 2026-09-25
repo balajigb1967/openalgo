@@ -1516,6 +1516,7 @@ function TradingWorkspace({ account }: { account: string | null }) {
                   product="NRML"
                   compact
                   pendingStrike={scalperPendingRef.current}
+                  onChartIntervalChange={setScalperChartTf}
                 />
               </div>
             ) : apiKey && wsUrl && linkGroup ? (
@@ -1868,6 +1869,7 @@ function ScalperGridStateful(props: {
   product: ScalpingProduct
   pendingStrike?: { side: 'CE' | 'PE'; strike: number } | null
   compact?: boolean
+  onChartIntervalChange?: (interval: string) => void
 }) {
   const appMode = useThemeStore((s) => s.appMode)
   const { slMap, setSL, clearSL } = useTrailingSL(appMode)

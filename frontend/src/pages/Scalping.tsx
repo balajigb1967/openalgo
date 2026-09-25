@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { scalpingApi } from '@/api/scalping'
 import { Navbar } from '@/components/layout/Navbar'
 import { DepthTable } from '@/components/scalping/DepthTable'
-import { ScalpChart } from '@/components/scalping/ScalpChart'
+import { ScalperOpenAlgoChart } from '@/components/scalping/ScalperOpenAlgoChart'
 import { SetSLDialog } from '@/components/scalping/SetSLDialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -660,10 +660,11 @@ export default function Scalping() {
                 {legHeader(cell)}
                 {showTopChart && (
                   <div className="min-h-0 flex-1 my-1 rounded overflow-hidden border border-border/50 bg-background/50">
-                    <ScalpChart
+                    <ScalperOpenAlgoChart
                       symbol={cell.symbol}
                       exchange={cell.exchange}
                       interval={chartTf}
+                      onIntervalChange={setChartTf}
                     />
                   </div>
                 )}

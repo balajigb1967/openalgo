@@ -13,7 +13,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { scalpingApi } from '@/api/scalping'
 import { DepthTable } from '@/components/scalping/DepthTable'
-import { ScalpChart } from '@/components/scalping/ScalpChart'
+import { ScalperOpenAlgoChart } from '@/components/scalping/ScalperOpenAlgoChart'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useMarketData } from '@/hooks/useMarketData'
@@ -63,6 +63,8 @@ export interface ScalperGridProps {
   /** A synced strike (watchlist click / advisor alert) to select once the chain resolves. */
   pendingStrike?: { side: 'CE' | 'PE'; strike: number } | null
   compact?: boolean
+  /** Fired when the user picks an interval pill in a cell's chart topbar, so the ribbon select follows. */
+  onChartIntervalChange?: (interval: string) => void
 }
 
 function buildLeg(
@@ -100,6 +102,7 @@ export function ScalperGrid({
   onOrderResult,
   onSLRequest,
   pendingStrike,
+  onChartIntervalChange,
   compact = false,
 }: ScalperGridProps) {
   const optionsMode = segment === 'OPTIONS'
@@ -356,7 +359,12 @@ export function ScalperGrid({
             {/* Chart */}
             {showCharts ? (
               <div className="my-1 min-h-0 flex-1 overflow-hidden rounded border border-border/50 bg-background/50">
-                <ScalpChart symbol={cell.symbol} exchange={cell.exchange} interval={chartTf} />
+                <ScalperOpenAlgoChart
+                  symbol={cell.symbol}
+                  exchange={cell.exchange}
+                  interval={chartTf}
+                  onIntervalChange={onChartIntervalChange}
+                />
               </div>
             ) : (
               <div className="flex-1" />
