@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Crosshair, ExternalLink, LayoutGrid, Link2 as LinkIcon } from 'lucide-react'
+import { LayoutGrid, Link2 as LinkIcon } from 'lucide-react'
 import { type ChartObjects, createLinkGroup, type LinkGroup } from 'openalgo-charts'
 import type { WorkspaceDocument, WorkspacePayload } from 'openalgo-charts/workspace'
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
@@ -35,10 +35,6 @@ const NewsPanel = lazy(() =>
 const CalendarPanel = lazy(() =>
   import('@/components/trading/CalendarPanel').then((m) => ({ default: m.CalendarPanel }))
 )
-// Embedded scalper terminal — overlays the chart grid like a third pane.
-const ScalperTerminal = lazy(() =>
-  import('@/components/scalping/ScalperTerminal').then((m) => ({ default: m.ScalperTerminal }))
-)
 
 import { AlertsPanel } from '@/components/trading/AlertsPanel'
 import { ChartPane } from '@/components/trading/ChartPane'
@@ -73,13 +69,6 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import type { ScalpingAction, ScalpingProduct, SelectedLeg } from '@/types/scalping'
 import { scalpingApi } from '@/api/scalping'
@@ -144,7 +133,6 @@ const PANEL_KEY = 'oa-trading-panel'
  */
 const ARMED_KEY = 'oa-trading-armed'
 /** Whether the embedded scalper terminal overlays the chart grid ('1'/'0'). */
-const SCALPER_KEY = 'oa-trading-scalper-terminal'
 /**
  * How many firings the session log keeps.
  *
@@ -179,14 +167,6 @@ function loggedToFire(row: LoggedFire): AlertFire {
 function readArmed(): boolean {
   try {
     return localStorage.getItem(ARMED_KEY) === '1'
-  } catch {
-    return false
-  }
-}
-
-function readScalperOpen(): boolean {
-  try {
-    return localStorage.getItem(SCALPER_KEY) === '1'
   } catch {
     return false
   }
@@ -321,18 +301,6 @@ function TradingWorkspace({ account }: { account: string | null }) {
   const [apiKey, setApiKey] = useState<string | null>(null)
   const [wsUrl, setWsUrl] = useState<string | null>(null)
   const [noApiKey, setNoApiKey] = useState(false)
-
-  /* ── embedded scalper terminal (overlays the chart grid) ─────────────── */
-  const [scalperOpen, setScalperOpen] = useState<boolean>(readScalperOpen)
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(SCALPER_KEY, scalperOpen ? '1' : '0')
-    } catch {
-      // Storage refused: the toggle still works for this visit.
-    }
-  }, [scalperOpen])
-
 
   /* ── one drawing rail for every pane ─────────────────────────────────── */
   const [tool, setTool] = useState<string | null>(null)
@@ -666,17 +634,6 @@ function TradingWorkspace({ account }: { account: string | null }) {
     },
     [focusedPane, panelTarget, stopWorkspaceReplay]
   )
-
-  // Advisor/chart sync: when an alert/target is published from Scalper Advisor,
-  // ensure the terminal is open AND the focused chart pane loads that symbol.
-  useEffect(() => {
-    return subscribeSyncTarget((t) => {
-      setScalperOpen(true)
-      if (t?.underlying && t?.exchange) {
-        sendToFocusedPane({ symbol: t.underlying, exchange: t.exchange })
-      }
-    })
-  }, [sendToFocusedPane])
 
   /**
    * Whether any pane is replaying, or picking a bar to replay from. The
@@ -1348,56 +1305,6 @@ function TradingWorkspace({ account }: { account: string | null }) {
     </label>
   )
 
-  /**
-   * Scalper, beside the pickers for the same reason: a workspace control. The
-   * button lights while the terminal is open — Escape or its ✕ closes it —
-   * and the label mirrors One-Click's dropped-below-lg convention.
-   */
-  const scalperControl = (
-    <Button
-      variant="outline"
-      size="icon"
-      className={cn('h-8 w-8 shrink-0', scalperOpen && 'border-primary/50 text-primary')}
-      title={scalperOpen ? 'Close the scalper terminal' : 'Open the scalper terminal'}
-      aria-label="Scalper terminal"
-      aria-pressed={scalperOpen}
-      onClick={() => setScalperOpen((v) => !v)}
-    >
-      <Crosshair className="h-4 w-4" />
-    </Button>
-  )
-
-  /**
-   * Pop the terminal out into its own window — same component, same keys,
-   * same websocket, so a second monitor carries the scalper while the grid
-   * keeps every pane. Deliberately `window.open` rather than an in-app
-   * dialog: the point is a separate OS window that can be moved to another
-   * screen and keeps running beside the charts.
-   */
-  const scalperPopout = (
-    <Button
-      variant="outline"
-      size="icon"
-      className="h-8 w-8 shrink-0"
-      title="Pop out the scalper terminal"
-      aria-label="Pop out the scalper terminal"
-      onClick={() => {
-        const w = window.open('/scalper', 'oa-scalper', 'width=1280,height=860')
-        // Popup blockers swallow window.open silently — tell the operator
-        // instead of leaving a button that appears to do nothing.
-        if (!w) {
-          window.alert(
-            'The browser blocked the pop-out window. Allow pop-ups for this site and try again.'
-          )
-          return
-        }
-        w.focus()
-      }}
-    >
-      <ExternalLink className="h-4 w-4" />
-    </Button>
-  )
-
   const chartIds =
     workspace.current?.geometry.panes.map((pane) => pane.id) ??
     layout.cells.map((_, index) => `p${index}`)
@@ -1441,8 +1348,6 @@ function TradingWorkspace({ account }: { account: string | null }) {
       {workspaceMenu}
       <IndicatorTemplates key={account} {...workspaceCatalog} target={panelTarget} />
       {armedControl}
-      {scalperControl}
-      {scalperPopout}
     </>
   )
 
@@ -1503,13 +1408,6 @@ function TradingWorkspace({ account }: { account: string | null }) {
             />
           )}
           <div className="relative min-h-0 min-w-0 flex-1">
-            {/* Embedded scalper terminal — floats over the grid like a study
-                pane; the charts keep streaming underneath. */}
-            {scalperOpen && apiKey && wsUrl && (
-              <Suspense fallback={null}>
-                <ScalperTerminal apiKey={apiKey} wsUrl={wsUrl} armed={armed} onClose={() => setScalperOpen(false)} />
-              </Suspense>
-            )}
             {noApiKey ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
                 <p className="text-sm text-muted-foreground">No API key found for charting.</p>
@@ -1519,43 +1417,35 @@ function TradingWorkspace({ account }: { account: string | null }) {
               </div>
             ) : isScalperLayout && apiKey ? (
               <div className="flex h-full min-h-0 flex-col gap-1 p-2">
-                <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <div className="flex items-center gap-1">
                     <span className="text-[11px] text-muted-foreground">Exch</span>
-                    <Select
+                    <select
+                      className="h-7 rounded border border-border bg-background px-1.5 text-xs font-semibold"
                       value={scalperExchange}
-                      onValueChange={(v) => {
-                        const exch = v as ScalperExchange
+                      onChange={(e) => {
+                        const exch = e.target.value as ScalperExchange
                         setScalperExchange(exch)
                         setScalperUnderlying(SCALPER_DEFAULT_UNDERLYING[exch] ?? 'NIFTY')
                       }}
                     >
-                      <SelectTrigger className="h-7 w-16 px-1.5 text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {SCALPER_EXCHANGES.map((x) => (
-                          <SelectItem key={x} value={x} className="text-xs">
-                            {x}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                      {SCALPER_EXCHANGES.map((x) => (
+                        <option key={x} value={x}>
+                          {x}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                   <div className="flex items-center gap-1">
                     <span className="text-[11px] text-muted-foreground">Seg</span>
-                    <Select
+                    <select
+                      className="h-7 rounded border border-border bg-background px-1.5 text-xs font-semibold"
                       value={scalperSegment}
-                      onValueChange={(v) => setScalperSegment(v as ScalperSegment)}
+                      onChange={(e) => setScalperSegment(e.target.value as ScalperSegment)}
                     >
-                      <SelectTrigger className="h-7 w-20 px-1.5 text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="OPTIONS" className="text-xs">Options</SelectItem>
-                        <SelectItem value="FUTURES" className="text-xs">Futures</SelectItem>
-                      </SelectContent>
-                    </Select>
+                      <option value="OPTIONS">Options</option>
+                      <option value="FUTURES">Futures</option>
+                    </select>
                   </div>
                   <div className="flex items-center gap-1">
                     <span className="text-[11px] text-muted-foreground">Und</span>
@@ -1588,18 +1478,17 @@ function TradingWorkspace({ account }: { account: string | null }) {
                       </button>
                     </div>
                   </div>
-                  <Select value={scalperChartTf} onValueChange={setScalperChartTf}>
-                    <SelectTrigger className="h-7 w-16 px-1.5 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {['1m', '5m', '15m'].map((tf) => (
-                        <SelectItem key={tf} value={tf} className="text-xs">
-                          {tf}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <select
+                    className="h-7 rounded border border-border bg-background px-1.5 text-xs font-semibold"
+                    value={scalperChartTf}
+                    onChange={(e) => setScalperChartTf(e.target.value)}
+                  >
+                    {['1m', '5m', '15m'].map((tf) => (
+                      <option key={tf} value={tf}>
+                        {tf}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <ScalperGridStateful
                   apiKey={apiKey}

@@ -294,11 +294,14 @@ export function ScalperGrid({
 
   const dec = (exch?: string) => priceDecimals(exch ?? exchange)
 
-  // h-full (not flex-1): the host may be a block container (/trading's pane),
-  // where flex-1 without a flex parent collapses instead of filling.
+  // flex-1 under a flex host (/trading's preset wrapper), h-full elsewhere —
+  // both without stretching: min-h-0 lets the charts row shrink to fit.
   return (
     <div
-      className="grid h-full min-h-0 min-w-0 gap-1.5"
+      className={cn(
+        'grid min-h-0 min-w-0 gap-1.5',
+        compact ? 'h-full' : 'flex-1'
+      )}
       style={{
         gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
         gridTemplateRows: showCharts ? 'minmax(0, 3fr) minmax(0, 2fr)' : 'minmax(0, 1fr)',
