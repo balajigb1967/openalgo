@@ -307,12 +307,32 @@ export function ScalpChart({
         const candles = d.candles || []
         tradingDateRef.current = d.date || null
         if (!candles.length) {
-          // No broker history (e.g. TradeSmart serves none for the CDS segment).
-          // Build the chart live from the websocket feed instead of stalling on
-          // a permanent "no history" — readyRef lets the tick effect form bars.
+          // No broker history (several brokers serve none for thinly-traded
+          // option contracts even while quotes flow). Seed the forming bar
+          // from the REST quote snapshot so the canvas paints immediately,
+          // then let the websocket feed drive it from here.
           readyRef.current = true
-          currentBucketRef.current = null
-          setStatus('waiting for live ticks…')
+          const q = d.last_quote
+          if (q && q.ltp > 0) {
+            const sec = intervalSecRef.current
+            const bucket = Math.floor((Math.floor(Date.now() / 1000) + IST_OFFSET) / sec) * sec
+            const seeded: Candle = {
+              time: bucket,
+              open: q.open > 0 ? q.open : q.ltp,
+              high: Math.max(q.high > 0 ? q.high : q.ltp, q.ltp),
+              low: Math.min(q.low > 0 ? q.low : q.ltp, q.ltp),
+              close: q.ltp,
+              volume: 0,
+            }
+            candlesRef.current.set(bucket, seeded)
+            currentBucketRef.current = bucket
+            barStartVolRef.current = null
+            applyModel(false)
+            setStatus('')
+          } else {
+            currentBucketRef.current = null
+            setStatus('waiting for live ticks…')
+          }
           schedule()
           return
         }

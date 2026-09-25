@@ -97,6 +97,16 @@ export const scalpingApi = {
       close: number
       volume: number
     }>
+    /** REST snapshot present only when broker history is empty — lets the
+     *  chart seed its forming bar instead of waiting for the first tick. */
+    last_quote?: {
+      ltp: number
+      open: number
+      high: number
+      low: number
+      prev_close?: number
+      volume?: number
+    } | null
     message?: string
   }> => {
     const params: Record<string, string> = { symbol, exchange, interval }

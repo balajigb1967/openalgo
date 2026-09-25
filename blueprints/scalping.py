@@ -146,6 +146,35 @@ def underlyings():
     return jsonify({"status": "success", "data": data})
 
 
+def _last_quote_snapshot(symbol: str, exchange: str, api_key: str) -> dict | None:
+    """REST quote snapshot for a chart with no broker history.
+
+    Several brokers serve no intraday candles for thinly-traded option
+    contracts (e.g. MCX SILVER/GOLD/CRUDEOIL months) even while live quotes
+    flow for the same contract. The chart uses this snapshot to seed the
+    forming bar (day OHLC + LTP) so the canvas paints immediately and the
+    websocket feed takes over from there.
+    """
+    try:
+        from services.quotes_service import get_quotes
+        ok, resp, _ = get_quotes(symbol=symbol, exchange=exchange, api_key=api_key)
+        data = resp.get("data") if ok and isinstance(resp, dict) else None
+        if isinstance(data, dict) and data.get("ltp") is not None:
+            ltp = float(data.get("ltp") or 0)
+            if ltp > 0:
+                return {
+                    "ltp": ltp,
+                    "open": float(data.get("open") or 0) or ltp,
+                    "high": float(data.get("high") or 0) or ltp,
+                    "low": float(data.get("low") or 0) or ltp,
+                    "prev_close": float(data.get("prev_close") or data.get("previous_close") or 0),
+                    "volume": data.get("volume"),
+                }
+    except Exception as e:
+        logger.debug("chart last_quote %s [%s]: %s", symbol, exchange, e)
+    return None
+
+
 @scalping_bp.route("/scalping/api/history", methods=["GET"])
 @check_session_validity
 def chart_history():
@@ -208,6 +237,7 @@ def chart_history():
                     "interval": interval,
                     "date": None,
                     "candles": [],
+                    "last_quote": _last_quote_snapshot(symbol, exchange, api_key),
                 }
             ), 200
         return jsonify(
@@ -236,6 +266,7 @@ def chart_history():
                 "interval": interval,
                 "date": None,
                 "candles": [],
+                "last_quote": _last_quote_snapshot(symbol, exchange, api_key),
             }
         ), 200
 
