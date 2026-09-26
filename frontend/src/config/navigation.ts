@@ -15,6 +15,7 @@ import {
   GraduationCap,
   Gauge,
   Key,
+  KeyRound,
   Layers,
   LayoutDashboard,
   type LucideIcon,
@@ -78,6 +79,10 @@ export const profileMenuItems: NavItem[] = [
   // so a configured /agent still has a route back to its settings without this
   // menu holding one.
   { href: '/agent', label: 'Agent', icon: Bot },
+  // Broker Auto-Login is a Flask-served page (not a React route): one place
+  // to run the TOTP login for this instance's broker AND the peer instance's
+  // broker ("Login BOTH brokers") with a live step log.
+  { href: '/autologin', label: 'Broker Auto-Login', icon: KeyRound, external: true },
   { href: '/master-contract', label: 'Master Contract', icon: FileStack },
   { href: '/telegram', label: 'Telegram Bot', icon: MessageSquare },
   { href: '/whatsapp', label: 'WhatsApp Bot', icon: MessageCircle },
