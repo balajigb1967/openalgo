@@ -762,36 +762,69 @@ export function ChartPane({
   // PE straight into this pane, no option-chain panel detour. Cash symbols
   // (RELIANCE...) render nothing -- there is no chain to ask for.
   const parsed = useMemo(() => (sym ? parseSyncSymbol(`${sym.exchange}:${sym.symbol}`) : null), [sym])
+  // The option chain lives on the DERIVATIVES exchange, not the row's: NSE/BSE
+  // equities and index rows map to NFO/BFO, MCX is its own. Mapping rows this
+  // way is what lets the picker appear for cash/index underlyings at all —
+  // the expiry/strikes endpoints only serve F&O exchanges.
+  const chainExchange = useMemo(() => {
+    const ex = sym?.exchange ?? ''
+    if (ex === 'NSE' || ex === 'NSE_INDEX') return 'NFO'
+    if (ex === 'BSE' || ex === 'BSE_INDEX') return 'BFO'
+    return ex
+  }, [sym?.exchange])
   const isOptionUnderlying = Boolean(parsed && parsed.optionType === null && parsed.root &&
-    ['NSE', 'BSE', 'NFO', 'BFO', 'MCX'].includes(sym?.exchange ?? ''))
+    ['NFO', 'BFO', 'MCX'].includes(chainExchange))
   const [strikes, setStrikes] = useState<number[]>([])
+  // strike -> the chain's own CE/PE contract symbols. These are the real,
+  // expiry-qualified OpenAlgo symbols (CRUDEOIL15OCT266100CE,
+  // NIFTY29SEP2623150CE) — constructing ROOT+STRIKE+CE does NOT match any
+  // listed contract on MCX (whose names embed the expiry) and misses the
+  // expiry segment everywhere, so the chain row is the source of truth.
+  const [strikeContracts, setStrikeContracts] = useState<Map<number, { ce: string; pe: string }>>(new Map())
   const [strikeOpen, setStrikeOpen] = useState(false)
   useEffect(() => {
     setStrikes([])
+    setStrikeContracts(new Map())
     setStrikeOpen(false)
     if (!isOptionUnderlying || !parsed?.root) return
     let alive = true
     ;(async () => {
       try {
-        const exp = await scalpingApi.getExpiry(parsed.root, sym!.exchange, 'options')
+        const exp = await scalpingApi.getExpiry(parsed.root, chainExchange, 'options')
         const expiry = exp.data?.[0]
         if (!expiry || !alive) return
-        const res = await scalpingApi.getStrikes(parsed.root, sym!.exchange, expiry, 10)
+        const res = await scalpingApi.getStrikes(parsed.root, chainExchange, expiry, 10)
         if (!alive) return
-        const rows = (res as unknown as { chain?: Array<{ strike: number }> }).chain ?? []
-        setStrikes(rows.map((r) => r.strike))
+        const rows = (res as unknown as { chain?: Array<{ strike: number; ce?: { symbol?: string }; pe?: { symbol?: string } }> }).chain ?? []
+        const map = new Map<number, { ce: string; pe: string }>()
+        for (const r of rows) {
+          const ce = r.ce?.symbol ?? ''
+          const pe = r.pe?.symbol ?? ''
+          if (ce || pe) map.set(r.strike, { ce, pe })
+        }
+        setStrikeContracts(map)
+        setStrikes([...map.keys()])
       } catch {
-        if (alive) setStrikes([])
+        if (alive) {
+          setStrikes([])
+          setStrikeContracts(new Map())
+        }
       }
     })()
     return () => { alive = false }
-  }, [isOptionUnderlying, parsed?.root, sym?.exchange])
+  }, [isOptionUnderlying, parsed?.root, chainExchange])
   const pickStrike = async (strike: number, type: 'CE' | 'PE') => {
     if (!sym || !parsed?.root) return
     // Resolve the exact contract through the terminal's symbol search so lot
-    // size and tick come from the master contract, not the chain row.
-    const rows = await terminalRef.current?.search(`${parsed.root}${strike}${type}`, sym.exchange, 5) ?? []
-    const exact = rows.find((r) => r.symbol.replace(/\s+/g, '').toUpperCase() === `${parsed.root}${strike}${type}`.replace(/\s+/g, '')) ?? rows[0]
+    // size and tick come from the master contract, not the chain row. The
+    // query is the chain's own symbol — on MCX the constructed
+    // ROOT+STRIKE+CE form matches nothing (contracts embed the expiry),
+    // which is what the "No contract found" toast was.
+    const wanted = strikeContracts.get(strike)?.[type.toLowerCase() as 'ce' | 'pe']
+      ?? `${parsed.root}${strike}${type}`
+    const rows = await terminalRef.current?.search(wanted, chainExchange, 5) ?? []
+    const norm = (s: string) => s.replace(/\s+/g, '').toUpperCase()
+    const exact = rows.find((r) => norm(r.symbol) === norm(wanted)) ?? rows[0]
     if (exact) void terminalRef.current?.loadSymbol(exact)
     else showToast.error(`No ${strike}${type} contract found for ${parsed.root}`)
     setStrikeOpen(false)
