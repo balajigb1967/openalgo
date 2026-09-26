@@ -147,6 +147,9 @@ from blueprints.fcc_ai import (  # noqa: F401 — import registers its routes on
 from blueprints.mobile_api import (
     mobile_bp,  # Import the mobile app API blueprint
 )
+from blueprints.broker_autologin import (
+    autologin_bp,  # Broker TOTP auto-login (dual-broker sessions)
+)
 from blueprints.tv_watchlist import (
     tv_watchlist_bp,  # Import the TradingView watchlist plugin blueprint
 )
@@ -381,6 +384,7 @@ def create_app():
     app.register_blueprint(tv_watchlist_bp)  # Register TradingView watchlist plugin blueprint
     app.register_blueprint(scalper_orderflow_bp)  # Register Scalper Advisor + Orderflow plugin blueprint
     app.register_blueprint(mobile_bp)  # Register mobile app API blueprint
+    app.register_blueprint(autologin_bp)  # Broker TOTP auto-login endpoints
 
     # The mobile SPA talks to /m/api with same-origin session cookies only —
     # the same trust level as the React SPA's own JSON endpoints, so the CSRF
@@ -420,6 +424,24 @@ def create_app():
         logger.info(f"plugin CSRF exemption applied to {len(_plugin_views)} views")
     except Exception as e:  # noqa: BLE001 — CSRF wiring must never break boot
         logger.warning(f"plugin CSRF exemption failed: {e}")
+
+    # The autologin blueprint is called from three authenticated clients:
+    # the mobile app (session cookie / X-API-KEY), the PEER OpenAlgo
+    # instance (X-API-KEY, for dual-broker orchestration) and the desktop
+    # page (session cookie). Tokenless POSTs would die at Flask-WTF's hook
+    # before the view's own credential check, so exempt its views the same
+    # way the plugin blueprint's are. /autologin/run's state change is gated
+    # by _resolve_user(), and the browser page POSTs its CSRF header anyway.
+    try:
+        _autologin_views = [
+            name for name in app.view_functions if name.startswith("autologin_bp.")
+        ]
+        for name in _autologin_views:
+            app.csrf.exempt(app.view_functions[name])
+        logger.info(f"autologin CSRF exemption applied to {len(_autologin_views)} views")
+    except Exception as e:  # noqa: BLE001 — CSRF wiring must never break boot
+        logger.warning(f"autologin CSRF exemption failed: {e}")
+
     app.register_blueprint(oitracker_bp)  # Register OI tracker blueprint
     app.register_blueprint(gamma_density_bp)  # Register Gamma Density blueprint
     app.register_blueprint(straddle_bp)  # Register straddle chart blueprint
