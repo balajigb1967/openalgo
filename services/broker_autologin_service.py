@@ -131,6 +131,83 @@ _UA = (
 )
 
 
+class _HttpSession:
+    """Minimal cookie-keeping HTTP client over urllib.
+
+    The broker login chains are session-coupled: Fyers' vagator steps set
+    cookies (the token-mint 308 hands back a _FYERS cookie that
+    validate-authcode requires) and Flattrade's auth session does the same,
+    so every step of one login must share a cookie jar — exactly what the
+    proven requests.Session() flow in broker_login.py does.
+    """
+
+    _SKIP = {"path", "expires", "domain", "max-age", "secure", "httponly", "samesite"}
+
+    def __init__(self):
+        self.cookies = {}
+
+    def _cookie_header(self):
+        return "; ".join(f"{k}={v}" for k, v in self.cookies.items())
+
+    def _absorb(self, set_cookie_headers):
+        for sc in set_cookie_headers or []:
+            pair = sc.split(";", 1)[0]
+            if "=" not in pair:
+                continue
+            name, value = pair.split("=", 1)
+            name = name.strip()
+            if not name or name.lower() in self._SKIP or not value.strip():
+                continue
+            self.cookies[name] = value.strip()
+
+    def _request(self, url, payload, headers, timeout, json_mode=True):
+        data = json.dumps(payload).encode() if payload is not None else b""
+        hdrs = {
+            "User-Agent": _UA,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if self.cookies:
+            hdrs["Cookie"] = self._cookie_header()
+        if headers:
+            hdrs.update(headers)
+        req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                body = r.read().decode("utf-8", "replace")
+                setc = r.headers.get_all("Set-Cookie")
+        except urllib.error.HTTPError as e:  # keep the error body for diagnosis
+            body = e.read().decode("utf-8", "replace")
+            setc = e.headers.get_all("Set-Cookie") if getattr(e, "headers", None) else None
+            self._absorb(setc)
+            if json_mode:
+                # Fyers' token-mint step answers HTTP 308 with the auth-code
+                # URL in the JSON BODY — parse non-2xx bodies as JSON when
+                # possible instead of hiding them behind an error wrapper.
+                try:
+                    parsed = json.loads(body)
+                    if isinstance(parsed, dict):
+                        parsed["_http"] = e.code
+                        return parsed
+                except Exception:
+                    pass
+                return {"_http": e.code, "_raw": body[:400], "_url": url}
+            return body
+        self._absorb(setc)
+        if not json_mode:
+            return body
+        try:
+            return json.loads(body)
+        except Exception:
+            return {"_raw": body[:400], "_url": url}
+
+    def post(self, url, payload=None, headers=None, timeout=25):
+        return self._request(url, payload, headers, timeout, json_mode=True)
+
+    def post_text(self, url, payload=None, headers=None, timeout=25):
+        return self._request(url, payload, headers, timeout, json_mode=False)
+
+
 def _post_json(url, payload, headers=None, timeout=25):
     data = json.dumps(payload).encode()
     hdrs = {
@@ -187,10 +264,11 @@ def fyers_login(env, log):
         redirect = "http://127.0.0.1:15000/fyers/callback"
     app_type = app_id.split("-")[1] if "-" in app_id else "100"
 
+    s = _HttpSession()
     s_headers = {"User-Agent": _UA, "Accept": "application/json"}
 
     log("fyers", "sending TOTP challenge to Fyers (vagator)")
-    r1 = _post_json(
+    r1 = s.post(
         "https://api-t2.fyers.in/vagator/v2/send_login_otp_v2",
         {"fy_id": _b64(fy_id), "app_id": "2"},
         headers=s_headers,
@@ -207,7 +285,7 @@ def fyers_login(env, log):
         if 0 < wait < 30:
             log("fyers", "aligning to a fresh TOTP window (~%ds)" % wait)
             time.sleep(wait)
-        r2 = _post_json(
+        r2 = s.post(
             "https://api-t2.fyers.in/vagator/v2/verify_otp",
             {"request_key": rk1, "otp": _totp_now(totp_key)},
             headers=s_headers,
@@ -219,7 +297,7 @@ def fyers_login(env, log):
         if r2.get("code") == -1003:
             continue
         if r2.get("code") in (-1002, -1004):
-            r1 = _post_json(
+            r1 = s.post(
                 "https://api-t2.fyers.in/vagator/v2/send_login_otp_v2",
                 {"fy_id": _b64(fy_id), "app_id": "2"},
                 headers=s_headers,
@@ -229,7 +307,7 @@ def fyers_login(env, log):
         return None, f"verify_otp (TOTP rejected): {json.dumps(last)[:200]}"
     log("fyers", "TOTP accepted")
 
-    r3 = _post_json(
+    r3 = s.post(
         "https://api-t2.fyers.in/vagator/v2/verify_pin_v2",
         {"request_key": rk2, "identity_type": "pin", "identifier": _b64(pin)},
         headers=s_headers,
@@ -250,7 +328,7 @@ def fyers_login(env, log):
 
     def _mint_code(vagator_token):
         for apt in dict.fromkeys([app_type, "100"]):
-            r4 = _post_json(
+            r4 = s.post(
                 "https://api.fyers.in/api/v2/token",
                 {
                     "fyers_id": fy_id,
@@ -289,7 +367,7 @@ def fyers_login(env, log):
         if not auth_code:
             return None, mint_err_holder[0] or "token step failed"
         csrf = hashlib.sha256(f"{app_id}:{sec}".encode()).hexdigest()
-        r5 = _post_json(
+        r5 = s.post(
             "https://api-t1.fyers.in/api/v3/validate-authcode",
             {"grant_type": "authorization_code", "appIdHash": csrf, "code": auth_code},
             headers=s_headers,
@@ -320,22 +398,21 @@ def flattrade_login(env, log):
     if not (api_key and api_secret and uid and pwd and totp_val):
         return None, "missing FLATTRADE_USER_ID / PASSWORD / TOTP_KEY / API_KEY / API_SECRET"
 
+    s = _HttpSession()
     headers = {"User-Agent": _UA, "Referer": "https://auth.flattrade.in/"}
 
     log("flattrade", "opening Flattrade auth session")
-    req = urllib.request.Request(
+    sid = (s.post_text(
         "https://authapi.flattrade.in/auth/session",
-        data=b"",
+        payload={},
         headers=headers,
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        sid = r.read().decode().strip().strip('"')
+        timeout=30,
+    ) or "").strip().strip('"')
     if not sid:
         return None, "auth/session returned no sid"
 
     log("flattrade", "submitting credentials + TOTP")
-    r = _post_json(
+    r = s.post(
         "https://authapi.flattrade.in/ftauth",
         {
             "UserName": uid,
@@ -365,7 +442,7 @@ def flattrade_login(env, log):
     log("flattrade", "login accepted — exchanging request code for session token")
 
     digest = hashlib.sha256(f"{api_key}{code}{api_secret}".encode()).hexdigest()
-    tok = _post_json(
+    tok = s.post(
         "https://authapi.flattrade.in/trade/apitoken",
         {"api_key": api_key, "request_code": code, "api_secret": digest},
         headers=headers,
