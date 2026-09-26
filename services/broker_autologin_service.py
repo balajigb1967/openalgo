@@ -239,47 +239,55 @@ def fyers_login(env, log):
         return None, f"verify_pin_v2 (PIN rejected): {json.dumps(r3)[:200]}"
     log("fyers", "PIN verified — minting app auth code")
 
-    auth_code, mint_err = "", ""
-    for apt in dict.fromkeys([app_type, "100"]):
-        r4 = _post_json(
-            "https://api.fyers.in/api/v2/token",
-            {
-                "fyers_id": fy_id,
-                "app_id": app_id[:-4],
-                "redirect_uri": redirect,
-                "appType": apt,
-                "code_challenge": "",
-                "state": "abcdefg",
-                "scope": "",
-                "nonce": "",
-                "response_type": "code",
-                "create_cookie": True,
-            },
-            headers={"authorization": f"Bearer {vagator}"},
-        )
-        url = r4.get("Url", "") or ""
-        if url:
-            auth_code = urllib.parse.parse_qs(
-                urllib.parse.urlparse(url).query
-            ).get("auth_code", [""])[0]
-        if auth_code:
-            break
-        mint_err = f"token step (appType {apt}): {json.dumps(r4)[:160]}"
-        if "-348" not in mint_err and "-352" not in mint_err:
-            return None, mint_err
-    if not auth_code:
-        return None, mint_err
-    log("fyers", "auth code minted — exchanging for access token")
-
-    # A wrong appIdHash BURNS the auth code, so try every candidate secret:
-    # the OpenAlgo instance's BROKER_API_SECRET (the app the daily web
-    # login uses) first, then FYERS_SECRET_KEY (broker_creds.env).
+    # A wrong appIdHash BURNS the auth code, so never reuse one: mint a
+    # FRESH auth code for each candidate secret and validate immediately.
+    # Order: the OpenAlgo instance's BROKER_API_SECRET (the app the daily
+    # web login uses) first, then FYERS_SECRET_KEY (broker_creds.env).
     oa_secret = env.get("BROKER_API_SECRET", "").strip().strip("'\"")
     secrets = [s for s in dict.fromkeys([oa_secret, app_secret]) if s]
     last_err = "no secret available"
+    mint_err_holder = [""]
+
+    def _mint_code(vagator_token):
+        for apt in dict.fromkeys([app_type, "100"]):
+            r4 = _post_json(
+                "https://api.fyers.in/api/v2/token",
+                {
+                    "fyers_id": fy_id,
+                    "app_id": app_id[:-4],
+                    "redirect_uri": redirect,
+                    "appType": apt,
+                    "code_challenge": "",
+                    "state": "abcdefg",
+                    "scope": "",
+                    "nonce": "",
+                    "response_type": "code",
+                    "create_cookie": True,
+                },
+                headers={"authorization": f"Bearer {vagator_token}"},
+            )
+            url = r4.get("Url", "") or ""
+            code = ""
+            if url:
+                code = urllib.parse.parse_qs(
+                    urllib.parse.urlparse(url).query
+                ).get("auth_code", [""])[0]
+            if code:
+                return code
+            mint_err = f"token step (appType {apt}): {json.dumps(r4)[:160]}"
+            if "-348" not in mint_err and "-352" not in mint_err:
+                mint_err_holder[0] = mint_err
+                return None
+        return None
+
     for i, sec in enumerate(secrets):
-        label = f"secret#{i + 1} ({'instance BROKER_API_SECRET' if sec == oa_secret else 'FYERS_SECRET_KEY'})"
-        log("fyers", f"validating auth code with {label}")
+        label = (
+            "instance BROKER_API_SECRET" if sec == oa_secret else "FYERS_SECRET_KEY"
+        )
+        log("fyers", f"minting auth code (attempt {i + 1}, will validate with {label})")
+        auth_code = _mint_code(vagator)
+        if not auth_code:
+            return None, mint_err_holder[0] or "token step failed"
         csrf = hashlib.sha256(f"{app_id}:{sec}".encode()).hexdigest()
         r5 = _post_json(
             "https://api-t1.fyers.in/api/v3/validate-authcode",
@@ -288,7 +296,7 @@ def fyers_login(env, log):
         )
         access = r5.get("access_token", "")
         if access:
-            log("fyers", "access token received")
+            log("fyers", f"access token received ({label} was the right secret)")
             return access, None
         last_err = f"validate-authcode ({label}): {json.dumps(r5)[:200]}"
         log("fyers", last_err)
@@ -544,6 +552,11 @@ def _peer_post(env, path, payload, timeout=20):
 # job plumbing
 # ---------------------------------------------------------------------------
 def _job_step(job, step, status, detail=""):
+    # Driver helpers log positionally as log(broker, message); fold those
+    # into the standard (step, status, detail) shape so the UI renders them.
+    if status not in ("run", "success", "error"):
+        detail = detail or status
+        status = "run"
     entry = {"ts": time.strftime("%H:%M:%S"), "step": step, "status": status, "detail": detail}
     job["steps"].append(entry)
     if status == "run":
