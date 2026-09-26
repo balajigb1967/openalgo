@@ -22,6 +22,7 @@ from flask import Blueprint, jsonify, redirect, request, session
 
 from services.broker_autologin_service import (
     get_job,
+    promote_session,
     start_dual,
     start_local,
     status_snapshot,
@@ -232,4 +233,13 @@ def autologin_job(job_id):
     job = get_job(job_id)
     if not job:
         return jsonify({"status": "error", "message": "unknown job"}), 404
+    # On success, promote THIS caller's web session to logged-in — the poll
+    # request itself carries the session cookie, so Flask writes the updated
+    # session onto the response and the next app page / API call is fully
+    # broker-authenticated. Server-side token never leaves the process.
+    if job.get("done") and job.get("state") == "success" and user:
+        try:
+            promote_session(user)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"session promotion failed: {e}")
     return jsonify({"status": "success", "job": job})

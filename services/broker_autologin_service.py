@@ -352,41 +352,85 @@ def flattrade_login(env, log):
 # in-process session wiring (replaces the standalone script's DB seeding)
 # ---------------------------------------------------------------------------
 def _apply_token_inprocess(broker, token, username, log):
-    """Feed the fresh token through the app's own login machinery:
-    handle_auth_success upserts the auth row, registers the session and
-    kicks the smart master-contract download — exactly like a web login.
+    """Persist the fresh broker token the same way a web login would —
+    upsert_auth writes/refreshes the auth row, init_broker_status + the
+    smart master-contract download run, and the in-memory auth caches are
+    dropped so the next API call reads the new token.
 
-    Runs in the CALLER's request context, so a cookie-authenticated caller
-    (mobile app / desktop browser) gets the logged_in session written back
-    onto their session cookie by the response. API-key callers (peer
-    instance) get the DB side effects, which is what their API reads."""
-    from flask import session
-
-    from utils.auth_utils import handle_auth_success
+    NOTE: this runs in the job THREAD, so there is deliberately no request
+    context and no session mutation here (handle_auth_success also touches
+    the request session — that part belongs to the caller's own request;
+    see promote_session(), which the job-poll endpoint calls). The session
+    id registered here is a synthetic autologin one, tracked in
+    active_sessions like any other device.
+    """
+    from database.auth_db import auth_cache, feed_token_cache, upsert_auth
+    from database.master_contract_status_db import init_broker_status
+    from utils.auth_utils import (  # noqa: F401 — import validates wiring
+        should_download_master_contract,
+    )
 
     if not username:
         return False, "could not resolve the OpenAlgo user for this request"
-    if not session.get("user"):
-        session["user"] = username  # API-key path: give the machinery a user
-    rv = handle_auth_success(
-        auth_token=token,
-        user_session_key=username,
-        broker=broker,
-    )
-    _ = rv  # JSON/redirect return value irrelevant here
-    log(broker, "token stored via handle_auth_success (auth row + master contracts)")
+
+    inserted = upsert_auth(username, token, broker)
+    if not inserted:
+        return False, "upsert_auth failed (auth row not written)"
+    init_broker_status(broker)
+    log(broker, "auth row updated (token stored server-side, never sent to clients)")
+
+    # Smart master-contract download on a daemon thread, exactly like
+    # handle_auth_success does after a web login.
+    try:
+        from database.master_contract_status_db import get_last_download_time
+        from utils.auth_utils import async_master_contract_download
+
+        should_download, reason = should_download_master_contract(broker)
+        log(broker, f"master contracts: download={should_download} ({reason})")
+        if should_download:
+            t = threading.Thread(
+                target=async_master_contract_download, args=(broker,), daemon=True
+            )
+            t.start()
+        else:
+            _reload_symbol_cache(broker, username, log)
+    except Exception as e:  # noqa: BLE001
+        log(broker, f"master contract trigger failed (non-fatal): {e}")
 
     # drop in-memory auth caches so the next API call reads the fresh token
     try:
-        from database.auth_db import auth_cache, feed_token_cache
-
         auth_cache.pop(f"auth-{username}", None)
         feed_token_cache.pop(f"feed-{username}", None)
     except Exception as e:  # noqa: BLE001
         log(broker, f"cache clear skipped: {e}")
 
-    _reload_symbol_cache(broker, username, log)
     return True, "ok"
+
+
+def promote_session(username):
+    """Promote the CALLER's web session to logged-in after a successful
+    autologin. Called from the job-poll endpoint INSIDE the polling request,
+    so Flask writes the updated session onto that response's cookie — the
+    same mechanism as the browser login. Must be idempotent and cheap."""
+    from flask import session
+
+    from database.auth_db import get_auth_token
+
+    if session.get("user") != username:
+        return
+    if get_auth_token(username) is None:
+        return
+    session["logged_in"] = True
+    session["broker"] = _instance_broker()
+    if not session.get("login_time"):
+        from utils.session import set_session_login_time
+
+        set_session_login_time()
+
+
+def _instance_broker():
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return "flattrade" if "flattrade" in here.lower() else "fyers"
 
 
 def _reload_symbol_cache(broker, username, log):
