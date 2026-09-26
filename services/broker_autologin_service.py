@@ -329,7 +329,10 @@ def fyers_login(env, log):
     def _mint_code(vagator_token):
         for apt in dict.fromkeys([app_type, "100"]):
             r4 = s.post(
-                "https://api.fyers.in/api/v2/token",
+                # api/v3/token: Fyers retired v2-minted auth codes — a code
+                # minted at api.fyers.in/api/v2/token still comes back with a
+                # Url but no longer validates at v3 validate-authcode.
+                "https://api-t1.fyers.in/api/v3/token",
                 {
                     "fyers_id": fy_id,
                     "app_id": app_id[:-4],
