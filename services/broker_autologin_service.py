@@ -277,7 +277,9 @@ def fyers_login(env, log):
     oa_secret = env.get("BROKER_API_SECRET", "").strip().strip("'\"")
     secrets = [s for s in dict.fromkeys([oa_secret, app_secret]) if s]
     last_err = "no secret available"
-    for sec in secrets:
+    for i, sec in enumerate(secrets):
+        label = f"secret#{i + 1} ({'instance BROKER_API_SECRET' if sec == oa_secret else 'FYERS_SECRET_KEY'})"
+        log("fyers", f"validating auth code with {label}")
         csrf = hashlib.sha256(f"{app_id}:{sec}".encode()).hexdigest()
         r5 = _post_json(
             "https://api-t1.fyers.in/api/v3/validate-authcode",
@@ -288,7 +290,8 @@ def fyers_login(env, log):
         if access:
             log("fyers", "access token received")
             return access, None
-        last_err = f"validate-authcode: {json.dumps(r5)[:200]}"
+        last_err = f"validate-authcode ({label}): {json.dumps(r5)[:200]}"
+        log("fyers", last_err)
     return None, last_err
 
 
@@ -716,7 +719,8 @@ def start_dual(username) -> str:
                 results[peer_broker] = "error"
             else:
                 while True:
-                    pj = _peer_get(env, f"/autologin/job/{pjob}")
+                    presp = _peer_get(env, f"/autologin/job/{pjob}")
+                    pj = (presp or {}).get("job") or {}
                     if pj and pj.get("done"):
                         for s in pj.get("steps", []):
                             _job_step(
