@@ -271,17 +271,25 @@ def fyers_login(env, log):
         return None, mint_err
     log("fyers", "auth code minted — exchanging for access token")
 
-    csrf = hashlib.sha256(f"{app_id}:{app_secret}".encode()).hexdigest()
-    r5 = _post_json(
-        "https://api-t1.fyers.in/api/v3/validate-authcode",
-        {"grant_type": "authorization_code", "appIdHash": csrf, "code": auth_code},
-        headers=s_headers,
-    )
-    access = r5.get("access_token", "")
-    if not access:
-        return None, f"validate-authcode: {json.dumps(r5)[:200]}"
-    log("fyers", "access token received")
-    return access, None
+    # A wrong appIdHash BURNS the auth code, so try every candidate secret:
+    # the OpenAlgo instance's BROKER_API_SECRET (the app the daily web
+    # login uses) first, then FYERS_SECRET_KEY (broker_creds.env).
+    oa_secret = env.get("BROKER_API_SECRET", "").strip().strip("'\"")
+    secrets = [s for s in dict.fromkeys([oa_secret, app_secret]) if s]
+    last_err = "no secret available"
+    for sec in secrets:
+        csrf = hashlib.sha256(f"{app_id}:{sec}".encode()).hexdigest()
+        r5 = _post_json(
+            "https://api-t1.fyers.in/api/v3/validate-authcode",
+            {"grant_type": "authorization_code", "appIdHash": csrf, "code": auth_code},
+            headers=s_headers,
+        )
+        access = r5.get("access_token", "")
+        if access:
+            log("fyers", "access token received")
+            return access, None
+        last_err = f"validate-authcode: {json.dumps(r5)[:200]}"
+    return None, last_err
 
 
 def flattrade_login(env, log):
@@ -629,8 +637,9 @@ def start_local(broker, username) -> str:
 # dual-broker orchestration
 # ---------------------------------------------------------------------------
 def _peer_broker(env):
-    """The peer instance's broker, from its /autologin/status answer."""
-    st = _peer_get(env, "/autologin/status")
+    """The peer instance's broker, from its /autologin/status answer.
+    nested=1 stops the peer from probing ITS peer back (mutual recursion)."""
+    st = _peer_get(env, "/autologin/status?nested=1")
     if st and st.get("status") == "success":
         return st.get("broker")
     return None
@@ -735,14 +744,16 @@ def start_dual(username) -> str:
     return job["id"]
 
 
-def status_snapshot(username=None):
+def status_snapshot(username=None, nested=False):
     """Everything the UI needs in one call: which broker is this instance,
     is the broker session live, are creds present for auto-login, and the
     peer's mirror snapshot.
 
     [username] is the request's resolved OpenAlgo user — API-key callers
     have no Flask session, so the broker-token check keys off the auth row
-    directly instead of the session."""
+    directly instead of the session. [nested] is set when the caller is
+    the OTHER OpenAlgo instance: its answer must not probe back or the two
+    instances would recurse into each other until timeout."""
     env = _load_all_env()
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     broker = "flattrade" if "flattrade" in here.lower() else "fyers"
@@ -794,7 +805,7 @@ def status_snapshot(username=None):
         in ("1", "true", "yes"),
         "dual_supported": bool(_peer_base(env)) and creds_ok.get(broker),
     }
-    peer = _peer_get(env, "/autologin/status")
+    peer = None if nested else _peer_get(env, "/autologin/status?nested=1")
     if peer and peer.get("status") == "success":
         snap["peer"] = {
             "broker": peer.get("broker"),

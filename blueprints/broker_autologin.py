@@ -192,7 +192,9 @@ def autologin_status():
     user, err = _resolve_user()
     if err:
         return err
-    return jsonify(status_snapshot(user))
+    # nested=1: the caller is the peer OpenAlgo instance — do not probe back
+    nested = request.args.get("nested") == "1"
+    return jsonify(status_snapshot(user, nested=nested))
 
 
 @autologin_bp.route("/autologin/run", methods=["POST"])
