@@ -13,6 +13,8 @@ const KIND_LABEL: Record<ChartObjectSnapshot['kind'], string> = {
   indicator: 'Indicator',
   drawing: 'Drawing',
   profile: 'Profile',
+  // openalgo-charts 2.5.6 added the 'group' kind (named collections of objects)
+  group: 'Group',
 }
 const NO_OBJECTS: readonly ChartObjectSnapshot[] = Object.freeze([])
 
