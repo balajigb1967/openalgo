@@ -146,6 +146,16 @@ def _post_json(url, payload, headers=None, timeout=25):
             body = r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:  # keep the error body for diagnosis
         body = e.read().decode("utf-8", "replace")
+        # Fyers' token-mint step answers HTTP 308 with the auth-code URL in
+        # the JSON BODY (no Location header) — parse non-2xx bodies as JSON
+        # whenever possible instead of hiding them behind an error wrapper.
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                parsed["_http"] = e.code
+                return parsed
+        except Exception:
+            pass
         return {"_http": e.code, "_raw": body[:400], "_url": url}
     try:
         return json.loads(body)
@@ -505,8 +515,9 @@ def _peer_get(env, path, timeout=15):
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8", "replace"))
-    except Exception:
-        return None
+    except Exception as e:  # noqa: BLE001 — surfaced to the caller/log
+        logger.warning(f"peer call {path} failed: {e}")
+        return {"_error": str(e)}
 
 
 def _peer_post(env, path, payload, timeout=20):
@@ -579,6 +590,7 @@ def _run_local_broker(job, broker, env, username, log):
         else:
             token, err = flattrade_login(env, log)
         if not token:
+            _job_step(job, f"{broker} login", "error", err or "broker login failed")
             _finish(job, False, err or "broker login failed")
             return
 
