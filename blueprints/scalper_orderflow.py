@@ -324,11 +324,12 @@ def market_brief_route():
 @scalper_orderflow_bp.route("/news", methods=["GET"])
 @app_key_required
 def news_route():
-    """Merged RSS headlines (Indian + global). Query: limit, refresh=1."""
+    """Merged RSS headlines (Indian + global). Query: limit, refresh=1, ai=1."""
     try:
         limit = min(100, max(10, int(request.args.get("limit") or 60)))
         refresh = (request.args.get("refresh") in ("1", "true", "yes"))
-        return jsonify(fetch_news(limit=limit, refresh=refresh))
+        ai = (request.args.get("ai") in ("1", "true", "yes"))
+        return jsonify(fetch_news(limit=limit, refresh=refresh, ai=ai))
     except Exception as e:
         logger.exception(f"news failed: {e}")
         return jsonify({"status": "error", "message": f"News failed: {e}"}), 500
@@ -337,14 +338,15 @@ def news_route():
 @scalper_orderflow_bp.route("/news/symbol", methods=["GET"])
 @app_key_required
 def news_symbol_route():
-    """TradingView headlines + RSS for one symbol. Query: symbol, limit."""
+    """TradingView headlines + RSS for one symbol. Query: symbol, limit, ai=1."""
     try:
         symbol = request.args.get("symbol") or "NSE:NIFTY"
         limit = min(80, max(10, int(request.args.get("limit") or 40)))
-        return jsonify(fetch_symbol_news(symbol, limit))
+        ai = (request.args.get("ai") in ("1", "true", "yes"))
+        return jsonify(fetch_symbol_news(symbol, limit, ai=ai))
     except Exception as e:
         logger.exception(f"symbol news failed: {e}")
-        return jsonify({"status": "error", "message": f"Symbol news failed: {e}"}), 500
+        return jsonify({"status": "error", "message": f"Symbol news overlay failed: {e}"}), 500
 
 
 # ---------------------------------------------------------------------------

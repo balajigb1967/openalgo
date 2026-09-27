@@ -133,14 +133,22 @@ def _tv_general_headlines(limit: int = 25) -> list:
     return out
 
 
-def fetch_news(limit=60, refresh=False) -> dict:
+def fetch_news(limit=60, refresh=False, ai=False) -> dict:
     """All feeds merged, deduped, newest-first (cached 2 min).
 
     TradingView's wire headlines are merged in alongside the RSS feeds so the
     panel (desktop and mobile, which shares these routes) gets wire-speed
-    global headlines, not just the Indian RSS cycle."""
+    global headlines, not just the Indian RSS cycle.
+
+    [ai] enriches the returned slice with FCC-AI summaries (ai_summary +
+    impact) through the same local proxy the market brief uses — cached per
+    headline for 15 minutes, so the model is only asked for new headlines.
+    """
     if not refresh and _CACHE["data"] and time.time() - _CACHE["ts"] < _CACHE_TTL:
-        return {"source": "rss", "articles": _CACHE["data"][:limit]}
+        articles = _CACHE["data"][:limit]
+        if ai:
+            articles = _ai_enrich(articles)
+        return {"source": "rss", "articles": articles}
     articles = []
     seen = set()
     # TradingView first: freshest wire copy wins the dedupe.
@@ -161,7 +169,26 @@ def fetch_news(limit=60, refresh=False) -> dict:
             log.warning("news feed %s failed: %s", name, ex)
     articles.sort(key=lambda a: a.get("published", 0), reverse=True)
     _CACHE.update(ts=time.time(), data=articles)
-    return {"source": "rss", "articles": articles[:limit]}
+    articles = articles[:limit]
+    if ai:
+        articles = _ai_enrich(articles)
+    return {"source": "rss", "articles": articles}
+
+
+def _ai_enrich(articles: list) -> list:
+    """FCC-AI summaries for a news slice (best effort, never raises).
+
+    Reuses the market-brief enrichment: <=60-word trader-focused summaries
+    plus a BULLISH/BEARISH/NEUTRAL impact tag, cached per headline for 15
+    minutes, all missing headlines batched into ONE model call. Any failure
+    (proxy down, timeout, bad JSON) leaves the articles raw.
+    """
+    try:
+        from services.market_brief_service import _enrich_news_with_fcc
+        return _enrich_news_with_fcc(list(articles), allow_call=True)
+    except Exception as e:  # noqa: BLE001 — enrichment is optional
+        log.debug("news ai enrichment failed: %s", e)
+        return articles
 
 
 BULLISH_KEYWORDS = ["gain", "rise", "jump", "rally", "profit", "growth", "high", "up", "surge",
@@ -261,7 +288,7 @@ def _tv_symbol_for(sym_body: str, exchange: str) -> list:
     return [f"{exchange}:{sym_body}", f"NSE:{sym_body}", sym_body]
 
 
-def fetch_symbol_news(symbol: str, limit: int = 50) -> dict:
+def fetch_symbol_news(symbol: str, limit: int = 50, ai: bool = False) -> dict:
     """Symbol news: TradingView headlines + keyword-matched RSS, source breakdown."""
     empty = {"symbol": "", "count": 0, "sources": [{"name": "All", "count": 0}], "items": []}
     if not symbol:
@@ -358,6 +385,8 @@ def fetch_symbol_news(symbol: str, limit: int = 50) -> dict:
 
     filtered.sort(key=lambda x: x.get("published", 0), reverse=True)
     filtered = filtered[:limit]
+    if ai:
+        filtered = _ai_enrich(filtered)
 
     source_counts = {}
     for item in filtered:
