@@ -116,6 +116,19 @@ def _totp_now(secret):
         return _totp(secret)
 
 
+def _totp_wait_fresh_window(secret, log, broker):
+    """Align to a fresh 30s TOTP window, then generate the code at its
+    start — so the code cannot roll between generation and the broker's
+    validation. A rolled code is counted as a WRONG attempt and Flattrade
+    blocks the account after several ("User Blocked due to multiple wrong
+    attempts"). Returns the fresh code."""
+    wait = 30 - (int(time.time()) % 30) + 1
+    if 0 < wait < 30:
+        log(broker, "aligning to a fresh TOTP window (~%ds)" % wait)
+        time.sleep(wait)
+    return _totp_now(secret)
+
+
 def _b64(s):
     import base64
 
@@ -280,14 +293,11 @@ def fyers_login(env, log):
     rk2, last = "", {}
     for _attempt in range(2):
         # align to a fresh TOTP window — a code that rolls between send and
-        # verify is rejected with -1003
-        wait = 30 - (int(time.time()) % 30) + 1
-        if 0 < wait < 30:
-            log("fyers", "aligning to a fresh TOTP window (~%ds)" % wait)
-            time.sleep(wait)
+        # verify is rejected with -1003 (and burns a wrong attempt)
+        otp = _totp_wait_fresh_window(totp_key, log, "fyers")
         r2 = s.post(
             "https://api-t2.fyers.in/vagator/v2/verify_otp",
-            {"request_key": rk1, "otp": _totp_now(totp_key)},
+            {"request_key": rk1, "otp": otp},
             headers=s_headers,
         )
         last = r2
@@ -414,14 +424,18 @@ def flattrade_login(env, log):
     if not sid:
         return None, "auth/session returned no sid"
 
-    log("flattrade", "submitting credentials + TOTP")
+    # Generate the TOTP at the start of a fresh 30s window: ftauth rejects a
+    # code that rolls between generation and Flattrade's validation, and every
+    # rejection counts toward Flattrade's wrong-attempt account lockout.
+    log("flattrade", "aligning TOTP window, then submitting credentials + TOTP")
+    totp_code = _totp_wait_fresh_window(totp_val, log, "flattrade")
     r = s.post(
         "https://authapi.flattrade.in/ftauth",
         {
             "UserName": uid,
             "Rd": "",
             "Password": hashlib.sha256(pwd.encode()).hexdigest(),
-            "PAN_DOB": _totp_now(totp_val),
+            "PAN_DOB": totp_code,
             "App": "",
             "ClientID": "",
             "Key": "",
@@ -432,8 +446,37 @@ def flattrade_login(env, log):
         },
         headers={**headers, "Origin": "https://auth.flattrade.in"},
     )
-    if r.get("emsg"):
-        return None, f"ftauth rejected (credentials/TOTP): {r['emsg']}"
+    emsg = r.get("emsg", "") or ""
+    if emsg:
+        # One aligned retry only when the rejection looks like a TOTP timing
+        # miss — never on credential errors (each wrong attempt counts toward
+        # Flattrade's account lockout).
+        looks_totp = any(
+            w in emsg.lower() for w in ("totp", "otp", "pan_dob", "invalid code")
+        )
+        if looks_totp:
+            log("flattrade", "ftauth TOTP rejected (%s) — retrying on a fresh window" % emsg[:80])
+            totp_code = _totp_wait_fresh_window(totp_val, log, "flattrade")
+            r = s.post(
+                "https://authapi.flattrade.in/ftauth",
+                {
+                    "UserName": uid,
+                    "Rd": "",
+                    "Password": hashlib.sha256(pwd.encode()).hexdigest(),
+                    "PAN_DOB": totp_code,
+                    "App": "",
+                    "ClientID": "",
+                    "Key": "",
+                    "APIKey": api_key,
+                    "Sid": sid,
+                    "Override": "Y",
+                    "Source": "AUTHPAGE",
+                },
+                headers={**headers, "Origin": "https://auth.flattrade.in"},
+            )
+            emsg = r.get("emsg", "") or ""
+        if emsg:
+            return None, f"ftauth rejected (credentials/TOTP): {emsg}"
     redirect = r.get("RedirectURL", "") or ""
     code = ""
     if redirect:
