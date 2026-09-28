@@ -46,6 +46,8 @@ def app():
 def _seed(app, rows):
     """rows: list of (session_id, label). Registers sessions for balajigb."""
     with app.app_context():
+        # The test DB file starts empty; auth_db never creates its schema.
+        auth_db.Base.metadata.create_all(bind=auth_db.engine)
         for sid, label in rows:
             auth_db.register_session(
                 "balajigb", sid, device_info=label, ip_address="127.0.0.1"
