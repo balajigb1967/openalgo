@@ -1324,9 +1324,36 @@ def logout():
     was_logged_in = bool(session.get("logged_in"))
     username = session.get("user")
 
+    # scope=self: end ONLY this device's web session. The shared broker auth
+    # token and every OTHER device's session stay intact — a mobile logout
+    # must not kill the desktop broker login (or vice versa). The default
+    # scope remains the historical global teardown ("logout everywhere").
+    self_only = (
+        request.args.get("scope") == "self"
+        or (request.is_json
+            and (request.get_json(silent=True) or {}).get("scope") == "self")
+    )
+    own_session_id = session.get("session_id")
+
     # Wipe the browser session before teardown so a revocation or notification
     # failure cannot leave the user stuck in a half-logged-in state.
     session.clear()
+
+    if was_logged_in and username and self_only and own_session_id:
+        from database.auth_db import remove_session
+
+        remove_session(own_session_id)
+        logger.info(
+            f"scope=self logout: removed session {own_session_id[:8]}… for "
+            f"{username} (broker token and other devices untouched)"
+        )
+        if request.method == "POST":
+            return jsonify({
+                "status": "success",
+                "message": "Logged out on this device",
+                "scope": "self",
+            })
+        return redirect(url_for("auth.login"))
 
     if was_logged_in and username:
         # Clear cache entries before database update to prevent stale data access
