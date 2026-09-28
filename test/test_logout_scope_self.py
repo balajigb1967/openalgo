@@ -107,12 +107,16 @@ def test_desktop_logout_still_revokes_everything(app, monkeypatch):
 
     calls = []
     monkeypatch.setattr(
-        auth_module, "upsert_auth", lambda *a, **k: calls.append(a) or 1
+        auth_module,
+        "upsert_auth",
+        lambda *a, **k: calls.append((a, k)) or 1,
     )
     rv = client.post("/auth/logout")  # no scope → global teardown
     assert rv.status_code == 200
 
-    assert len(calls) == 1 and calls[0][2] is True  # revoke=True
+    assert len(calls) == 1
+    assert calls[0][0] == ("balajigb", "", "")
+    assert calls[0][1].get("revoke") is True
     assert _session_ids(app) == set()  # every device logged out
 
 
@@ -129,9 +133,12 @@ def test_self_logout_without_session_id_falls_back_to_global(app, monkeypatch):
 
     calls = []
     monkeypatch.setattr(
-        auth_module, "upsert_auth", lambda *a, **k: calls.append(a) or 1
+        auth_module,
+        "upsert_auth",
+        lambda *a, **k: calls.append((a, k)) or 1,
     )
     rv = client.post("/auth/logout?scope=self")
     assert rv.status_code == 200
-    assert len(calls) == 1 and calls[0][2] is True
+    assert len(calls) == 1
+    assert calls[0][1].get("revoke") is True
     assert _session_ids(app) == set()
